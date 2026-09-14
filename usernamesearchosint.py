@@ -14,7 +14,7 @@ from threading import Lock
 from typing import Any
 
 import requests
-from flask import Flask, render_template, request, session
+from flask import Flask, jsonify, render_template, request, session
 from requests import Response
 from werkzeug.exceptions import BadRequest
 
@@ -230,7 +230,12 @@ def security_headers(response):
 
 @app.route("/")
 def index():
-    return render_template("index.html", csrf_token=csrf_token())
+    return (
+        "UsernameSearchOSINT online. Servico Flask ativo. "
+        "Use /health para verificar o status.\n",
+        200,
+        {"Content-Type": "text/plain; charset=utf-8"},
+    )
 
 
 @app.get("/health")
@@ -247,13 +252,14 @@ def osint_search():
         raise BadRequest("Invalid form token.")
     username = request.form.get("username", "").strip()
     if not valid_username(username):
-        return render_template(
-            "index.html",
-            error="Use 1–64 characters: letters, numbers, dot, underscore or hyphen.",
-            csrf_token=csrf_token(),
-        ), 400
+        return (
+            "Nome de usuario invalido. Use de 1 a 64 caracteres: letras, "
+            "numeros, ponto, sublinhado ou hifen.\n",
+            400,
+            {"Content-Type": "text/plain; charset=utf-8"},
+        )
     results = OSINTTool(username).run_checks()
-    return render_template("results.html", username=username, results=results)
+    return jsonify({"username": username, "results": results})
 
 
 if __name__ == "__main__":
