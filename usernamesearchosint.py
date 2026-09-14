@@ -1,4 +1,4 @@
-"""Small, defensive username availability checker.
+"""Small, defensive username availability checker with Telegram Bot integration.
 
 Only checks public profile URLs supplied by the built-in provider list. A result is
 never proof that two profiles belong to the same person.
@@ -9,18 +9,7 @@ import logging
 import os
 import re
 import secrets
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
-from typing import Any
-
-#pega o token de forma segura do sistema
-token = os.getenv("TELEGRAM_TOKEN")
-from __future__ import annotations
-
-import logging
-import os
-import re
-import secrets
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any
@@ -31,36 +20,14 @@ from flask import Flask, jsonify, render_template, request, session
 from requests import Response
 from werkzeug.exceptions import BadRequest
 
-# Pega o token de forma segura do sistema
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-# Inicializa o bot do Telegram se o token existir
-bot = telebot.TeleBot(TOKEN) if TOKEN else None
-
-if bot:
-    @bot.message_handler(commands=['start'])
-    def send_welcome(message):
-        bot.reply_to(message, "Olá! O bot UsernameOSINT está ativo e pronto para uso.") 
-        if __name__ == '__main__':
-    if bot:
-        # Executa o bot do Telegram em segundo plano ou em loop
-        import threading
-        threading.Thread(target=bot.infinity_polling, daemon=True).start()
-    
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
-
-
-import requests
-from flask import Flask, jsonify, render_template, request, session
-from requests import Response
-from werkzeug.exceptions import BadRequest
-
+# Configuração de Logs
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+# Configuração da Aplicação Flask
 app = Flask(__name__)
 app.config.update(
     SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
@@ -139,8 +106,6 @@ PLATFORM_URLS = {
     "Internet Archive": "https://archive.org/details/@{username}",
 }
 
-# Common provider pages returned for unknown/removed accounts. These markers help
-# avoid declaring every CDN/SPA 200 page as an account match.
 NOT_FOUND_MARKERS = {
     "gitlab": ("the page you're looking for doesn't exist",),
     "bitbucket": ("this page doesn't exist",),
@@ -256,6 +221,46 @@ class OSINTTool:
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
 
+# --- INICIALIZAÇÃO DO BOT DO TELEGRAM ---
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+bot = telebot.TeleBot(TOKEN) if TOKEN else None
+
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
+        bot.reply_to(message, "Olá! O bot UsernameOSINT está ativo.\n\nEnvie um nome de usuário para realizar a busca.")
+
+    @bot.message_handler(func=lambda message: True)
+    def handle_search(message):
+        username = message.text.strip()
+        if not valid_username(username):
+            bot.reply_to(message, "Nome de usuário inválido. Use de 1 a 64 caracteres (letras, números, ponto, sublinhado ou hífen).")
+            return
+
+        bot.reply_to(message, f"Iniciando checagem para o usuário: {username}...")
+        tool = OSINTTool(username)
+        results = tool.run_checks()
+        
+        found = [p for p, data in results.items() if data.get("exists") is True]
+        if found:
+            res_text = f"Perfis encontrados para *{username}*:\n\n" + "\n".join([f"• {p}" for p in found[:20]])
+        else:
+            res_text = f"Nenhum perfil público correspondente foi encontrado para *{username}*."
+        
+        bot.reply_to(message, res_text, parse_mode="Markdown")
+
+
+def start_telegram_bot():
+    if bot:
+        logger.info("Iniciando escuta do Bot Telegram...")
+        bot.infinity_polling()
+
+
+# Inicializa a thread do Telegram ao subir o módulo
+if bot:
+    threading.Thread(target=start_telegram_bot, daemon=True).start()
+
+
 @app.after_request
 def security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -277,7 +282,6 @@ def index():
 
 @app.get("/health")
 def health():
-    """Lightweight health endpoint used by Render and uptime monitors."""
     return {"status": "ok"}, 200
 
 
