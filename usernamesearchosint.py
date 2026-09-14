@@ -231,23 +231,34 @@ if bot:
         bot.reply_to(message, "Olá! O bot UsernameOSINT está ativo.\n\nEnvie um nome de usuário para realizar a busca.")
 
     @bot.message_handler(func=lambda message: True)
+    @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         username = message.text.strip()
         if not valid_username(username):
             bot.reply_to(message, "Nome de usuário inválido. Use de 1 a 64 caracteres (letras, números, ponto, sublinhado ou hífen).")
             return
 
-        bot.reply_to(message, f"Iniciando checagem para o usuário: {username}...")
+        bot.reply_to(message, f"Iniciando checagem para o usuário: *{username}*...", parse_mode="Markdown")
         tool = OSINTTool(username)
         results = tool.run_checks()
         
-        found = [p for p, data in results.items() if data.get("exists") is True]
-        if found:
-            res_text = f"Perfis encontrados para *{username}*:\n\n" + "\n".join([f"• {p}" for p in found[:20]])
+        found_links = []
+        for platform, data in results.items():
+            if data.get("exists") is True:
+                # Pega a URL do perfil retornado ou a URL padrão da plataforma
+                url = data.get("profile_url") or data.get("url") or tool.platforms.get(platform)
+                if url:
+                    found_links.append(f"• [{platform}]({url})")
+                else:
+                    found_links.append(f"• {platform}")
+
+        if found_links:
+            # Envia em partes ou limita para não exceder o tamanho máximo de mensagem do Telegram
+            res_text = f"Perfis encontrados para *{username}*:\n\n" + "\n".join(found_links)
         else:
             res_text = f"Nenhum perfil público correspondente foi encontrado para *{username}*."
         
-        bot.reply_to(message, res_text, parse_mode="Markdown")
+        bot.reply_to(message, res_text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 def start_telegram_bot():
