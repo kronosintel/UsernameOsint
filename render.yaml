@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: username-search-osint
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT username_search_osint:app
+    healthCheckPath: /health
+    envVars:
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: MAX_WORKERS
+        value: "4"
+      - key: REQUEST_TIMEOUT
+        value: "8"
+      - key: FLASK_SECRET_KEY
+        generateValue: true
