@@ -36,6 +36,7 @@ app.config.update(
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
+PORT = int(os.getenv("PORT", "5000"))
 
 PLATFORM_URLS = {
     # Código, dados e tecnologia
@@ -232,6 +233,12 @@ def index():
     return render_template("index.html", csrf_token=csrf_token())
 
 
+@app.get("/health")
+def health():
+    """Lightweight health endpoint used by Render and uptime monitors."""
+    return {"status": "ok"}, 200
+
+
 @app.route("/osint", methods=["POST"])
 def osint_search():
     supplied_token = request.form.get("csrf_token", "")
@@ -250,4 +257,4 @@ def osint_search():
 
 
 if __name__ == "__main__":
-    app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
