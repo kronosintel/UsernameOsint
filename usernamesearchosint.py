@@ -13,6 +13,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any
 
+#pega o token de forma segura do sistema
+token = os.getenv("TELEGRAM_TOKEN")
+
+
 import requests
 from flask import Flask, jsonify, render_template, request, session
 from requests import Response
