@@ -15,6 +15,39 @@ from typing import Any
 
 #pega o token de forma segura do sistema
 token = os.getenv("TELEGRAM_TOKEN")
+from __future__ import annotations
+
+import logging
+import os
+import re
+import secrets
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from typing import Any
+
+import requests
+import telebot
+from flask import Flask, jsonify, render_template, request, session
+from requests import Response
+from werkzeug.exceptions import BadRequest
+
+# Pega o token de forma segura do sistema
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+# Inicializa o bot do Telegram se o token existir
+bot = telebot.TeleBot(TOKEN) if TOKEN else None
+
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
+        bot.reply_to(message, "Olá! O bot UsernameOSINT está ativo e pronto para uso.") 
+        if __name__ == '__main__':
+    if bot:
+        # Executa o bot do Telegram em segundo plano ou em loop
+        import threading
+        threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
 
 
 import requests
