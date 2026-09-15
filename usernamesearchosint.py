@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Monetização Pix no Mercado Pago e Relatório Detalhado."""
+"""Username OSINT Checker com Monetização Pix e Acesso Exclusivo para Administrador."""
 from __future__ import annotations
 
 import io
@@ -33,6 +33,9 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
+
+# --- SEU TELEGRAM ID EXCLUSIVO (APENAS VOCÊ TEM ACESSO GRATUITO) ---
+ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
@@ -156,17 +159,14 @@ class OSINTTool:
                 future.result()
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
-# --- GERADOR DO RELATÓRIO TÉCNICO OSINT COM DORKS E BUSCAS EXATAS ---
 def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
-    # Links de busca exata entre aspas (Exact Match Dorks)
     google_dork_exact = f"https://www.google.com/search?q=%22{username}%22"
     bing_dork_exact = f"https://www.bing.com/search?q=%22{username}%22"
     ddg_dork_exact = f"https://duckduckgo.com/?q=%22{username}%22"
     
-    # Dorks específicos para fóruns, vazamentos e comunidades
     reddit_dork = f"https://www.google.com/search?q=site:reddit.com+%22{username}%22"
     pastebin_dork = f"https://www.google.com/search?q=site:pastebin.com+%22{username}%22"
     forum_dork = f"https://www.google.com/search?q=inurl:forum+%22{username}%22"
@@ -234,6 +234,32 @@ if bot:
             "Exemplo: nome_do_alvo"
         )
 
+    # --- COMANDO EXCLUSIVO DE ADMIN (/admin <username>) ---
+    @bot.message_handler(commands=['admin'])
+    def handle_admin_command(message):
+        if message.from_user.id != ADMIN_ID:
+            bot.reply_to(message, "⛔ Acesso negado. Comando exclusivo para o Administrador.")
+            return
+
+        parts = message.text.strip().split()
+        if len(parts) < 2:
+            bot.reply_to(message, "⚠️ Uso correto: `/admin <username>`")
+            return
+
+        username = parts[1].replace("@", "")
+        bot.reply_to(message, f"⚡ Modo Admin Ativo! Gerando relatório para @{username}...")
+
+        tool = OSINTTool(username)
+        resultados = tool.run_checks()
+        documento = construir_relatorio_osint(username, resultados)
+
+        bot.send_document(
+            chat_id=message.chat.id,
+            document=documento,
+            caption=f"👑 **[ADMIN ACCESS]** Relatório OSINT Completo — @{username}"
+        )
+
+    # --- PROCESSAMENTO DE BUSCA COM DESVIO DE ADMIN ---
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         username = message.text.strip().replace("@", "")
@@ -242,6 +268,20 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
+        # SE FOR VOCÊ (ADMIN ID 5041637922), RECEBE O RELATÓRIO DIRETO
+        if message.from_user.id == ADMIN_ID:
+            bot.reply_to(message, f"👑 Olá Admin! Gerando relatório direto para @{username}...")
+            tool = OSINTTool(username)
+            resultados = tool.run_checks()
+            documento = construir_relatorio_osint(username, resultados)
+            bot.send_document(
+                chat_id=message.chat.id,
+                document=documento,
+                caption=f"📄 Relatório OSINT Completo — @{username}"
+            )
+            return
+
+        # FLUXO MONETIZADO PARA TODOS OS OUTROS USUÁRIOS (PRÉVIA + PIX R$ 9,99)
         bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
