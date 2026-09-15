@@ -17,14 +17,12 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
 from flask import Flask, jsonify, request
 
-# Configuração de Logs
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Configuração da Aplicação Flask
 app = Flask(__name__)
 app.config.update(
     SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
@@ -36,12 +34,11 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- CONFIGURAÇÃO DAS CHAVES E SDKS ---
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wIA")
-bot = telebot.TeleBot(TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
+bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
 
 PLATFORM_URLS = {
     "GitHub": "https://api.github.com/users/{username}",
@@ -208,105 +205,92 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     file_buffer.name = f"Relatorio_OSINT_{username}.txt"
     return file_buffer
 
-# --- LOGICA DE COMANDOS DO TELEGRAM ---
 if bot:
     @bot.message_handler(commands=['start', 'help'])
     def send_welcome(message):
-        try:
-            bot.reply_to(
-                message,
-                "👋 Kronos Intel — OSINT Bot\n\n"
-                "Envie qualquer nome de usuário para realizar a varredura gratuita inicial.\n"
-                "Exemplo: nome_do_alvo"
-            )
-        except Exception as e:
-            logger.error("Erro no /start: %s", str(e))
+        bot.reply_to(
+            message,
+            "👋 Kronos Intel — OSINT Bot\n\n"
+            "Envie qualquer nome de usuário para realizar a varredura gratuita inicial.\n"
+            "Exemplo: nome_do_alvo"
+        )
 
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
-        try:
-            username = message.text.strip().replace("@", "")
+        username = message.text.strip().replace("@", "")
 
-            if not valid_username(username):
-                bot.reply_to(message, "⚠️ Nome de usuário inválido.")
-                return
+        if not valid_username(username):
+            bot.reply_to(message, "⚠️ Nome de usuário inválido.")
+            return
 
-            bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
+        bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
-            tool = OSINTTool(username)
-            results = tool.run_checks()
-            encontrados = [p for p, data in results.items() if data.get("exists") is True]
+        tool = OSINTTool(username)
+        results = tool.run_checks()
+        encontrados = [p for p, data in results.items() if data.get("exists") is True]
 
-            if encontrados:
-                preview_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
-                texto_gratuito = (
-                    f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
-                    f"───────────────────────────────\n"
-                    f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                    f"🔒 Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado por apenas R$ 9,99?"
-                )
-                
-                markup = InlineKeyboardMarkup(row_width=2)
-                btn_sim = InlineKeyboardButton("✅ Sim, quero o relatório!", callback_data=f"buy_{username}")
-                btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="cancel_report")
-                markup.add(btn_sim, btn_nao)
+        if encontrados:
+            preview_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
+            texto_gratuito = (
+                f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
+                f"───────────────────────────────\n"
+                f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
+                f"🔒 Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado por apenas R$ 9,99?"
+            )
+            
+            markup = InlineKeyboardMarkup(row_width=2)
+            btn_sim = InlineKeyboardButton("✅ Sim, quero o relatório!", callback_data=f"buy_{username}")
+            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="cancel_report")
+            markup.add(btn_sim, btn_nao)
 
-                bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup)
-            else:
-                bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil padrão localizado para @{username}.")
-        except Exception as e:
-            logger.error("Erro no processamento da busca: %s", str(e))
+            bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup)
+        else:
+            bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil padrão localizado para @{username}.")
 
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
-        try:
-            if call.data.startswith("buy_"):
-                target_username = call.data.split("buy_")[1]
-                user_id = call.from_user.id
-                
-                bot.answer_callback_query(call.id, "Gerando chave Pix...")
+        if call.data.startswith("buy_"):
+            target_username = call.data.split("buy_")[1]
+            user_id = call.from_user.id
+            
+            bot.answer_callback_query(call.id, "Gerando chave Pix...")
 
-                qr_pix = gerar_pix_mercadopago(user_id, target_username, valor=9.99)
+            qr_pix = gerar_pix_mercadopago(user_id, target_username, valor=9.99)
 
-                if qr_pix:
-                    oferta_paga = (
-                        f"🔒 RELATÓRIO COMPLETO — @{target_username}\n"
-                        f"───────────────────────────────\n"
-                        f"• Todas as URLs diretas mapeadas\n"
-                        f"• Mapeamento de fóruns e comunidades\n"
-                        f"• Análise de exposição e recomendações\n"
-                        f"• Relatório em formato de documento (.TXT)\n\n"
-                        f"💰 Valor: R$ 9,99\n\n"
-                        f"Copie a chave Pix abaixo para pagar no seu app bancário:\n\n"
-                        f"{qr_pix}\n\n"
-                        f"⚡ O arquivo do relatório será enviado automaticamente assim que o Pix for aprovado."
-                    )
-                    bot.send_message(call.message.chat.id, oferta_paga)
-                else:
-                    bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
-
-            elif call.data == "cancel_report":
-                bot.answer_callback_query(call.id, "Opção cancelada.")
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text="👍 Entendido! Se precisar de uma nova consulta, basta enviar outro nome de usuário."
+            if qr_pix:
+                oferta_paga = (
+                    f"🔒 RELATÓRIO COMPLETO — @{target_username}\n"
+                    f"───────────────────────────────\n"
+                    f"• Todas as URLs diretas mapeadas\n"
+                    f"• Mapeamento de fóruns e comunidades\n"
+                    f"• Análise de exposição e recomendações\n"
+                    f"• Relatório em formato de documento (.TXT)\n\n"
+                    f"💰 Valor: R$ 9,99\n\n"
+                    f"Copie a chave Pix abaixo para pagar no seu app bancário:\n\n"
+                    f"{qr_pix}\n\n"
+                    f"⚡ O arquivo do relatório será enviado automaticamente assim que o Pix for aprovado."
                 )
-        except Exception as e:
-            logger.error("Erro no callback: %s", str(e))
+                bot.send_message(call.message.chat.id, oferta_paga)
+            else:
+                bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
 
-# --- WEBHOOK DO TELEGRAM (PROCESSAMENTO SEGURO) ---
+        elif call.data == "cancel_report":
+            bot.answer_callback_query(call.id, "Opção cancelada.")
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="👍 Entendido! Se precisar de uma nova consulta, basta enviar outro nome de usuário."
+            )
+
+# --- ROTA RECEPTORA DO TELEGRAM ---
 @app.route(f"/telegram/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    if request.headers.get('content-type') == 'application/json':
-        try:
-            json_string = request.get_data().decode('utf-8')
-            update = Update.de_json(json_string)
-            if bot:
-                bot.process_new_updates([update])
-        except Exception as e:
-            logger.error("Erro ao processar atualização do Telegram: %s", str(e))
-        return jsonify({"status": "ok"}), 200
+    if bot:
+        data = request.get_json(force=True, silent=True)
+        if data:
+            update = Update.de_json(data)
+            bot.process_new_updates([update])
+            return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
 # --- ROTA WEBHOOK MERCADO PAGO ---
