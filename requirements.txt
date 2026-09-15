@@ -2,4 +2,5 @@ pyTelegramBotAPI
 requests
 flask
 werkzeug
-
+mercadopago
+gunicorn
