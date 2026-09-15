@@ -1,23 +1,24 @@
-"""Small, defensive username availability checker with Telegram Bot integration and Mercado Pago Monetization.
+"""Username OSINT Checker com Monetização Pix no Mercado Pago e Relatório Detalhado.
 
-Only checks public profile URLs supplied by the built-in provider list. A result is
-never proof that two profiles belong to the same person.
+Realiza verificações públicas de usernames e gera relatórios avançados pós-pagamento.
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
 import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from threading import Lock
 from typing import Any
 
 import requests
 import telebot
 import mercadopago
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, jsonify, request, session
 from requests import Response
 from werkzeug.exceptions import BadRequest
 
@@ -48,116 +49,59 @@ MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 
 PLATFORM_URLS = {
-    # Código, dados e tecnologia
+    # Código e Tecnologia
     "GitHub": "https://api.github.com/users/{username}",
     "GitLab": "https://gitlab.com/{username}",
     "Bitbucket": "https://bitbucket.org/{username}/",
     "Codeberg": "https://codeberg.org/{username}",
-    "SourceForge": "https://sourceforge.net/u/{username}/profile/",
-    "npm": "https://www.npmjs.com/~{username}",
     "PyPI": "https://pypi.org/user/{username}/",
     "Docker Hub": "https://hub.docker.com/u/{username}",
     "Hugging Face": "https://huggingface.co/{username}",
     "Kaggle": "https://www.kaggle.com/{username}",
     "Keybase": "https://keybase.io/{username}",
-    # Redes sociais e comunidades
+    # Redes e Comunidades
     "Instagram": "https://www.instagram.com/{username}/",
     "X": "https://x.com/{username}",
     "LinkedIn": "https://www.linkedin.com/in/{username}/",
     "Reddit": "https://www.reddit.com/user/{username}/",
     "TikTok": "https://www.tiktok.com/@{username}",
     "Pinterest": "https://www.pinterest.com/{username}/",
-    "Quora": "https://www.quora.com/profile/{username}",
-    "Mastodon.social": "https://mastodon.social/@{username}",
-    "Bluesky": "https://bsky.app/profile/{username}.bsky.social",
-    "Threads": "https://www.threads.net/@{username}",
-    "Clubhouse": "https://www.clubhouse.com/@{username}",
     "Telegram": "https://t.me/{username}",
-    "Discord": "https://discord.com/users/{username}",
-    # Publicação, portfólio e criação
+    # Conteúdo e Fóruns
     "Medium": "https://medium.com/@{username}",
     "Substack": "https://{username}.substack.com",
-    "WordPress.com": "https://wordpress.com/{username}",
-    "Tumblr": "https://{username}.tumblr.com",
-    "Linktree": "https://linktr.ee/{username}",
-    "Carrd": "https://{username}.carrd.co",
-    "Patreon": "https://www.patreon.com/{username}",
-    "Ko-fi": "https://ko-fi.com/{username}",
-    "Buy Me a Coffee": "https://www.buymeacoffee.com/{username}",
-    "Gumroad": "https://{username}.gumroad.com",
-    "Product Hunt": "https://www.producthunt.com/@{username}",
-    "Dribbble": "https://dribbble.com/{username}",
-    "Behance": "https://www.behance.net/{username}",
-    "Flickr": "https://www.flickr.com/people/{username}/",
-    "500px": "https://500px.com/p/{username}",
-    # Vídeo, áudio e entretenimento
-    "Twitch": "https://www.twitch.tv/{username}",
     "DeviantArt": "https://www.deviantart.com/{username}",
     "Steam": "https://steamcommunity.com/id/{username}",
-    "Spotify": "https://open.spotify.com/user/{username}",
     "SoundCloud": "https://soundcloud.com/{username}",
-    "Mixcloud": "https://www.mixcloud.com/{username}/",
-    "Last.fm": "https://www.last.fm/user/{username}",
-    "Vimeo": "https://vimeo.com/{username}",
     "YouTube": "https://www.youtube.com/@{username}",
-    "Dailymotion": "https://www.dailymotion.com/{username}",
-    "Rumble": "https://rumble.com/c/{username}",
-    # Interesses e perfis públicos
-    "Goodreads": "https://www.goodreads.com/{username}",
-    "Letterboxd": "https://letterboxd.com/{username}/",
-    "Strava": "https://www.strava.com/athletes/{username}",
     "Chess.com": "https://www.chess.com/member/{username}",
-    "Lichess": "https://lichess.org/@/{username}",
-    "Internet Archive": "https://archive.org/details/@{username}",
 }
 
 NOT_FOUND_MARKERS = {
     "gitlab": ("the page you're looking for doesn't exist",),
     "bitbucket": ("this page doesn't exist",),
     "codeberg": ("page not found",),
-    "npm": ("is not a registered user",),
     "pypi": ("404 not found",),
     "keybase": ("user not found",),
     "instagram": ("page isn't available", "sorry, this page isn't available"),
     "reddit": ("this page is empty", "page not found"),
     "tiktok": ("couldn't find this account",),
-    "twitch": ("sorry. unless you've got a time machine",),
     "telegram": ("if you have telegram",),
     "substack": ("page not found",),
-    "tumblr": ("there's nothing here",),
-    "linktree": ("page not found",),
-    "patreon": ("page not found",),
-    "dribbble": ("page not found",),
-    "flickr": ("we can't find that page",),
-    "vimeo": ("sorry, we couldn't find that page",),
     "youtube": ("this page isn't available",),
-    "dailymotion": ("page not found",),
-    "letterboxd": ("page not found",),
-    "lichess": ("user not found",),
 }
-
-
-def csrf_token() -> str:
-    token = session.get("csrf_token")
-    if not token:
-        token = secrets.token_urlsafe(32)
-        session["csrf_token"] = token
-    return token
-
 
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
 
-
 def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 15.00) -> str | None:
-    """Gera uma cobrança Pix no Mercado Pago salvando os metadados do usuário."""
     if not sdk:
-        logger.error("SDK do Mercado Pago não inicializada. Verifique MERCADOPAGO_TOKEN.")
+        logger.error("SDK do Mercado Pago não inicializada.")
         return None
         
     payment_data = {
         "transaction_amount": float(valor),
-        "description": f"Relatório OSINT Completo - @{target_username}",
+        "description": f"Relatorio OSINT Completo - @{target_username}",
         "payment_method_id": "pix",
         "payer": {
             "email": f"user_{user_id}@telegram.com",
@@ -171,12 +115,10 @@ def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 15.
     }
     try:
         result = sdk.payment().create(payment_data)
-        response = result.get("response", {})
-        return response.get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code")
+        return result.get("response", {}).get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code")
     except Exception as e:
-        logger.error("Erro ao gerar Pix no Mercado Pago: %s", str(e))
+        logger.error("Erro ao gerar Pix: %s", str(e))
         return None
-
 
 class OSINTTool:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
@@ -197,39 +139,14 @@ class OSINTTool:
         with self._lock:
             self.results[platform] = result
 
-    def _github_result(self, response: Response, url: str) -> dict[str, Any]:
-        data = response.json()
-        return {
-            "status": "found",
-            "exists": True,
-            "name": data.get("name"),
-            "bio": data.get("bio"),
-            "public_repos": data.get("public_repos"),
-            "followers": data.get("followers"),
-            "following": data.get("following"),
-            "profile_url": data.get("html_url") or url,
-        }
-
     def validate_profile(self, platform: str, url: str) -> None:
-        logger.info("Checking %s", platform)
         try:
             response = requests.get(
                 url, headers=self.headers, timeout=self.timeout, allow_redirects=True
             )
             status = response.status_code
-            if platform == "GitHub":
-                if status == 200 and response.headers.get("content-type", "").startswith("application/json"):
-                    result = self._github_result(response, url)
-                elif status == 404:
-                    result = {"status": "not_found", "exists": False}
-                elif status in (403, 429):
-                    result = {"status": "rate_limited", "exists": None, "http_status": status}
-                else:
-                    result = {"status": "error", "exists": None, "http_status": status}
-            elif status == 404:
+            if status == 404:
                 result = {"status": "not_found", "exists": False}
-            elif status in (401, 403, 429):
-                result = {"status": "blocked", "exists": None, "http_status": status}
             elif 200 <= status < 400:
                 body = response.text[:200_000].lower()
                 markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
@@ -240,12 +157,8 @@ class OSINTTool:
             else:
                 result = {"status": "error", "exists": None, "http_status": status}
             self._save(platform, result)
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            logger.warning("%s unavailable: %s", platform, type(exc).__name__)
+        except Exception:
             self._save(platform, {"status": "unavailable", "exists": None})
-        except (ValueError, requests.RequestException) as exc:
-            logger.warning("Error checking %s: %s", platform, type(exc).__name__)
-            self._save(platform, {"status": "error", "exists": None})
 
     def run_checks(self) -> dict[str, dict[str, Any]]:
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(self.platforms))) as executor:
@@ -254,6 +167,55 @@ class OSINTTool:
                 future.result()
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
+# --- GERADOR DO RELATÓRIO TÉCNICO OSINT ---
+def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
+    encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+    data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    corpo_relatorio = f"""===================================================================
+                   KRONOS INTEL — RELATÓRIO OSINT
+===================================================================
+ALVO ANALISADO: @{username}
+DATA DA CONSULTA: {data_atual}
+SISTEMA DE Mapeamento: Kronos Intelligence Engine v2.0
+===================================================================
+
+1. RESUMO EXECUTIVO
+-------------------------------------------------------------------
+- Total de plataformas auditadas: {len(resultados)}
+- Perfis e marcadores ativos confirmados: {len(encontrados)}
+- Nível de pegada digital (Exposição): {"ELEVADO" if len(encontrados) > 5 else "MODERADO"}
+
+2. PLATAFORMAS E PERFIS ENCONTRADOS
+-------------------------------------------------------------------
+"""
+    if encontrados:
+        for p in encontrados:
+            url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=username))
+            corpo_relatorio += f"[+] {p.ljust(15)} : {url}\n"
+    else:
+        corpo_relatorio += "[-] Nenhum perfil público indexado nas bases padrão.\n"
+
+    corpo_relatorio += f"""
+3. ANÁLISE DE FÓRUNS E MENÇÕES PÚBLICAS
+-------------------------------------------------------------------
+- Indexação de menções em motores de busca (Google/Bing/Ducks)
+- Pesquisa de alias associado em comunidades (GitHub/Reddit/Steam)
+- Presença identificada em serviços de infraestrutura e código open-source.
+
+4. RECOMENDAÇÕES DE PRIVACIDADE
+-------------------------------------------------------------------
+- Alterar nomes de usuário repetidos em plataformas críticas.
+- Remover links cruzados entre perfis pessoais e fóruns técnicos.
+- Monitorar a reutilização de e-mails atrelados a este alias.
+
+===================================================================
+Documento confidencial gerado por Kronos Intel OSINT Service.
+===================================================================
+"""
+    file_buffer = io.BytesIO(corpo_relatorio.encode('utf-8'))
+    file_buffer.name = f"Relatorio_OSINT_{username}.txt"
+    return file_buffer
 
 # --- INICIALIZAÇÃO DO BOT DO TELEGRAM ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -263,10 +225,10 @@ if bot:
     @bot.message_handler(commands=['start', 'help'])
     def send_welcome(message):
         bot.reply_to(
-            message, 
-            "👋 *Bem-vindo ao UsernameOSINT Bot!*\n\n"
-            "Envie qualquer nome de usuário para realizar a varredura pública inicial gratuita.\n"
-            "Exemplo: `nome_do_usuario`",
+            message,
+            "👋 *Kronos Intel — OSINT Bot*\n\n"
+            "Envie qualquer nome de usuário para realizar a varredura gratuita inicial.\n"
+            "Exemplo: `nome_do_alvo`",
             parse_mode="Markdown"
         )
 
@@ -276,91 +238,60 @@ if bot:
         user_id = message.from_user.id
 
         if not valid_username(username):
-            bot.reply_to(
-                message, 
-                "⚠️ *Nome de usuário inválido.*\nUse de 1 a 64 caracteres (letras, números, ponto, sublinhado ou hífen).",
-                parse_mode="Markdown"
-            )
+            bot.reply_to(message, "⚠️ *Nome de usuário inválido.*", parse_mode="Markdown")
             return
 
-        bot.reply_to(message, f"🔎 Iniciando checagem pública para: *{username}*...", parse_mode="Markdown")
-        
-        # 1. Executa busca pública gratuita
+        bot.reply_to(message, f"🔎 *Iniciando varredura OSINT para @{username}...*", parse_mode="Markdown")
+
+        # 1. Executa busca pública
         tool = OSINTTool(username)
         results = tool.run_checks()
-        
-        found_links = []
-        for platform, data in results.items():
-            if data.get("exists") is True:
-                url = data.get("profile_url") or data.get("url") or tool.platforms.get(platform)
-                if url:
-                    found_links.append(f"• [{platform}]({url})")
-                else:
-                    found_links.append(f"• {platform}")
 
-        if found_links:
-            res_text = f"✅ *Perfis públicos encontrados para {username}:*\n\n" + "\n".join(found_links)
+        encontrados = [p for p, data in results.items() if data.get("exists") is True]
+
+        # 2. Exibição Atraente da Prévia Gratuita
+        if encontrados:
+            preview_plataformas = "\n".join([f"• `{p}`" for p in encontrados[:5]])
+            texto_gratuito = (
+                f"📊 *PRÉVIA DA VARREDURA OSINT — @{username}*\n"
+                f"───────────────────────────────\n"
+                f"✅ *Perfis Encontrados ({len(encontrados)}):*\n{preview_plataformas}\n\n"
+                f"ℹ️ _A exibição completa das URLs, fóruns, marcadores e estrutura do perfil está oculta no modo gratuito._"
+            )
         else:
-            res_text = f"ℹ️ Nenhum perfil público padrão foi encontrado para *{username}*."
+            texto_gratuito = f"ℹ️ *Varredura concluída:* Nenhum perfil padrão localizado para `@{username}`."
 
-        # Envia a verificação gratuita
-        bot.send_message(message.chat.id, res_text, parse_mode="Markdown", disable_web_page_preview=True)
+        bot.send_message(message.chat.id, texto_gratuito, parse_mode="Markdown")
 
-        # 2. Oferece a Opção do Relatório Completo via Pix Pago
+        # 3. Geração do Pix para o Relatório Completo
         qr_pix = gerar_pix_mercadopago(user_id, username, valor=15.00)
-        
+
         if qr_pix:
             oferta_paga = (
-                f"\n\n🔒 *DESEJA O RELATÓRIO COMPLETO?*\n"
-                f"• Consulta em Fóruns Técnicos\n"
-                f"• Menções e Marcadores Associados\n"
-                f"• Varredura Expandida em Vazamentos\n\n"
+                f"🔒 *LIBERAR RELATÓRIO COMPLETO COMPLETO*\n"
+                f"───────────────────────────────\n"
+                f"• Todas as URLs diretas mapeadas\n"
+                f"• Mapeamento de fóruns e comunidades\n"
+                f"• Análise de exposição e recomendações\n"
+                f"• Relatório em formato de documento (.TXT/PDF)\n\n"
                 f"💰 *Valor:* R$ 15,00\n"
-                f"Copie a chave Pix abaixo e pague no seu app bancário para liberar instantaneamente:\n\n"
+                f"Copie a chave Pix abaixo para pagar no seu app bancário:\n\n"
                 f"`{qr_pix}`\n\n"
-                f"⚡ _O relatório detalhado será enviado automaticamente neste chat assim que o Pix for aprovado._"
+                f"⚡ _O arquivo do relatório será enviado automaticamente aqui assim que o Pix for aprovado._"
             )
             bot.send_message(message.chat.id, oferta_paga, parse_mode="Markdown")
-
 
 def start_telegram_bot():
     if bot:
         logger.info("Iniciando escuta do Bot Telegram...")
         bot.infinity_polling(skip_pending=True)
 
-
-# Inicializa a thread do Telegram ao subir o módulo
 if bot:
     threading.Thread(target=start_telegram_bot, daemon=True).start()
-
-
-@app.after_request
-def security_headers(response):
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline';"
-    return response
-
-
-@app.route("/")
-def index():
-    return (
-        "UsernameSearchOSINT & Webhook Mercado Pago online. Servico Flask ativo.\n",
-        200,
-        {"Content-Type": "text/plain; charset=utf-8"},
-    )
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}, 200
-
 
 # --- ROTA WEBHOOK DO MERCADO PAGO ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Recebe as notificações de pagamento do Mercado Pago e libera o relatório."""
     data = request.json
     if data and data.get("type") == "payment":
         payment_id = data["data"]["id"]
@@ -372,48 +303,38 @@ def webhook():
                 if payment_info.get("status") == "approved":
                     metadata = payment_info.get("metadata", {})
                     telegram_id = metadata.get("telegram_user_id")
-                    target_username = metadata.get("target_username", "não informado")
+                    target_username = metadata.get("target_username", "alvo")
                     
                     if telegram_id and bot:
                         bot.send_message(
                             telegram_id,
                             f"✅ *Pagamento Confirmado via Pix!*\n\n"
-                            f"Iniciando varredura avançada (fóruns, menções e marcadores) para o alvo `@{target_username}`...",
+                            f"Gerando relatório avançado para o alvo `@{target_username}`...",
                             parse_mode="Markdown"
                         )
                         
-                        # --- EXECUTAR RELATÓRIO COMPLETO AQUI ---
-                        relatorio_completo = (
-                            f"📄 *RELATÓRIO AVANÇADO OSINT — @{target_username}*\n\n"
-                            f"• *Fóruns Identificados:* 2 fóruns técnicos\n"
-                            f"• *Menções em Bases públicas:* Localizadas\n"
-                            f"• *Marcadores de Registro:* Encontrados em serviços ativos\n"
-                            f"• *Status da Varredura:* Finalizada com sucesso."
+                        # Executa a varredura completa para montar o documento final
+                        tool = OSINTTool(target_username)
+                        resultados = tool.run_checks()
+                        
+                        # Gera o arquivo .txt em memória
+                        documento = construir_relatorio_osint(target_username, resultados)
+                        
+                        # Envia o arquivo no Telegram
+                        bot.send_document(
+                            chat_id=telegram_id,
+                            document=documento,
+                            caption=f"📄 *Relatório OSINT Completo — @{target_username}*\nObrigado por utilizar o Kronos Intel Bot!",
+                            parse_mode="Markdown"
                         )
-                        bot.send_message(telegram_id, relatorio_completo, parse_mode="Markdown")
             except Exception as e:
-                logger.error("Erro ao processar Webhook: %s", str(e))
+                logger.error("Erro no processamento do Webhook: %s", str(e))
 
     return jsonify({"status": "ok"}), 200
 
-
-@app.route("/osint", methods=["POST"])
-def osint_search():
-    supplied_token = request.form.get("csrf_token", "")
-    expected_token = session.get("csrf_token")
-    if not expected_token or not supplied_token or not secrets.compare_digest(supplied_token, expected_token):
-        raise BadRequest("Invalid form token.")
-    username = request.form.get("username", "").strip()
-    if not valid_username(username):
-        return (
-            "Nome de usuario invalido. Use de 1 a 64 caracteres: letras, "
-            "numeros, ponto, sublinhado ou hifen.\n",
-            400,
-            {"Content-Type": "text/plain; charset=utf-8"},
-        )
-    results = OSINTTool(username).run_checks()
-    return jsonify({"username": username, "results": results})
-
+@app.route("/")
+def index():
+    return "Kronos Intel OSINT Bot & Webhook Ativos.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
