@@ -235,7 +235,7 @@ if bot:
                 f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
                 f"───────────────────────────────\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔒 Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado por apenas R$ 9,99?"
+                f"🔒 Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado desse usuario por apenas R$ 9,99?"
             )
             
             markup = InlineKeyboardMarkup(row_width=2)
