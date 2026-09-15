@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Monetização Pix, QR Code, Notificação de Vendas e Suporte."""
+"""Username OSINT Checker com Monetização Pix, QR Code, Suporte, Trava Antiduplicidade e Botão de Cópia."""
 from __future__ import annotations
 
 import base64
@@ -34,6 +34,10 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
+
+# --- TRAVA ANTIDUPLICIDADE DE PAGAMENTOS ---
+PROCESSED_PAYMENTS: set[str] = set()
+payments_lock = Lock()
 
 # --- CONFIGURAÇÃO DE ADMINISTRADOR E SUPORTE ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
@@ -244,7 +248,6 @@ if bot:
             f"🛠 Precisa de ajuda ou suporte?\nEntre em contato direto: @{SUPORTE_USERNAME}"
         )
 
-    # --- COMANDO EXCLUSIVO DE ADMIN (/admin <username>) ---
     @bot.message_handler(commands=['admin'])
     def handle_admin_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -269,7 +272,6 @@ if bot:
             caption=f"👑 [ADMIN ACCESS] Relatório OSINT Completo — @{username}"
         )
 
-    # --- PROCESSAMENTO DE BUSCA ---
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         username = message.text.strip().replace("@", "")
@@ -335,14 +337,16 @@ if bot:
                     f"• Análise de exposição e recomendações\n"
                     f"• Relatório em formato de documento (.TXT)\n\n"
                     f"💰 Valor: R$ 9,99\n\n"
-                    f"Copie a chave Pix abaixo:\n\n"
+                    f"Copie a chave Pix abaixo (basta tocar no código ou clicar no botão abaixo):\n\n"
                     f"{qr_pix}\n\n"
                     f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmado."
                 )
                 
-                markup = InlineKeyboardMarkup()
+                # BOTÃO DE CÓPIA SEPARADO + SUPORTE
+                markup = InlineKeyboardMarkup(row_width=1)
+                btn_copiar = InlineKeyboardButton("📋 Obter Apenas Chave Pix (Texto)", callback_data=f"getkey_{user_id}")
                 btn_suporte = InlineKeyboardButton("💬 Precisa de Ajuda?", url=f"https://t.me/{SUPORTE_USERNAME}")
-                markup.add(btn_suporte)
+                markup.add(btn_copiar, btn_suporte)
 
                 if qr_img_bytes:
                     bot.send_photo(
@@ -359,6 +363,30 @@ if bot:
                     )
             else:
                 bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
+
+        elif call.data.startswith("getkey_"):
+            # Ação disparada pelo botão 'Obter Apenas Chave Pix'
+            bot.answer_callback_query(call.id, "Enviando chave em texto...")
+            
+            # Recupera e re-envia a chave em uma mensagem simples para cópia direta
+            msg_texto = call.message.caption or call.message.text
+            lines = msg_texto.split("\n\n") if msg_texto else []
+            
+            # Procura a linha que contém a chave Pix longa
+            pix_key = None
+            for l in lines:
+                if len(l) > 50 and not l.startswith("🔒") and not l.startswith("⚡"):
+                    pix_key = l.strip()
+                    break
+
+            if pix_key:
+                bot.send_message(
+                    chat_id=call.message.chat.id,
+                    text=f"`{pix_key}`",
+                    parse_mode="Markdown"
+                )
+            else:
+                bot.send_message(call.message.chat.id, "⚠️ Toque e segure no texto do Pix na mensagem acima para copiar.")
 
         elif call.data == "cancel_report":
             bot.answer_callback_query(call.id, "Opção cancelada.")
@@ -379,7 +407,7 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- ROTA WEBHOOK MERCADO PAGO ---
+# --- ROTA WEBHOOK MERCADO PAGO COM TRAVA DE DUPLICIDADE ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -404,6 +432,12 @@ def webhook():
         if str(payment_id) == "123456" or not payment_id:
             return jsonify({"status": "ok"}), 200
 
+        pid_str = str(payment_id)
+        with payments_lock:
+            if pid_str in PROCESSED_PAYMENTS:
+                logger.info("Notificação duplicada ignorada para o pagamento: %s", pid_str)
+                return jsonify({"status": "ok"}), 200
+
         if payment_id and sdk:
             try:
                 payment_info = sdk.payment().get(str(payment_id)).get("response", {})
@@ -411,6 +445,9 @@ def webhook():
                     metadata = payment_info.get("metadata", {})
                     telegram_id = metadata.get("telegram_user_id")
                     target_username = metadata.get("target_username", "alvo")
+
+                    with payments_lock:
+                        PROCESSED_PAYMENTS.add(pid_str)
 
                     if telegram_id and bot:
                         bot.send_message(
