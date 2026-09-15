@@ -37,7 +37,7 @@ PORT = int(os.getenv("PORT", "5000"))
 
 # --- CONFIGURAÇÃO DE ADMINISTRADOR E SUPORTE ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
-SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")  # Insira seu @ sem o simbolo
+SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
@@ -238,11 +238,10 @@ if bot:
     def send_welcome(message):
         bot.reply_to(
             message,
-            "👋 *Kronos Intel — OSINT Bot*\n\n"
-            "Envie qualquer nome de usuário para realizar a varredura gratuita inicial.\n"
-            "Exemplo: `nome_do_alvo`\n\n"
-            f"🛠 *Precisa de ajuda ou suporte?*\nEntre em contato direto: @{SUPORTE_USERNAME}",
-            parse_mode="Markdown"
+            f"👋 Kronos Intel — OSINT Bot\n\n"
+            f"Envie qualquer nome de usuário para realizar a varredura gratuita inicial.\n"
+            f"Exemplo: nome_do_alvo\n\n"
+            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato direto: @{SUPORTE_USERNAME}"
         )
 
     # --- COMANDO EXCLUSIVO DE ADMIN (/admin <username>) ---
@@ -254,7 +253,7 @@ if bot:
 
         parts = message.text.strip().split()
         if len(parts) < 2:
-            bot.reply_to(message, "⚠️ Uso correto: `/admin <username>`")
+            bot.reply_to(message, "⚠️ Uso correto: /admin <username>")
             return
 
         username = parts[1].replace("@", "")
@@ -267,7 +266,7 @@ if bot:
         bot.send_document(
             chat_id=message.chat.id,
             document=documento,
-            caption=f"👑 **[ADMIN ACCESS]** Relatório OSINT Completo — @{username}"
+            caption=f"👑 [ADMIN ACCESS] Relatório OSINT Completo — @{username}"
         )
 
     # --- PROCESSAMENTO DE BUSCA ---
@@ -329,16 +328,16 @@ if bot:
 
             if qr_pix:
                 texto_oferta = (
-                    f"🔒 *RELATÓRIO COMPLETO — @{target_username}*\n"
+                    f"🔒 RELATÓRIO COMPLETO — @{target_username}\n"
                     f"───────────────────────────────\n"
                     f"• Todas as URLs diretas mapeadas\n"
                     f"• Mapeamento de fóruns e comunidades\n"
                     f"• Análise de exposição e recomendações\n"
                     f"• Relatório em formato de documento (.TXT)\n\n"
-                    f"💰 *Valor:* R$ 9,99\n\n"
-                    f"👇 *Copie a chave Pix abaixo (basta tocar no código):*\n\n"
-                    f"`{qr_pix}`\n\n"
-                    f"⚡ *O relatório será enviado automaticamente assim que o pagamento for confirmado.*"
+                    f"💰 Valor: R$ 9,99\n\n"
+                    f"Copie a chave Pix abaixo:\n\n"
+                    f"{qr_pix}\n\n"
+                    f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmado."
                 )
                 
                 markup = InlineKeyboardMarkup()
@@ -350,15 +349,13 @@ if bot:
                         chat_id=call.message.chat.id,
                         photo=qr_img_bytes,
                         caption=texto_oferta,
-                        reply_markup=markup,
-                        parse_mode="Markdown"
+                        reply_markup=markup
                     )
                 else:
                     bot.send_message(
                         chat_id=call.message.chat.id,
                         text=texto_oferta,
-                        reply_markup=markup,
-                        parse_mode="Markdown"
+                        reply_markup=markup
                     )
             else:
                 bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
@@ -382,7 +379,7 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- ROTA WEBHOOK MERCADO PAGO (NOTIFICA O ADMIN SOBRE VENDAS) ---
+# --- ROTA WEBHOOK MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -415,7 +412,6 @@ def webhook():
                     telegram_id = metadata.get("telegram_user_id")
                     target_username = metadata.get("target_username", "alvo")
 
-                    # 1. NOTIFICA O CLIENTE E ENTREGA O RELATÓRIO
                     if telegram_id and bot:
                         bot.send_message(
                             telegram_id,
@@ -432,17 +428,16 @@ def webhook():
                             caption=f"📄 Relatório OSINT Completo — @{target_username}\nObrigado por utilizar o Kronos Intel Bot!"
                         )
 
-                    # 2. NOTIFICA O ADMINISTRADOR (VOCÊ) SOBRE A NOVA VENDA
                     if bot and ADMIN_ID:
                         notificacao_admin = (
-                            f"💰 *NOVA VENDA APROVADA!*\n"
+                            f"💰 NOVA VENDA APROVADA!\n"
                             f"───────────────────────────────\n"
-                            f"• *Valor:* R$ 9,99 (Pix)\n"
-                            f"• *ID Pagamento:* `{payment_id}`\n"
-                            f"• *Alvo Pesquisado:* `@{target_username}`\n"
-                            f"• *ID do Comprador:* `{telegram_id}`"
+                            f"• Valor: R$ 9,99 (Pix)\n"
+                            f"• ID Pagamento: {payment_id}\n"
+                            f"• Alvo Pesquisado: @{target_username}\n"
+                            f"• ID do Comprador: {telegram_id}"
                         )
-                        bot.send_message(ADMIN_ID, notificacao_admin, parse_mode="Markdown")
+                        bot.send_message(ADMIN_ID, notificacao_admin)
 
             except Exception as e:
                 logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
