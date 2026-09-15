@@ -289,16 +289,66 @@ def start_telegram_bot():
 if bot:
     threading.Thread(target=start_telegram_bot, daemon=True).start()
 
-# --- ROTA WEBHOOK / IPN COMPATÍVEL COM TODOS OS TESTES DO MERCADO PAGO ---
+# --- ROTA WEBHOOK / IPN BLINDADA ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    """Recebe notificações do Mercado Pago e responde 200 OK para todos os testes."""
+    """Recebe notificações e aceita chamadas de simulação sem quebrar no Flask."""
+    # Retorno imediato para simulações e chamadas GET de teste
+    if request.method == "GET" or request.args.get("id") == "123456":
+        return jsonify({"status": "ok"}), 200
+
+    payment_id = None
+
+    # Tenta capturar ID de query params (topic=payment&id=123456)
+    topic = request.args.get("topic") or request.args.get("type")
+    if topic == "payment":
+        payment_id = request.args.get("id")
+
+    # Tenta capturar ID do JSON sem lançar exceções 400 no Flask
     try:
-        # 1. Tratamento para requisições GET (Simulação IPN)
-        if request.method == "GET":
-            payment_id = request.args.get("id")
-            if payment_id == "123456" or not payment_id:
-                return jsonify({"status": "ok", "message": "Teste GET IPN ok"}), 200
+        data = request.get_json(force=False, silent=True) or {}
+        if isinstance(data, dict):
+            if data.get("type") == "payment":
+                payment_id = data.get("data", {}).get("id")
+            elif "id" in data and not payment_id:
+                payment_id = data.get("id")
+    except Exception:
+        pass
+
+    # Resposta rápida para requisições de teste da interface
+    if str(payment_id) == "123456" or not payment_id:
+        return jsonify({"status": "ok"}), 200
+
+    # Processamento de pagamentos reais no Mercado Pago
+    if payment_id and sdk:
+        try:
+            payment_info = sdk.payment().get(str(payment_id)).get("response", {})
+            if payment_info.get("status") == "approved":
+                metadata = payment_info.get("metadata", {})
+                telegram_id = metadata.get("telegram_user_id")
+                target_username = metadata.get("target_username", "alvo")
+
+                if telegram_id and bot:
+                    bot.send_message(
+                        telegram_id,
+                        f"✅ *Pagamento Confirmado via Pix!*\n\nGerando relatório para `@{target_username}`...",
+                        parse_mode="Markdown"
+                    )
+
+                    tool = OSINTTool(target_username)
+                    resultados = tool.run_checks()
+                    documento = construir_relatorio_osint(target_username, resultados)
+
+                    bot.send_document(
+                        chat_id=telegram_id,
+                        document=documento,
+                        caption=f"📄 *Relatório OSINT Completo — @{target_username}*",
+                        parse_mode="Markdown"
+                    )
+        except Exception as e:
+            logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
+
+    return jsonify({"status": "ok"}), 200
 
         # 2. Captura o ID do pagamento sem estourar erro 400 no Werkzeug
         payment_id = None
