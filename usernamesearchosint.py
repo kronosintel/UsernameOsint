@@ -17,9 +17,9 @@ from typing import Any
 
 import requests
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import mercadopago
-from flask import Flask, jsonify, request, session
-from requests import Response
+from flask import Flask, jsonify, request
 from werkzeug.exceptions import BadRequest
 
 # Configuração de Logs
@@ -34,9 +34,6 @@ app = Flask(__name__)
 app.config.update(
     SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
     MAX_CONTENT_LENGTH=16 * 1024,
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.getenv("COOKIE_SECURE", "0") == "1",
 )
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -94,7 +91,7 @@ NOT_FOUND_MARKERS = {
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
 
-def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 15.00) -> str | None:
+def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.99) -> str | None:
     if not sdk:
         logger.error("SDK do Mercado Pago não inicializada.")
         return None
@@ -235,7 +232,6 @@ if bot:
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         username = message.text.strip().replace("@", "")
-        user_id = message.from_user.id
 
         if not valid_username(username):
             bot.reply_to(message, "⚠️ *Nome de usuário inválido.*", parse_mode="Markdown")
@@ -243,43 +239,72 @@ if bot:
 
         bot.reply_to(message, f"🔎 *Iniciando varredura OSINT para @{username}...*", parse_mode="Markdown")
 
-        # 1. Executa busca pública
+        # Executa busca pública
         tool = OSINTTool(username)
         results = tool.run_checks()
-
         encontrados = [p for p, data in results.items() if data.get("exists") is True]
 
-        # 2. Exibição Atraente da Prévia Gratuita
+        # Exibição Atraente da Prévia Gratuita + Botões de Ação
         if encontrados:
             preview_plataformas = "\n".join([f"• `{p}`" for p in encontrados[:5]])
             texto_gratuito = (
                 f"📊 *PRÉVIA DA VARREDURA OSINT — @{username}*\n"
                 f"───────────────────────────────\n"
                 f"✅ *Perfis Encontrados ({len(encontrados)}):*\n{preview_plataformas}\n\n"
-                f"ℹ️ _A exibição completa das URLs, fóruns, marcadores e estrutura do perfil está oculta no modo gratuito._"
+                f"🔒 *Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado por apenas R$ 9,99?*"
             )
+            
+            # Criação dos Botões Inline (Sim / Não)
+            markup = InlineKeyboardMarkup(row_width=2)
+            btn_sim = InlineKeyboardButton("✅ Sim, quero o relatório!", callback_data=f"buy_{username}")
+            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="cancel_report")
+            markup.add(btn_sim, btn_nao)
+
+            bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup, parse_mode="Markdown")
         else:
-            texto_gratuito = f"ℹ️ *Varredura concluída:* Nenhum perfil padrão localizado para `@{username}`."
-
-        bot.send_message(message.chat.id, texto_gratuito, parse_mode="Markdown")
-
-        # 3. Geração do Pix para o Relatório Completo
-        qr_pix = gerar_pix_mercadopago(user_id, username, valor=15.00)
-
-        if qr_pix:
-            oferta_paga = (
-                f"🔒 *LIBERAR RELATÓRIO COMPLETO*\n"
-                f"───────────────────────────────\n"
-                f"• Todas as URLs diretas mapeadas\n"
-                f"• Mapeamento de fóruns e comunidades\n"
-                f"• Análise de exposição e recomendações\n"
-                f"• Relatório em formato de documento (.TXT)\n\n"
-                f"💰 *Valor:* R$ 15,00\n"
-                f"Copie a chave Pix abaixo para pagar no seu app bancário:\n\n"
-                f"`{qr_pix}`\n\n"
-                f"⚡ _O arquivo do relatório será enviado automaticamente aqui assim que o Pix for aprovado._"
+            bot.send_message(
+                message.chat.id, 
+                f"ℹ️ *Varredura concluída:* Nenhum perfil padrão localizado para `@{username}`.", 
+                parse_mode="Markdown"
             )
-            bot.send_message(message.chat.id, oferta_paga, parse_mode="Markdown")
+
+    # --- PROCESSADOR DE CLIQUES NOS BOTÕES ---
+    @bot.callback_query_handler(func=lambda call: True)
+    def callback_listener(call):
+        if call.data.startswith("buy_"):
+            target_username = call.data.split("buy_")[1]
+            user_id = call.from_user.id
+            
+            bot.answer_callback_query(call.id, "Gerando chave Pix...")
+
+            # Gerar Pix de R$ 9,99
+            qr_pix = gerar_pix_mercadopago(user_id, target_username, valor=9.99)
+
+            if qr_pix:
+                oferta_paga = (
+                    f"🔒 *RELATÓRIO COMPLETO — @{target_username}*\n"
+                    f"───────────────────────────────\n"
+                    f"• Todas as URLs diretas mapeadas\n"
+                    f"• Mapeamento de fóruns e comunidades\n"
+                    f"• Análise de exposição e recomendações\n"
+                    f"• Relatório em formato de documento (.TXT)\n\n"
+                    f"💰 *Valor:* R$ 9,99\n\n"
+                    f"Copie a chave Pix abaixo para pagar no seu app bancário:\n\n"
+                    f"`{qr_pix}`\n\n"
+                    f"⚡ _O arquivo do relatório será enviado automaticamente assim que o Pix for aprovado._"
+                )
+                bot.send_message(call.message.chat.id, oferta_paga, parse_mode="Markdown")
+            else:
+                bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
+
+        elif call.data == "cancel_report":
+            bot.answer_callback_query(call.id, "Opção cancelada.")
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="👍 *Entendido! Se precisar de uma nova consulta, basta enviar outro nome de usuário.*",
+                parse_mode="Markdown"
+            )
 
 def start_telegram_bot():
     if bot:
@@ -289,95 +314,36 @@ def start_telegram_bot():
 if bot:
     threading.Thread(target=start_telegram_bot, daemon=True).start()
 
-# --- ROTA WEBHOOK / IPN BLINDADA ---
+# --- ROTA WEBHOOK / IPN COMPATÍVEL COM MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    """Recebe notificações e aceita chamadas de simulação sem quebrar no Flask."""
-    # Retorno imediato para simulações e chamadas GET de teste
-    if request.method == "GET" or request.args.get("id") == "123456":
-        return jsonify({"status": "ok"}), 200
-
-    payment_id = None
-
-    # Tenta capturar ID de query params (topic=payment&id=123456)
-    topic = request.args.get("topic") or request.args.get("type")
-    if topic == "payment":
-        payment_id = request.args.get("id")
-
-    # Tenta capturar ID do JSON sem lançar exceções 400 no Flask
+    """Recebe notificações do Mercado Pago e libera o relatório pós-pagamento."""
     try:
-        data = request.get_json(force=False, silent=True) or {}
-        if isinstance(data, dict):
-            if data.get("type") == "payment":
-                payment_id = data.get("data", {}).get("id")
-            elif "id" in data and not payment_id:
-                payment_id = data.get("id")
-    except Exception:
-        pass
+        if request.method == "GET" or request.args.get("id") == "123456":
+            return jsonify({"status": "ok"}), 200
 
-    # Resposta rápida para requisições de teste da interface
-    if str(payment_id) == "123456" or not payment_id:
-        return jsonify({"status": "ok"}), 200
-
-    # Processamento de pagamentos reais no Mercado Pago
-    if payment_id and sdk:
-        try:
-            payment_info = sdk.payment().get(str(payment_id)).get("response", {})
-            if payment_info.get("status") == "approved":
-                metadata = payment_info.get("metadata", {})
-                telegram_id = metadata.get("telegram_user_id")
-                target_username = metadata.get("target_username", "alvo")
-
-                if telegram_id and bot:
-                    bot.send_message(
-                        telegram_id,
-                        f"✅ *Pagamento Confirmado via Pix!*\n\nGerando relatório para `@{target_username}`...",
-                        parse_mode="Markdown"
-                    )
-
-                    tool = OSINTTool(target_username)
-                    resultados = tool.run_checks()
-                    documento = construir_relatorio_osint(target_username, resultados)
-
-                    bot.send_document(
-                        chat_id=telegram_id,
-                        document=documento,
-                        caption=f"📄 *Relatório OSINT Completo — @{target_username}*",
-                        parse_mode="Markdown"
-                    )
-        except Exception as e:
-            logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
-
-    return jsonify({"status": "ok"}), 200
-
-        # 2. Captura o ID do pagamento sem estourar erro 400 no Werkzeug
         payment_id = None
-        
-        # Tenta pegar query params primeiro
         topic = request.args.get("topic") or request.args.get("type")
         if topic == "payment":
             payment_id = request.args.get("id")
 
-        # Se não achou nos query params, tenta ler do corpo JSON
-        if not payment_id:
-            data = request.get_json(force=True, silent=True) or {}
+        try:
+            data = request.get_json(force=False, silent=True) or {}
             if isinstance(data, dict):
                 if data.get("type") == "payment":
                     payment_id = data.get("data", {}).get("id")
-                elif "id" in data:
+                elif "id" in data and not payment_id:
                     payment_id = data.get("id")
+        except Exception:
+            pass
 
-        # 3. Se for a simulação de teste da plataforma (id=123456), aprova imediatamente
         if str(payment_id) == "123456" or not payment_id:
-            return jsonify({"status": "ok", "message": "Teste de notificacao validado"}), 200
+            return jsonify({"status": "ok"}), 200
 
-        # 4. Se for um pagamento REAL recebido
         if payment_id and sdk:
             try:
                 payment_info = sdk.payment().get(str(payment_id)).get("response", {})
-                status = payment_info.get("status")
-
-                if status == "approved":
+                if payment_info.get("status") == "approved":
                     metadata = payment_info.get("metadata", {})
                     telegram_id = metadata.get("telegram_user_id")
                     target_username = metadata.get("target_username", "alvo")
@@ -385,17 +351,14 @@ def webhook():
                     if telegram_id and bot:
                         bot.send_message(
                             telegram_id,
-                            f"✅ *Pagamento Confirmado via Pix!*\n\n"
-                            f"Gerando relatório avançado para o alvo `@{target_username}`...",
+                            f"✅ *Pagamento de R$ 9,99 Confirmado via Pix!*\n\nGerando relatório avançado para `@{target_username}`...",
                             parse_mode="Markdown"
                         )
 
-                        # Executa a varredura completa
                         tool = OSINTTool(target_username)
                         resultados = tool.run_checks()
-
-                        # Monta e envia o documento no Telegram
                         documento = construir_relatorio_osint(target_username, resultados)
+
                         bot.send_document(
                             chat_id=telegram_id,
                             document=documento,
@@ -403,51 +366,11 @@ def webhook():
                             parse_mode="Markdown"
                         )
             except Exception as e:
-                logger.error("Erro ao processar pagamento real %s: %s", payment_id, str(e))
+                logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
 
     except Exception as general_err:
         logger.error("Erro generico no webhook: %s", str(general_err))
 
-    # Retorna sempre 200 OK para o Mercado Pago não travar a URL
-    return jsonify({"status": "ok"}), 200
-    
-    # Processa pagamentos reais com o SDK
-    if payment_id and sdk:
-        try:
-            payment_info = sdk.payment().get(str(payment_id)).get("response", {})
-            status = payment_info.get("status")
-
-            if status == "approved":
-                metadata = payment_info.get("metadata", {})
-                telegram_id = metadata.get("telegram_user_id")
-                target_username = metadata.get("target_username", "alvo")
-
-                if telegram_id and bot:
-                    bot.send_message(
-                        telegram_id,
-                        f"✅ *Pagamento Confirmado via Pix!*\n\n"
-                        f"Gerando relatório avançado para o alvo `@{target_username}`...",
-                        parse_mode="Markdown"
-                    )
-
-                    # Varredura completa para o relatório
-                    tool = OSINTTool(target_username)
-                    resultados = tool.run_checks()
-
-                    # Arquivo em memória
-                    documento = construir_relatorio_osint(target_username, resultados)
-
-                    # Envio no Telegram
-                    bot.send_document(
-                        chat_id=telegram_id,
-                        document=documento,
-                        caption=f"📄 *Relatório OSINT Completo — @{target_username}*\nObrigado por utilizar o Kronos Intel Bot!",
-                        parse_mode="Markdown"
-                    )
-        except Exception as e:
-            logger.error("Erro ao processar pagamento %s: %s", payment_id, str(e))
-
-    # Responde 200 OK para todas as requisições do Mercado Pago
     return jsonify({"status": "ok"}), 200
 
 @app.route("/")
