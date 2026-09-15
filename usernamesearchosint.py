@@ -177,7 +177,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE Mapeamento: Kronos Intelligence Engine v2.0
+SISTEMA DE MAPEAMENTO: Kronos Intelligence Engine v2.0
 ===================================================================
 
 1. RESUMO EXECUTIVO
@@ -199,7 +199,7 @@ SISTEMA DE Mapeamento: Kronos Intelligence Engine v2.0
     corpo_relatorio += f"""
 3. ANÁLISE DE FÓRUNS E MENÇÕES PÚBLICAS
 -------------------------------------------------------------------
-- Indexação de menções em motores de busca (Google/Bing/Ducks)
+- Indexação de menções em motores de busca (Google/Bing/DuckDuckGo)
 - Pesquisa de alias associado em comunidades (GitHub/Reddit/Steam)
 - Presença identificada em serviços de infraestrutura e código open-source.
 
@@ -268,12 +268,12 @@ if bot:
 
         if qr_pix:
             oferta_paga = (
-                f"🔒 *LIBERAR RELATÓRIO COMPLETO COMPLETO*\n"
+                f"🔒 *LIBERAR RELATÓRIO COMPLETO*\n"
                 f"───────────────────────────────\n"
                 f"• Todas as URLs diretas mapeadas\n"
                 f"• Mapeamento de fóruns e comunidades\n"
                 f"• Análise de exposição e recomendações\n"
-                f"• Relatório em formato de documento (.TXT/PDF)\n\n"
+                f"• Relatório em formato de documento (.TXT)\n\n"
                 f"💰 *Valor:* R$ 15,00\n"
                 f"Copie a chave Pix abaixo para pagar no seu app bancário:\n\n"
                 f"`{qr_pix}`\n\n"
@@ -289,47 +289,61 @@ def start_telegram_bot():
 if bot:
     threading.Thread(target=start_telegram_bot, daemon=True).start()
 
-# --- ROTA WEBHOOK DO MERCADO PAGO ---
+# --- ROTA WEBHOOK DO MERCADO PAGO ROBUSTA (ACEITA IPN E WEBHOOK V2) ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    if data and data.get("type") == "payment":
-        payment_id = data["data"]["id"]
-        
-        if sdk:
-            try:
-                payment_info = sdk.payment().get(payment_id).get("response", {})
-                
-                if payment_info.get("status") == "approved":
-                    metadata = payment_info.get("metadata", {})
-                    telegram_id = metadata.get("telegram_user_id")
-                    target_username = metadata.get("target_username", "alvo")
-                    
-                    if telegram_id and bot:
-                        bot.send_message(
-                            telegram_id,
-                            f"✅ *Pagamento Confirmado via Pix!*\n\n"
-                            f"Gerando relatório avançado para o alvo `@{target_username}`...",
-                            parse_mode="Markdown"
-                        )
-                        
-                        # Executa a varredura completa para montar o documento final
-                        tool = OSINTTool(target_username)
-                        resultados = tool.run_checks()
-                        
-                        # Gera o arquivo .txt em memória
-                        documento = construir_relatorio_osint(target_username, resultados)
-                        
-                        # Envia o arquivo no Telegram
-                        bot.send_document(
-                            chat_id=telegram_id,
-                            document=documento,
-                            caption=f"📄 *Relatório OSINT Completo — @{target_username}*\nObrigado por utilizar o Kronos Intel Bot!",
-                            parse_mode="Markdown"
-                        )
-            except Exception as e:
-                logger.error("Erro no processamento do Webhook: %s", str(e))
+    """Recebe notificações do Mercado Pago (via Webhook ou IPN)."""
+    payment_id = None
 
+    # 1. Tenta capturar o payload JSON (Webhook v2)
+    data = request.get_json(silent=True) or {}
+    
+    if data and data.get("type") == "payment":
+        payment_id = data.get("data", {}).get("id")
+    
+    # 2. Se não vier via JSON (ou for o formato antigo/teste IPN query string)
+    if not payment_id:
+        topic = request.args.get("topic") or request.args.get("type")
+        if topic == "payment":
+            payment_id = request.args.get("id")
+
+    # 3. Se identificou o ID do pagamento, processa com o SDK
+    if payment_id and sdk:
+        try:
+            payment_info = sdk.payment().get(str(payment_id)).get("response", {})
+            status = payment_info.get("status")
+
+            if status == "approved":
+                metadata = payment_info.get("metadata", {})
+                telegram_id = metadata.get("telegram_user_id")
+                target_username = metadata.get("target_username", "alvo")
+
+                if telegram_id and bot:
+                    bot.send_message(
+                        telegram_id,
+                        f"✅ *Pagamento Confirmado via Pix!*\n\n"
+                        f"Gerando relatório avançado para o alvo `@{target_username}`...",
+                        parse_mode="Markdown"
+                    )
+
+                    # Executa a busca técnica para montar o relatório
+                    tool = OSINTTool(target_username)
+                    resultados = tool.run_checks()
+
+                    # Monta o arquivo em memória
+                    documento = construir_relatorio_osint(target_username, resultados)
+
+                    # Envia o arquivo no Telegram
+                    bot.send_document(
+                        chat_id=telegram_id,
+                        document=documento,
+                        caption=f"📄 *Relatório OSINT Completo — @{target_username}*\nObrigado por utilizar o Kronos Intel Bot!",
+                        parse_mode="Markdown"
+                    )
+        except Exception as e:
+            logger.error("Erro ao processar pagamento %s: %s", payment_id, str(e))
+
+    # Retorna sempre 200 OK para o Mercado Pago não reprovar a URL
     return jsonify({"status": "ok"}), 200
 
 @app.route("/")
