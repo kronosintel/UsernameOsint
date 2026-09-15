@@ -156,9 +156,20 @@ class OSINTTool:
                 future.result()
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
+# --- GERADOR DO RELATÓRIO TÉCNICO OSINT COM DORKS E BUSCAS EXATAS ---
 def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    # Links de busca exata entre aspas (Exact Match Dorks)
+    google_dork_exact = f"https://www.google.com/search?q=%22{username}%22"
+    bing_dork_exact = f"https://www.bing.com/search?q=%22{username}%22"
+    ddg_dork_exact = f"https://duckduckgo.com/?q=%22{username}%22"
+    
+    # Dorks específicos para fóruns, vazamentos e comunidades
+    reddit_dork = f"https://www.google.com/search?q=site:reddit.com+%22{username}%22"
+    pastebin_dork = f"https://www.google.com/search?q=site:pastebin.com+%22{username}%22"
+    forum_dork = f"https://www.google.com/search?q=inurl:forum+%22{username}%22"
 
     corpo_relatorio = f"""===================================================================
                    KRONOS INTEL — RELATÓRIO OSINT
@@ -174,7 +185,7 @@ SISTEMA DE MAPEAMENTO: Kronos Intelligence Engine v2.0
 - Perfis e marcadores ativos confirmados: {len(encontrados)}
 - Nível de pegada digital (Exposição): {"ELEVADO" if len(encontrados) > 5 else "MODERADO"}
 
-2. PLATAFORMAS E PERFIS ENCONTRADOS
+2. PLATAFORMAS E PERFIS ENCONTRADOS DIRETAMENTE
 -------------------------------------------------------------------
 """
     if encontrados:
@@ -185,17 +196,25 @@ SISTEMA DE MAPEAMENTO: Kronos Intelligence Engine v2.0
         corpo_relatorio += "[-] Nenhum perfil público indexado nas bases padrão.\n"
 
     corpo_relatorio += f"""
-3. ANÁLISE DE FÓRUNS E MENÇÕES PÚBLICAS
+3. ANÁLISE DE FÓRUNS, MENÇÕES E INDEXAÇÃO DE BUSCA (EXACT MATCH)
 -------------------------------------------------------------------
-- Indexação de menções em motores de busca (Google/Bing/DuckDuckGo)
-- Pesquisa de alias associado em comunidades (GitHub/Reddit/Steam)
-- Presença identificada em serviços de infraestrutura e código open-source.
+Abaixo estão os links de varredura profunda contendo a busca exata entre
+aspas ("{username}") nos motores de busca e comunidades:
+
+[+] Google (Exact Match)     : {google_dork_exact}
+[+] Bing (Exact Match)       : {bing_dork_exact}
+[+] DuckDuckGo (Exact Match) : {ddg_dork_exact}
+
+Mapeamento em Fóruns e Texto Colado (Dorks Específicos):
+[+] Menções no Reddit        : {reddit_dork}
+[+] Registros no Pastebin    : {pastebin_dork}
+[+] Mapeamento em Fóruns     : {forum_dork}
 
 4. RECOMENDAÇÕES DE PRIVACIDADE
 -------------------------------------------------------------------
 - Alterar nomes de usuário repetidos em plataformas críticas.
 - Remover links cruzados entre perfis pessoais e fóruns técnicos.
-- Monitorar a reutilização de e-mails atrelados a este alias.
+- Monitorar os links de busca acima periodicamente para identificar menções não autorizadas.
 
 ===================================================================
 Documento confidencial gerado por Kronos Intel OSINT Service.
@@ -235,7 +254,7 @@ if bot:
                 f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
                 f"───────────────────────────────\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔒 Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado desse usuario por apenas R$ 9,99?"
+                f"🔒 Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado por apenas R$ 9,99?"
             )
             
             markup = InlineKeyboardMarkup(row_width=2)
