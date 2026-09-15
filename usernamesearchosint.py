@@ -1,6 +1,7 @@
-"""Username OSINT Checker com Monetização Pix e Acesso Exclusivo para Administrador."""
+"""Username OSINT Checker com Monetização Pix, QR Code Visual e Acesso de Administrador."""
 from __future__ import annotations
 
+import base64
 import io
 import logging
 import os
@@ -34,7 +35,7 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- SEU TELEGRAM ID EXCLUSIVO (APENAS VOCÊ TEM ACESSO GRATUITO) ---
+# --- SEU TELEGRAM ID EXCLUSIVO (APENAS VOCÊ TEM ACESSO GRATUITO DIRETO) ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
@@ -86,10 +87,11 @@ NOT_FOUND_MARKERS = {
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
 
-def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.99) -> str | None:
+# --- GERADOR PIX (RETORNA CHAVE E IMAGEM DO QR CODE) ---
+def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.99) -> tuple[str | None, bytes | None]:
     if not sdk:
         logger.error("SDK do Mercado Pago não inicializada.")
-        return None
+        return None, None
         
     payment_data = {
         "transaction_amount": float(valor),
@@ -106,11 +108,18 @@ def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.9
         }
     }
     try:
-        result = sdk.payment().create(payment_data)
-        return result.get("response", {}).get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code")
+        result = sdk.payment().create(payment_data).get("response", {})
+        tx_data = result.get("point_of_interaction", {}).get("transaction_data", {})
+        
+        qr_copia_cola = tx_data.get("qr_code")
+        qr_base64 = tx_data.get("qr_code_base64")
+        
+        img_bytes = base64.b64decode(qr_base64) if qr_base64 else None
+        
+        return qr_copia_cola, img_bytes
     except Exception as e:
         logger.error("Erro ao gerar Pix: %s", str(e))
-        return None
+        return None, None
 
 class OSINTTool:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
@@ -159,6 +168,7 @@ class OSINTTool:
                 future.result()
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
+# --- CONSTRUTOR DO RELATÓRIO TXT COM DORKS DE BUSCA EXATA ---
 def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -259,7 +269,7 @@ if bot:
             caption=f"👑 **[ADMIN ACCESS]** Relatório OSINT Completo — @{username}"
         )
 
-    # --- PROCESSAMENTO DE BUSCA COM DESVIO DE ADMIN ---
+    # --- PROCESSAMENTO DE BUSCA COM DESVIO PARA O ADMIN ---
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         username = message.text.strip().replace("@", "")
@@ -268,7 +278,7 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # SE FOR VOCÊ (ADMIN ID 5041637922), RECEBE O RELATÓRIO DIRETO
+        # SE FOR VOCÊ (ADMIN ID 5041637922), RECEBE O RELATÓRIO DIRETO SEM PAGAR
         if message.from_user.id == ADMIN_ID:
             bot.reply_to(message, f"👑 Olá Admin! Gerando relatório direto para @{username}...")
             tool = OSINTTool(username)
@@ -281,7 +291,7 @@ if bot:
             )
             return
 
-        # FLUXO MONETIZADO PARA TODOS OS OUTROS USUÁRIOS (PRÉVIA + PIX R$ 9,99)
+        # FLUXO PARA USUÁRIOS COMUNS (PRÉVIA + BOTÕES)
         bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -306,30 +316,45 @@ if bot:
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil padrão localizado para @{username}.")
 
+    # --- LISTENER DE CLIQUES (GERA QR CODE E CHAVE COPIÁVEL) ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
         if call.data.startswith("buy_"):
             target_username = call.data.split("buy_")[1]
             user_id = call.from_user.id
             
-            bot.answer_callback_query(call.id, "Gerando chave Pix...")
+            bot.answer_callback_query(call.id, "Gerando QR Code e Chave Pix...")
 
-            qr_pix = gerar_pix_mercadopago(user_id, target_username, valor=9.99)
+            qr_pix, qr_img_bytes = gerar_pix_mercadopago(user_id, target_username, valor=9.99)
 
             if qr_pix:
-                oferta_paga = (
-                    f"🔒 RELATÓRIO COMPLETO — @{target_username}\n"
+                texto_oferta = (
+                    f"🔒 *RELATÓRIO COMPLETO — @{target_username}*\n"
                     f"───────────────────────────────\n"
                     f"• Todas as URLs diretas mapeadas\n"
                     f"• Mapeamento de fóruns e comunidades\n"
                     f"• Análise de exposição e recomendações\n"
                     f"• Relatório em formato de documento (.TXT)\n\n"
-                    f"💰 Valor: R$ 9,99\n\n"
-                    f"Copie a chave Pix abaixo para pagar no seu app bancário:\n\n"
-                    f"{qr_pix}\n\n"
-                    f"⚡ O arquivo do relatório será enviado automaticamente assim que o Pix for aprovado."
+                    f"💰 *Valor:* R$ 9,99\n\n"
+                    f"👇 *Copie a chave Pix abaixo (basta tocar no código):*\n\n"
+                    f"`{qr_pix}`\n\n"
+                    f"⚡ *O relatório será enviado automaticamente assim que o pagamento for confirmado.*"
                 )
-                bot.send_message(call.message.chat.id, oferta_paga)
+                
+                # Se houver imagem do QR Code, envia a foto com a legenda
+                if qr_img_bytes:
+                    bot.send_photo(
+                        chat_id=call.message.chat.id,
+                        photo=qr_img_bytes,
+                        caption=texto_oferta,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    bot.send_message(
+                        chat_id=call.message.chat.id,
+                        text=texto_oferta,
+                        parse_mode="Markdown"
+                    )
             else:
                 bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
 
