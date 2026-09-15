@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Monetização Pix, QR Code Visual e Acesso de Administrador."""
+"""Username OSINT Checker com Monetização Pix, QR Code, Notificação de Vendas e Suporte."""
 from __future__ import annotations
 
 import base64
@@ -35,8 +35,9 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- SEU TELEGRAM ID EXCLUSIVO (APENAS VOCÊ TEM ACESSO GRATUITO DIRETO) ---
+# --- CONFIGURAÇÃO DE ADMINISTRADOR E SUPORTE ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
+SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")  # Insira seu @ sem o simbolo
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
@@ -87,7 +88,6 @@ NOT_FOUND_MARKERS = {
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
 
-# --- GERADOR PIX (RETORNA CHAVE E IMAGEM DO QR CODE) ---
 def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.99) -> tuple[str | None, bytes | None]:
     if not sdk:
         logger.error("SDK do Mercado Pago não inicializada.")
@@ -168,7 +168,6 @@ class OSINTTool:
                 future.result()
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
-# --- CONSTRUTOR DO RELATÓRIO TXT COM DORKS DE BUSCA EXATA ---
 def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -235,13 +234,15 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     return file_buffer
 
 if bot:
-    @bot.message_handler(commands=['start', 'help'])
+    @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
         bot.reply_to(
             message,
-            "👋 Kronos Intel — OSINT Bot\n\n"
+            "👋 *Kronos Intel — OSINT Bot*\n\n"
             "Envie qualquer nome de usuário para realizar a varredura gratuita inicial.\n"
-            "Exemplo: nome_do_alvo"
+            "Exemplo: `nome_do_alvo`\n\n"
+            f"🛠 *Precisa de ajuda ou suporte?*\nEntre em contato direto: @{SUPORTE_USERNAME}",
+            parse_mode="Markdown"
         )
 
     # --- COMANDO EXCLUSIVO DE ADMIN (/admin <username>) ---
@@ -269,7 +270,7 @@ if bot:
             caption=f"👑 **[ADMIN ACCESS]** Relatório OSINT Completo — @{username}"
         )
 
-    # --- PROCESSAMENTO DE BUSCA COM DESVIO PARA O ADMIN ---
+    # --- PROCESSAMENTO DE BUSCA ---
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         username = message.text.strip().replace("@", "")
@@ -278,7 +279,6 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # SE FOR VOCÊ (ADMIN ID 5041637922), RECEBE O RELATÓRIO DIRETO SEM PAGAR
         if message.from_user.id == ADMIN_ID:
             bot.reply_to(message, f"👑 Olá Admin! Gerando relatório direto para @{username}...")
             tool = OSINTTool(username)
@@ -291,7 +291,6 @@ if bot:
             )
             return
 
-        # FLUXO PARA USUÁRIOS COMUNS (PRÉVIA + BOTÕES)
         bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -310,13 +309,14 @@ if bot:
             markup = InlineKeyboardMarkup(row_width=2)
             btn_sim = InlineKeyboardButton("✅ Sim, quero o relatório!", callback_data=f"buy_{username}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="cancel_report")
+            btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao)
+            markup.add(btn_suporte)
 
             bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup)
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil padrão localizado para @{username}.")
 
-    # --- LISTENER DE CLIQUES (GERA QR CODE E CHAVE COPIÁVEL) ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
         if call.data.startswith("buy_"):
@@ -341,18 +341,23 @@ if bot:
                     f"⚡ *O relatório será enviado automaticamente assim que o pagamento for confirmado.*"
                 )
                 
-                # Se houver imagem do QR Code, envia a foto com a legenda
+                markup = InlineKeyboardMarkup()
+                btn_suporte = InlineKeyboardButton("💬 Precisa de Ajuda?", url=f"https://t.me/{SUPORTE_USERNAME}")
+                markup.add(btn_suporte)
+
                 if qr_img_bytes:
                     bot.send_photo(
                         chat_id=call.message.chat.id,
                         photo=qr_img_bytes,
                         caption=texto_oferta,
+                        reply_markup=markup,
                         parse_mode="Markdown"
                     )
                 else:
                     bot.send_message(
                         chat_id=call.message.chat.id,
                         text=texto_oferta,
+                        reply_markup=markup,
                         parse_mode="Markdown"
                     )
             else:
@@ -377,7 +382,7 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- ROTA WEBHOOK MERCADO PAGO ---
+# --- ROTA WEBHOOK MERCADO PAGO (NOTIFICA O ADMIN SOBRE VENDAS) ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -410,6 +415,7 @@ def webhook():
                     telegram_id = metadata.get("telegram_user_id")
                     target_username = metadata.get("target_username", "alvo")
 
+                    # 1. NOTIFICA O CLIENTE E ENTREGA O RELATÓRIO
                     if telegram_id and bot:
                         bot.send_message(
                             telegram_id,
@@ -425,6 +431,19 @@ def webhook():
                             document=documento,
                             caption=f"📄 Relatório OSINT Completo — @{target_username}\nObrigado por utilizar o Kronos Intel Bot!"
                         )
+
+                    # 2. NOTIFICA O ADMINISTRADOR (VOCÊ) SOBRE A NOVA VENDA
+                    if bot and ADMIN_ID:
+                        notificacao_admin = (
+                            f"💰 *NOVA VENDA APROVADA!*\n"
+                            f"───────────────────────────────\n"
+                            f"• *Valor:* R$ 9,99 (Pix)\n"
+                            f"• *ID Pagamento:* `{payment_id}`\n"
+                            f"• *Alvo Pesquisado:* `@{target_username}`\n"
+                            f"• *ID do Comprador:* `{telegram_id}`"
+                        )
+                        bot.send_message(ADMIN_ID, notificacao_admin, parse_mode="Markdown")
+
             except Exception as e:
                 logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
 
