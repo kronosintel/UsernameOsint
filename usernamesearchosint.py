@@ -289,25 +289,36 @@ def start_telegram_bot():
 if bot:
     threading.Thread(target=start_telegram_bot, daemon=True).start()
 
-# --- ROTA WEBHOOK DO MERCADO PAGO ROBUSTA (ACEITA IPN E WEBHOOK V2) ---
-@app.route("/webhook", methods=["POST"])
+# --- ROTA WEBHOOK / IPN TOTALMENTE COMPATÍVEL ---
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    """Recebe notificações do Mercado Pago (via Webhook ou IPN)."""
-    payment_id = None
+    """Recebe notificações do Mercado Pago (via Webhook v2, IPN e testes da plataforma)."""
+    # Se for uma verificação simples ou teste GET do Mercado Pago
+    if request.method == "GET":
+        topic = request.args.get("topic") or request.args.get("type")
+        payment_id = request.args.get("id")
+        
+        # Se for o teste fictício da plataforma (id=123456), responde 200 imediatamente
+        if payment_id == "123456":
+            return jsonify({"status": "ok", "message": "Teste IPN recebido com sucesso!"}), 200
 
-    # 1. Tenta capturar o payload JSON (Webhook v2)
+    # Captura o ID do pagamento de qualquer formato (JSON POST ou Query Params)
+    payment_id = None
     data = request.get_json(silent=True) or {}
-    
+
     if data and data.get("type") == "payment":
         payment_id = data.get("data", {}).get("id")
-    
-    # 2. Se não vier via JSON (ou for o formato antigo/teste IPN query string)
+
     if not payment_id:
         topic = request.args.get("topic") or request.args.get("type")
         if topic == "payment":
             payment_id = request.args.get("id")
 
-    # 3. Se identificou o ID do pagamento, processa com o SDK
+    # Tratamento para o ID fictício enviado no botão Experimentar
+    if str(payment_id) == "123456":
+        return jsonify({"status": "ok", "message": "Simulação validada com sucesso."}), 200
+
+    # Processa pagamentos reais com o SDK
     if payment_id and sdk:
         try:
             payment_info = sdk.payment().get(str(payment_id)).get("response", {})
@@ -326,14 +337,14 @@ def webhook():
                         parse_mode="Markdown"
                     )
 
-                    # Executa a busca técnica para montar o relatório
+                    # Varredura completa para o relatório
                     tool = OSINTTool(target_username)
                     resultados = tool.run_checks()
 
-                    # Monta o arquivo em memória
+                    # Arquivo em memória
                     documento = construir_relatorio_osint(target_username, resultados)
 
-                    # Envia o arquivo no Telegram
+                    # Envio no Telegram
                     bot.send_document(
                         chat_id=telegram_id,
                         document=documento,
@@ -343,7 +354,7 @@ def webhook():
         except Exception as e:
             logger.error("Erro ao processar pagamento %s: %s", payment_id, str(e))
 
-    # Retorna sempre 200 OK para o Mercado Pago não reprovar a URL
+    # Responde 200 OK para todas as requisições do Mercado Pago
     return jsonify({"status": "ok"}), 200
 
 @app.route("/")
