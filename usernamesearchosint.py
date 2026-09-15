@@ -289,35 +289,78 @@ def start_telegram_bot():
 if bot:
     threading.Thread(target=start_telegram_bot, daemon=True).start()
 
-# --- ROTA WEBHOOK / IPN TOTALMENTE COMPATÍVEL ---
+# --- ROTA WEBHOOK / IPN COMPATÍVEL COM TODOS OS TESTES DO MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    """Recebe notificações do Mercado Pago (via Webhook v2, IPN e testes da plataforma)."""
-    # Se for uma verificação simples ou teste GET do Mercado Pago
-    if request.method == "GET":
-        topic = request.args.get("topic") or request.args.get("type")
-        payment_id = request.args.get("id")
+    """Recebe notificações do Mercado Pago e responde 200 OK para todos os testes."""
+    try:
+        # 1. Tratamento para requisições GET (Simulação IPN)
+        if request.method == "GET":
+            payment_id = request.args.get("id")
+            if payment_id == "123456" or not payment_id:
+                return jsonify({"status": "ok", "message": "Teste GET IPN ok"}), 200
+
+        # 2. Captura o ID do pagamento sem estourar erro 400 no Werkzeug
+        payment_id = None
         
-        # Se for o teste fictício da plataforma (id=123456), responde 200 imediatamente
-        if payment_id == "123456":
-            return jsonify({"status": "ok", "message": "Teste IPN recebido com sucesso!"}), 200
-
-    # Captura o ID do pagamento de qualquer formato (JSON POST ou Query Params)
-    payment_id = None
-    data = request.get_json(silent=True) or {}
-
-    if data and data.get("type") == "payment":
-        payment_id = data.get("data", {}).get("id")
-
-    if not payment_id:
+        # Tenta pegar query params primeiro
         topic = request.args.get("topic") or request.args.get("type")
         if topic == "payment":
             payment_id = request.args.get("id")
 
-    # Tratamento para o ID fictício enviado no botão Experimentar
-    if str(payment_id) == "123456":
-        return jsonify({"status": "ok", "message": "Simulação validada com sucesso."}), 200
+        # Se não achou nos query params, tenta ler do corpo JSON
+        if not payment_id:
+            data = request.get_json(force=True, silent=True) or {}
+            if isinstance(data, dict):
+                if data.get("type") == "payment":
+                    payment_id = data.get("data", {}).get("id")
+                elif "id" in data:
+                    payment_id = data.get("id")
 
+        # 3. Se for a simulação de teste da plataforma (id=123456), aprova imediatamente
+        if str(payment_id) == "123456" or not payment_id:
+            return jsonify({"status": "ok", "message": "Teste de notificacao validado"}), 200
+
+        # 4. Se for um pagamento REAL recebido
+        if payment_id and sdk:
+            try:
+                payment_info = sdk.payment().get(str(payment_id)).get("response", {})
+                status = payment_info.get("status")
+
+                if status == "approved":
+                    metadata = payment_info.get("metadata", {})
+                    telegram_id = metadata.get("telegram_user_id")
+                    target_username = metadata.get("target_username", "alvo")
+
+                    if telegram_id and bot:
+                        bot.send_message(
+                            telegram_id,
+                            f"✅ *Pagamento Confirmado via Pix!*\n\n"
+                            f"Gerando relatório avançado para o alvo `@{target_username}`...",
+                            parse_mode="Markdown"
+                        )
+
+                        # Executa a varredura completa
+                        tool = OSINTTool(target_username)
+                        resultados = tool.run_checks()
+
+                        # Monta e envia o documento no Telegram
+                        documento = construir_relatorio_osint(target_username, resultados)
+                        bot.send_document(
+                            chat_id=telegram_id,
+                            document=documento,
+                            caption=f"📄 *Relatório OSINT Completo — @{target_username}*\nObrigado por utilizar o Kronos Intel Bot!",
+                            parse_mode="Markdown"
+                        )
+            except Exception as e:
+                logger.error("Erro ao processar pagamento real %s: %s", payment_id, str(e))
+
+    except Exception as general_err:
+        logger.error("Erro generico no webhook: %s", str(general_err))
+
+    # Retorna sempre 200 OK para o Mercado Pago não travar a URL
+    return jsonify({"status": "ok"}), 200
+    
     # Processa pagamentos reais com o SDK
     if payment_id and sdk:
         try:
