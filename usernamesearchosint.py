@@ -1,7 +1,4 @@
-"""Username OSINT Checker com Monetização Pix no Mercado Pago e Relatório Detalhado.
-
-Realiza verificações públicas de usernames e gera relatórios avançados pós-pagamento.
-"""
+"""Username OSINT Checker com Monetização Pix no Mercado Pago e Relatório Detalhado."""
 from __future__ import annotations
 
 import io
@@ -9,7 +6,6 @@ import logging
 import os
 import re
 import secrets
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Lock
@@ -17,19 +13,16 @@ from typing import Any
 
 import requests
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
 from flask import Flask, jsonify, request
-from werkzeug.exceptions import BadRequest
 
-# Configuração de Logs
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Configuração da Aplicação Flask
 app = Flask(__name__)
 app.config.update(
     SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
@@ -41,12 +34,10 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- CONFIGURAÇÃO DO MERCADO PAGO ---
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 
 PLATFORM_URLS = {
-    # Código e Tecnologia
     "GitHub": "https://api.github.com/users/{username}",
     "GitLab": "https://gitlab.com/{username}",
     "Bitbucket": "https://bitbucket.org/{username}/",
@@ -56,7 +47,6 @@ PLATFORM_URLS = {
     "Hugging Face": "https://huggingface.co/{username}",
     "Kaggle": "https://www.kaggle.com/{username}",
     "Keybase": "https://keybase.io/{username}",
-    # Redes e Comunidades
     "Instagram": "https://www.instagram.com/{username}/",
     "X": "https://x.com/{username}",
     "LinkedIn": "https://www.linkedin.com/in/{username}/",
@@ -64,7 +54,6 @@ PLATFORM_URLS = {
     "TikTok": "https://www.tiktok.com/@{username}",
     "Pinterest": "https://www.pinterest.com/{username}/",
     "Telegram": "https://t.me/{username}",
-    # Conteúdo e Fóruns
     "Medium": "https://medium.com/@{username}",
     "Substack": "https://{username}.substack.com",
     "DeviantArt": "https://www.deviantart.com/{username}",
@@ -164,7 +153,6 @@ class OSINTTool:
                 future.result()
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
-# --- GERADOR DO RELATÓRIO TÉCNICO OSINT ---
 def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -214,7 +202,6 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     file_buffer.name = f"Relatorio_OSINT_{username}.txt"
     return file_buffer
 
-# --- INICIALIZAÇÃO DO BOT DO TELEGRAM ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 bot = telebot.TeleBot(TOKEN) if TOKEN else None
 
@@ -239,12 +226,10 @@ if bot:
 
         bot.reply_to(message, f"🔎 *Iniciando varredura OSINT para @{username}...*", parse_mode="Markdown")
 
-        # Executa busca pública
         tool = OSINTTool(username)
         results = tool.run_checks()
         encontrados = [p for p, data in results.items() if data.get("exists") is True]
 
-        # Exibição Atraente da Prévia Gratuita + Botões de Ação
         if encontrados:
             preview_plataformas = "\n".join([f"• `{p}`" for p in encontrados[:5]])
             texto_gratuito = (
@@ -254,7 +239,6 @@ if bot:
                 f"🔒 *Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado por apenas R$ 9,99?*"
             )
             
-            # Criação dos Botões Inline (Sim / Não)
             markup = InlineKeyboardMarkup(row_width=2)
             btn_sim = InlineKeyboardButton("✅ Sim, quero o relatório!", callback_data=f"buy_{username}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="cancel_report")
@@ -268,7 +252,6 @@ if bot:
                 parse_mode="Markdown"
             )
 
-    # --- PROCESSADOR DE CLIQUES NOS BOTÕES ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
         if call.data.startswith("buy_"):
@@ -277,7 +260,6 @@ if bot:
             
             bot.answer_callback_query(call.id, "Gerando chave Pix...")
 
-            # Gerar Pix de R$ 9,99
             qr_pix = gerar_pix_mercadopago(user_id, target_username, valor=9.99)
 
             if qr_pix:
@@ -306,18 +288,19 @@ if bot:
                 parse_mode="Markdown"
             )
 
-def start_telegram_bot():
-    if bot:
-        logger.info("Iniciando escuta do Bot Telegram...")
-        bot.infinity_polling(skip_pending=True)
+# --- WEBHOOK DO TELEGRAM (PROCESSA MENSAGENS SEM POLLING) ---
+@app.route(f"/telegram/{TOKEN}" if TOKEN else "/telegram_webhook", methods=["POST"])
+def telegram_webhook():
+    if bot and request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return jsonify({"status": "ok"}), 200
+    return jsonify({"error": "unauthorized"}), 403
 
-if bot:
-    threading.Thread(target=start_telegram_bot, daemon=True).start()
-
-# --- ROTA WEBHOOK / IPN COMPATÍVEL COM MERCADO PAGO ---
+# --- ROTA WEBHOOK MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    """Recebe notificações do Mercado Pago e libera o relatório pós-pagamento."""
     try:
         if request.method == "GET" or request.args.get("id") == "123456":
             return jsonify({"status": "ok"}), 200
