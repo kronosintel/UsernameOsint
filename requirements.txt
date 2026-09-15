@@ -2,4 +2,4 @@ pyTelegramBotAPI
 requests
 flask
 werkzeug
-telebot
+
