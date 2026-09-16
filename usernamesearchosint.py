@@ -1,9 +1,9 @@
 """
-Kronos Intel OSINT Bot v3.5
+Kronos Intel OSINT Bot v3.6 (Sem Travar / Sem Loop)
+- Execução isolada de Asyncio via Thread para evitar loops no Flask/Telebot
 - Preço Otimizado (R$ 3,90 com Ancoragem)
-- Remarketing Automático para Pix Não Pago
-- Análise de Vazamentos de Dados e E-mail / Breaches
-- Motor Assíncrono (aiohttp) & Banco de Dados SQLite
+- Remarketing Automático em Background
+- Banco de Dados SQLite & Dorks Judiciais
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import re
 import secrets
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date
 from threading import Lock, Thread
 from typing import Any
@@ -51,7 +52,7 @@ app.config.update(
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "6"))
 PORT = int(os.getenv("PORT", "5000"))
-PRECO_VIP = 3.90  # VALOR DE ALTA CONVERSÃO
+PRECO_VIP = 3.90
 DB_FILE = "kronos_osint.db"
 db_lock = Lock()
 
@@ -244,47 +245,51 @@ def registrar_indicacao(referrer_id: int, new_user_id: int):
             except Exception:
                 pass
 
-# --- ENGINE OSINT ASSÍNCRONA ---
-class AsyncOSINTTool:
+# --- ENGINE OSINT MULTI-THREADING (SEGURA E SEM LOOP) ---
+class OSINTTool:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
         self.username = username
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.timeout = timeout
+        self.results: dict[str, dict[str, Any]] = {}
+        self._lock = Lock()
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-    async def check_platform(self, session: aiohttp.ClientSession, platform: str, url: str) -> tuple[str, dict[str, Any]]:
+    def validate_profile(self, platform: str, url: str) -> None:
         try:
-            async with session.get(url, headers=self.headers, timeout=self.timeout, allow_redirects=True) as resp:
-                status = resp.status
-                if status == 404:
-                    return platform, {"exists": False}
-                elif 200 <= status < 400:
-                    text = (await resp.text(errors='ignore'))[:100000].lower()
-                    markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
-                    if any(m in text for m in markers):
-                        return platform, {"exists": False}
-                    return platform, {"exists": True, "url": url}
+            resp = requests.get(url, headers=self.headers, timeout=self.timeout, allow_redirects=True)
+            status = resp.status_code
+            if status == 404:
+                res = {"exists": False}
+            elif 200 <= status < 400:
+                body = resp.text[:100000].lower()
+                markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
+                if any(m in body for m in markers):
+                    res = {"exists": False}
                 else:
-                    return platform, {"exists": None}
+                    res = {"exists": True, "url": url}
+            else:
+                res = {"exists": None}
         except Exception:
-            return platform, {"exists": None}
+            res = {"exists": None}
 
-    async def run(self) -> dict[str, dict[str, Any]]:
-        results = {}
-        async with aiohttp.ClientSession() as session:
-            tasks = [
-                self.check_platform(session, p, u.format(username=self.username))
+        with self._lock:
+            self.results[platform] = res
+
+    def run_checks(self) -> dict[str, dict[str, Any]]:
+        with ThreadPoolExecutor(max_workers=25) as executor:
+            futures = [
+                executor.submit(self.validate_profile, p, u.format(username=self.username))
                 for p, u in PLATFORM_URLS.items()
             ]
-            completed = await asyncio.gather(*tasks)
-            for p, res in completed:
-                results[p] = res
-        return results
+            for f in futures:
+                f.result()
+        return self.results
 
 def executar_varredura_osint(username: str) -> dict[str, dict[str, Any]]:
-    return asyncio.run(AsyncOSINTTool(username).run())
+    return OSINTTool(username).run_checks()
 
 # --- RELATÓRIOS E ANÁLISE DE VAZAMENTOS ---
 def calcular_score_exposicao(encontrados_count: int, total_auditado: int) -> tuple[int, str]:
@@ -310,7 +315,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v3.5 (Async + Leak Check)
+SISTEMA DE MAPEAMENTO: Kronos Engine v3.6
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -436,12 +441,21 @@ def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = PRE
         logger.error("Erro ao gerar Pix: %s", str(e))
         return None, None
 
-# --- RECURSO DE REMARKETING AUTOMÁTICO (CARRINHO ABANDONADO) ---
+def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
+    if bot and ADMIN_ID and user_id != ADMIN_ID:
+        try:
+            documento.seek(0)
+            captura_legenda = f"👁‍🗨 [ESPELHO OSINT]\n• Tipo: {tipo_consulta}\n• Usuário Solicitante: {user_id}\n• Alvo: @{username}"
+            bot.send_document(chat_id=ADMIN_ID, document=documento, caption=captura_legenda)
+            documento.seek(0)
+        except Exception as e:
+            logger.error("Erro ao enviar cópia ao admin: %s", str(e))
+
+# --- REMARKETING AUTOMÁTICO EM THREAD SEPARADA ---
 def worker_remarketing_pix():
-    """Worker rodando em segundo plano para lembrar usuários de Pix pendentes após 10 minutos."""
     while True:
         try:
-            time.sleep(60)  # Checa a cada 1 minuto
+            time.sleep(60)
             pendentes = db_execute(
                 "SELECT payment_id, user_id, target_username, created_at FROM payments WHERE status = 'pending' AND reminded = 0",
                 fetchall=True
@@ -454,9 +468,7 @@ def worker_remarketing_pix():
                 pid, uid, target, created_str = p[0], p[1], p[2], p[3]
                 try:
                     created_time = datetime.fromisoformat(created_str)
-                    diff_minutes = (now - created_time).total_seconds() / 60
-                    
-                    if diff_minutes >= 10:
+                    if (now - created_time).total_seconds() / 60 >= 10:
                         db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
                         if bot:
                             msg_lembrete = (
@@ -470,12 +482,11 @@ def worker_remarketing_pix():
                             markup.add(InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{SUPORTE_USERNAME}"))
                             bot.send_message(uid, msg_lembrete, reply_markup=markup, parse_mode="Markdown")
                 except Exception as ex:
-                    logger.error("Erro no envio do remarketing: %s", str(ex))
+                    logger.error("Erro no remarketing: %s", str(ex))
 
         except Exception as e:
             logger.error("Erro no worker de remarketing: %s", str(e))
 
-# Inicia thread de remarketing
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
 # --- COMANDOS E FLUXO TELEGRAM ---
@@ -495,14 +506,13 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v3.5\n\n"
+            f"👋 Kronos Intel — OSINT Bot v3.6\n\n"
             f"Você tem direito a 1 consulta gratuita por dia.\n"
             f"Envie o nome de usuário desejado para pesquisar a pegada digital.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
         )
 
-    # PAINEL DE ESTATÍSTICAS ADMIN
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -543,7 +553,6 @@ if bot:
         except Exception as e:
             bot.reply_to(message, f"⚠️ Erro ao conceder créditos: {str(e)}")
 
-    # PROCESSADOR PRINCIPAL DE BUSCA
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         user_id = message.from_user.id
@@ -797,7 +806,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v3.5 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v3.6 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
