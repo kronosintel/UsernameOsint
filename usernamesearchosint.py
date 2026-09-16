@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Busca Expandida, Cota Diária, Indicação Estratégica e Pix a R$ 4,99."""
+"""Username OSINT Checker com Busca Expandida, Pacote VIP Bônus, PDF Executivo e Pix a R$ 4,99."""
 from __future__ import annotations
 
 import base64
@@ -363,37 +363,16 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
 
         styles = getSampleStyleSheet()
         title_style = ParagraphStyle(
-            'TitleStyle',
-            parent=styles['Heading1'],
-            fontName='Helvetica-Bold',
-            fontSize=20,
-            textColor=colors.HexColor('#1E293B'),
-            spaceAfter=6
+            'TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=20, textColor=colors.HexColor('#1E293B'), spaceAfter=6
         )
         subtitle_style = ParagraphStyle(
-            'SubTitleStyle',
-            parent=styles['Normal'],
-            fontName='Helvetica',
-            fontSize=10,
-            textColor=colors.HexColor('#64748B'),
-            spaceAfter=15
+            'SubTitleStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#64748B'), spaceAfter=15
         )
         heading_style = ParagraphStyle(
-            'HeadingStyle',
-            parent=styles['Heading2'],
-            fontName='Helvetica-Bold',
-            fontSize=12,
-            textColor=colors.HexColor('#0F172A'),
-            spaceBefore=12,
-            spaceAfter=8
+            'HeadingStyle', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#0F172A'), spaceBefore=12, spaceAfter=8
         )
         body_style = ParagraphStyle(
-            'BodyStyle',
-            parent=styles['Normal'],
-            fontName='Helvetica',
-            fontSize=9,
-            textColor=colors.HexColor('#334155'),
-            leading=12
+            'BodyStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#334155'), leading=12
         )
 
         elements = []
@@ -450,6 +429,45 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
         return pdf_buffer
     except Exception as e:
         logger.error("Erro ao gerar PDF: %s", str(e))
+        return None
+
+# --- GERADOR DE GUIA BÔNUS EM PDF (ENTREGÁVEL EXCLUSIVO VIP) ---
+def construir_guia_protecao_pdf() -> io.BytesIO | None:
+    if not HAS_REPORTLAB:
+        return None
+
+    try:
+        pdf_buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle('TStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#0F172A'), spaceAfter=8)
+        body_style = ParagraphStyle('BStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#334155'), leading=14)
+
+        elements = [
+            Paragraph("GUIA KRONOS: SANITIZAÇÃO DE PEGADA DIGITAL", title_style),
+            Paragraph("<b>Bônus Exclusivo do Pacote VIP OSINT</b>", body_style),
+            HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#10B981'), spaceAfter=12),
+            Spacer(1, 10),
+            Paragraph("<b>1. Desvincule usernames repetidos:</b> Evite reutilizar a mesma ID em fóruns, redes sociais e games.", body_style),
+            Spacer(1, 8),
+            Paragraph("<b>2. Remova perfis em desuso:</b> Exclua ou desative contas antigas em plataformas que você não utiliza mais.", body_style),
+            Spacer(1, 8),
+            Paragraph("<b>3. Mantenha 2FA Ativo:</b> Utilize autenticação em duas etapas por aplicativo em serviços críticos.", body_style),
+            Spacer(1, 8),
+            Paragraph("<b>4. Auditoria Periódica:</b> Realize pesquisas regulares para verificar novos registros no seu nome.", body_style),
+            Spacer(1, 15),
+            Paragraph("<i>Documento educativo fornecido por Kronos Intel.</i>", body_style)
+        ]
+
+        doc.build(elements)
+        pdf_buffer.seek(0)
+        pdf_buffer.name = "Guia_Protecao_Pegada_Digital_Kronos.pdf"
+        return pdf_buffer
+    except Exception as e:
+        logger.error("Erro ao gerar Guia PDF: %s", str(e))
         return None
 
 def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
@@ -533,6 +551,7 @@ if bot:
         resultados = tool.run_checks()
         documento = construir_relatorio_osint(username, resultados)
         pdf_doc = construir_relatorio_pdf(username, resultados)
+        guia_pdf = construir_guia_protecao_pdf()
         registrar_relatorio_gerado()
 
         if pdf_doc:
@@ -546,6 +565,12 @@ if bot:
             document=documento,
             caption=f"📄 Relatório OSINT Texto — @{username}"
         )
+        if guia_pdf:
+            bot.send_document(
+                chat_id=message.chat.id,
+                document=guia_pdf,
+                caption="📘 Guia de Sanitização da Pegada Digital (Bônus)"
+            )
 
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
@@ -601,7 +626,7 @@ if bot:
                 )
             return
 
-        # FLUXO QUANDO A COTA EXPIROU (OFERTA PAGA R$ 4,99 + INDICAÇÃO)
+        # FLUXO QUANDO A COTA EXPIROU (OFERTA PAGA R$ 4,99)
         bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -618,14 +643,17 @@ if bot:
                 f"───────────────────────────────\n"
                 f"⚠️ Sua cota gratuita de hoje foi expirada.\n\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔒 Deseja liberar o relatório executivo completo agora por apenas R$ 4,99?\n\n"
+                f"🔒 Deseja liberar o Pacote VIP Completo por apenas R$ 4,99?\n"
+                f"• Relatório OSINT Executivo em PDF\n"
+                f"• Módulo de Dorks de Busca Profunda\n"
+                f"• Guia Bônus de Sanitização Digital em PDF\n\n"
                 f"🎁 GANHE CONSULTAS GRÁTIS:\n"
                 f"Envie o seu link abaixo para 3 amigos e ganhe +1 consulta gratuita:\n"
                 f"{ref_link}"
             )
             
             markup = InlineKeyboardMarkup(row_width=2)
-            btn_sim = InlineKeyboardButton("⚡ Liberar Relatório (R$ 4,99)", callback_data=f"buy_{username}")
+            btn_sim = InlineKeyboardButton("⚡ Liberar Pacote VIP (R$ 4,99)", callback_data=f"buy_{username}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao)
@@ -652,11 +680,12 @@ if bot:
                     f"• Todas as URLs diretas mapeadas\n"
                     f"• Mapeamento de fóruns e comunidades\n"
                     f"• Análise de exposição e recomendações\n"
-                    f"• Relatório executivo (.PDF / .TXT)\n\n"
+                    f"• Relatório executivo (.PDF / .TXT)\n"
+                    f"• Guia Bônus de Proteção Digital inclusos!\n\n"
                     f"💰 Valor: R$ 4,99\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
-                    f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmed."
+                    f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmado."
                 )
                 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -689,16 +718,17 @@ if bot:
 
             texto_atencao = (
                 f"⚠️ Tem certeza de que deseja cancelar a consulta de @{target_username}?\n\n"
-                f"O relatório completo revela todas as menções do username em:\n"
+                f"O Pacote VIP revela todas as menções do username em:\n"
                 f"• Motores de busca avançados (Google Exact Match)\n"
                 f"• Fóruns técnicos e comunidades (Reddit, Pastebin)\n"
-                f"• Histórico de cadastros e registros públicos\n\n"
+                f"• Histórico de cadastros e registros públicos\n"
+                f"• Inclui Guia Bônus em PDF de Proteção Digital\n\n"
                 f"💡 Aproveite a promoção por apenas R$ 4,99 ou indique 3 amigos usando o link abaixo para desbloquear de graça:\n"
                 f"{ref_link}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("⚡ Quero liberar agora (R$ 4,99)", callback_data=f"buy_{target_username}")
+            btn_sim = InlineKeyboardButton("⚡ Quero liberar Pacote VIP (R$ 4,99)", callback_data=f"buy_{target_username}")
             btn_nao = InlineKeyboardButton("❌ Sim, quero cancelar mesmo", callback_data="final_cancel")
             markup.add(btn_sim, btn_nao)
 
@@ -748,7 +778,7 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- ROTA WEBHOOK MERCADO PAGO ---
+# --- ROTA WEBHOOK MERCADO PAGO (PACOTE VIP COMPLETO PÓS-PAGAMENTO) ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -793,28 +823,41 @@ def webhook():
                     if telegram_id and bot:
                         bot.send_message(
                             telegram_id,
-                            f"✅ Pagamento de R$ 4,99 Confirmado via Pix!\n\nGerando relatório avançado para @{target_username}..."
+                            f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\n"
+                            f"Obrigado por adquirir o pacote completo de @{target_username}!\n"
+                            f"Gerando relatórios e bônus executivos..."
                         )
 
                         tool = OSINTTool(target_username)
                         resultados = tool.run_checks()
                         documento = construir_relatorio_osint(target_username, resultados)
                         pdf_doc = construir_relatorio_pdf(target_username, resultados)
+                        guia_pdf = construir_guia_protecao_pdf()
                         registrar_relatorio_gerado()
 
                         enviar_relatorio_espelho_admin(target_username, documento, telegram_id, "VENDA PIX APROVADA")
 
+                        # 1. Envia Relatório Executivo em PDF (Se disponível)
                         if pdf_doc:
                             bot.send_document(
                                 chat_id=telegram_id,
                                 document=pdf_doc,
-                                caption=f"📄 Relatório OSINT Executivo PDF — @{target_username}\nObrigado por utilizar o Kronos Intel Bot!"
+                                caption=f"📄 Relatório OSINT Executivo PDF — @{target_username}"
                             )
-                        else:
+
+                        # 2. Envia Relatório Completo em TXT
+                        bot.send_document(
+                            chat_id=telegram_id,
+                            document=documento,
+                            caption=f"📝 Relatório OSINT Texto Bruto — @{target_username}"
+                        )
+
+                        # 3. Envia Guia Bônus em PDF
+                        if guia_pdf:
                             bot.send_document(
                                 chat_id=telegram_id,
-                                document=documento,
-                                caption=f"📄 Relatório OSINT Completo — @{target_username}\nObrigado por utilizar o Kronos Intel Bot!"
+                                document=guia_pdf,
+                                caption="📘 Guia Bônus: Checklist de Proteção da Pegada Digital"
                             )
 
                     if bot and ADMIN_ID:
