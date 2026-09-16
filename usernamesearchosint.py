@@ -178,13 +178,11 @@ def registrar_indicacao(referrer_id: int, new_user_id: int):
                     try:
                         bot.send_message(
                             referrer_id,
-                            "🎉 Você indicou 3 amigos e ganhou **+1 consulta gratuita** no Kronos Intel!",
-                            parse_mode="Markdown"
+                            "🎉 Você indicou 3 amigos e ganhou +1 consulta gratuita no Kronos Intel!"
                         )
                     except Exception:
                         pass
 
-# --- GERADOR PIX AJUSTADO PARA R$ 4,99 ---
 def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 4.99) -> tuple[str | None, bytes | None]:
     if not sdk:
         logger.error("SDK do Mercado Pago não inicializada.")
@@ -491,11 +489,10 @@ if bot:
         bot.reply_to(
             message,
             f"👋 Kronos Intel — OSINT Bot\n\n"
-            f"Você tem direito a **1 relatório completo gratuito por dia**.\n"
+            f"Você tem direito a 1 relatório completo gratuito por dia.\n"
             f"Envie o nome de usuário desejado para iniciar a consulta.\n"
-            f"Exemplo: `nome_do_alvo`\n\n"
-            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}",
-            parse_mode="Markdown"
+            f"Exemplo: nome_do_alvo\n\n"
+            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}"
         )
 
     @bot.message_handler(commands=['stats'])
@@ -604,7 +601,7 @@ if bot:
                 )
             return
 
-        # FLUXO QUANDO A COTA EXPIROU (PAGAMENTO R$ 4,99 OU INDICAÇÃO)
+        # FLUXO QUANDO A COTA EXPIROU (OFERTA PAGA R$ 4,99 + INDICAÇÃO)
         bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -622,9 +619,9 @@ if bot:
                 f"⚠️ Sua cota gratuita de hoje foi expirada.\n\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
                 f"🔒 Deseja liberar o relatório executivo completo agora por apenas R$ 4,99?\n\n"
-                f"🎁 *GANHE CONSULTAS GRÁTIS:*\n"
+                f"🎁 GANHE CONSULTAS GRÁTIS:\n"
                 f"Envie o seu link abaixo para 3 amigos e ganhe +1 consulta gratuita:\n"
-                f"`{ref_link}`"
+                f"{ref_link}"
             )
             
             markup = InlineKeyboardMarkup(row_width=2)
@@ -634,7 +631,7 @@ if bot:
             markup.add(btn_sim, btn_nao)
             markup.add(btn_suporte)
 
-            bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup)
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
 
@@ -659,7 +656,7 @@ if bot:
                     f"💰 Valor: R$ 4,99\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
-                    f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmado."
+                    f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmed."
                 )
                 
                 markup = InlineKeyboardMarkup(row_width=1)
