@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Busca Expandida, Cota Diária Gratuita, Notificações ao Admin e Monetização Pix."""
+"""Username OSINT Checker com Busca Expandida, Cota Diária Única, Notificações e Monetização Pix."""
 from __future__ import annotations
 
 import base64
@@ -57,7 +57,6 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else Non
 
 # --- BASE EXPANDIDA DE PLATAFORMAS ---
 PLATFORM_URLS = {
-    # Desenvolvedores & Código
     "GitHub": "https://api.github.com/users/{username}",
     "GitLab": "https://gitlab.com/{username}",
     "Bitbucket": "https://bitbucket.org/{username}/",
@@ -69,8 +68,6 @@ PLATFORM_URLS = {
     "Replit": "https://replit.com/@{username}",
     "CodePen": "https://codepen.io/{username}",
     "StackOverflow": "https://stackoverflow.com/users/{username}",
-
-    # Mídias Sociais & Comunicação
     "Instagram": "https://www.instagram.com/{username}/",
     "X (Twitter)": "https://x.com/{username}",
     "LinkedIn": "https://www.linkedin.com/in/{username}/",
@@ -83,8 +80,6 @@ PLATFORM_URLS = {
     "Threads": "https://www.threads.net/@{username}",
     "Mastodon": "https://mastodon.social/@{username}",
     "Bluesky": "https://bsky.app/profile/{username}.bsky.social",
-
-    # Publicações, Blogs & Mídia
     "Medium": "https://medium.com/@{username}",
     "Substack": "https://{username}.substack.com",
     "DeviantArt": "https://www.deviantart.com/{username}",
@@ -94,8 +89,6 @@ PLATFORM_URLS = {
     "Patreon": "https://www.patreon.com/{username}",
     "Flickr": "https://www.flickr.com/people/{username}/",
     "WordPress": "https://{username}.wordpress.com",
-
-    # Games & Streaming
     "Steam": "https://steamcommunity.com/id/{username}",
     "Twitch": "https://www.twitch.tv/{username}",
     "YouTube": "https://www.youtube.com/@{username}",
@@ -105,8 +98,6 @@ PLATFORM_URLS = {
     "Roblox": "https://www.roblox.com/user.aspx?username={username}",
     "Lichess": "https://lichess.org/@/{username}",
     "Kick": "https://kick.com/{username}",
-
-    # Identidade & Serviços
     "Keybase": "https://keybase.io/{username}",
     "About.me": "https://about.me/{username}",
     "Linktree": "https://linktr.ee/{username}",
@@ -302,7 +293,8 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     return file_buffer
 
 def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
-    if bot and ADMIN_ID:
+    # SÓ ENVIA O ESPELHO SE O SOLICITANTE NÃO FOR O PRÓPRIO ADMIN
+    if bot and ADMIN_ID and user_id != ADMIN_ID:
         try:
             documento.seek(0)
             captura_legenda = (
@@ -388,9 +380,10 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
+        # VERIFICA A COTA GRATUITA (RÍGIDO: APENAS 1 POR DIA PARA QUALQUER USUÁRIO)
         tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
 
-        if tem_cota_gratis or user_id == ADMIN_ID:
+        if tem_cota_gratis:
             bot.reply_to(message, f"🎁 Cota diária gratuita ativada! Processando relatório para @{username}...")
             tool = OSINTTool(username)
             resultados = tool.run_checks()
@@ -406,6 +399,7 @@ if bot:
             )
             return
 
+        # A PARTIR DA 2ª CONSULTA DO DIA, EXIGE PAGAMENTO
         bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
