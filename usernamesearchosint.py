@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Experiência de Usuário Comum por Padrão e Comando /admin Sob Demanda."""
+"""Username OSINT Checker com Trava Rígida de Cota Única por Dia e Salvação JSON Imediata."""
 from __future__ import annotations
 
 import base64
@@ -181,11 +181,13 @@ def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
             return True
             
         ultima_consulta = FREE_DAILY_USAGE.get(uid_str)
-        if ultima_consulta != hoje_str:
-            FREE_DAILY_USAGE[uid_str] = hoje_str
-            salvar_dados_disco()
-            return True
-        return False
+        if ultima_consulta == hoje_str:
+            return False  # Cota já utilizada hoje
+
+        # Consome a cota e grava IMEDIATAMENTE no disco
+        FREE_DAILY_USAGE[uid_str] = hoje_str
+        salvar_dados_disco()
+        return True
 
 def registrar_acesso_usuario(user_id: int):
     global TOTAL_SEARCHES
@@ -569,7 +571,6 @@ if bot:
         texto_msg = message.text.strip()
         eh_comando_admin = False
 
-        # SE O TEXTO CONTIER A PALAVRA "ADMIN" E O SOLICITANTE FOR O SEU ADMIN_ID
         if "admin" in texto_msg.lower() and user_id == ADMIN_ID:
             eh_comando_admin = True
             username = texto_msg.lower().replace("admin", "").replace("@", "").strip()
@@ -580,7 +581,7 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # FLUXO SE VOCÊ CHAMAR COMO ADMIN
+        # FLUXO SE VOCÊ ATIVAR O MODO ADMIN
         if eh_comando_admin:
             msg_status = bot.reply_to(message, f"👑 [ACESSO ADMIN] Processando Pacote VIP para @{username}...")
             
@@ -615,7 +616,7 @@ if bot:
                 )
             return
 
-        # FLUXO DE USUÁRIO COMUM (INCLUSO PARA VOCÊ SE NÃO USAR 'ADMIN')
+        # VERIFICAÇÃO E CONSUMO RÍGIDO DE COTA
         tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
 
         if tem_cota_gratis:
@@ -646,6 +647,7 @@ if bot:
             except Exception:
                 pass
 
+            # ENVIO DE UM ÚNICO RELATÓRIO (PDF OU TXT)
             if pdf_doc:
                 bot.send_document(
                     chat_id=message.chat.id,
@@ -660,7 +662,7 @@ if bot:
                 )
             return
 
-        # FLUXO SE A COTA DIÁRIA EXPIROU (PAGAMENTO R$ 4,99)
+        # FLUXO APÓS A COTA TER SIDO UTILIZADA NO DIA
         bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
