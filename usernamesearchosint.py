@@ -1,12 +1,10 @@
 """
-Kronos Intel OSINT Bot v5.2
-- Entrega EXCLUSIVA via Painel Web Interativo (Sem arquivos anexos no chat)
-- Opções de Download em PDF e TXT mantidas diretamente no Painel Web
-- URL Base configurada: https://usernameosint-1-vcj4.onrender.com
-- Sem cota diária (Prévia em texto pura com gatilho)
-- Botão VIP Promocional (R$ 3,90 no Pix via Mercado Pago)
-- Módulo de Leaks e Vazamentos (HIBP, IntelX, DeHashed, LeakCheck, Pastebin, Jusbrasil)
-- Banco de Dados SQLite & Histórico de Vendas
+Kronos Intel OSINT Bot v5.3
+- Estética HTML Redesenho Premium (Modern Dark / Neon OSINT Dashboard)
+- Correção no Endpoint de Geração e Download de PDF
+- Entrega EXCLUSIVA via Painel Web Interativo
+- URL Base: https://usernameosint-1-vcj4.onrender.com
+- Módulo de Leaks/Vazamentos (HIBP, IntelX, DeHashed, LeakCheck, Pastebin, Jusbrasil)
 """
 from __future__ import annotations
 
@@ -28,7 +26,7 @@ import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
-from flask import Flask, jsonify, request, render_template_string, Response
+from flask import Flask, jsonify, request, render_template_string, Response, send_file
 
 try:
     from reportlab.lib import colors
@@ -280,7 +278,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v5.2
+SISTEMA DE MAPEAMENTO: Kronos Engine v5.3
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -371,7 +369,6 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
 
         doc.build(elements)
         pdf_buffer.seek(0)
-        pdf_buffer.name = f"Relatorio_OSINT_{username}.pdf"
         return pdf_buffer
     except Exception as e:
         logger.error("Erro ao gerar PDF: %s", str(e))
@@ -451,98 +448,213 @@ def worker_remarketing_pix():
 
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
-# --- TEMPLATE HTML DASHBOARD ---
+# --- TEMPLATE HTML DASHBOARD REDESENHADO ---
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kronos Intel — Relatório OSINT Executivo</title>
+    <title>Kronos Intel — Relatório Executivo OSINT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <style>
-        body { background-color: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-        .navbar { background-color: #161b22; border-bottom: 1px solid #30363d; }
-        .card { background-color: #161b22; border: 1px solid #30363d; border-radius: 12px; margin-bottom: 20px; }
-        .card-header { background-color: #21262d; border-bottom: 1px solid #30363d; font-weight: bold; color: #58a6ff; }
-        .badge-score { font-size: 1.2rem; padding: 8px 16px; border-radius: 20px; }
-        .btn-platform { background-color: #21262d; border: 1px solid #30363d; color: #f0f6fc; text-align: left; transition: 0.2s; }
-        .btn-platform:hover { background-color: #238636; border-color: #2ea043; color: #fff; transform: translateY(-2px); }
-        .btn-dork { background-color: #1f6feb; color: #fff; }
-        .btn-dork:hover { background-color: #388bfd; color: #fff; }
-        .btn-download { background-color: #238636; color: #fff; font-weight: bold; }
-        .btn-download:hover { background-color: #2ea043; color: #fff; }
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(22, 27, 34, 0.85);
+            --border-color: #30363d;
+            --accent-blue: #00f0ff;
+            --accent-green: #00ff87;
+            --accent-red: #ff0055;
+            --text-main: #e6edf3;
+            --text-muted: #8b949e;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: radial-gradient(circle at 50% 0%, rgba(0, 240, 255, 0.08), transparent 70%);
+            color: var(--text-main);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            min-height: 100vh;
+        }
+
+        .navbar {
+            background-color: rgba(13, 17, 23, 0.9);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .navbar-brand {
+            font-family: monospace;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            color: var(--accent-blue) !important;
+        }
+
+        .card-custom {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            margin-bottom: 24px;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .card-custom:hover {
+            border-color: rgba(0, 240, 255, 0.3);
+        }
+
+        .card-header-custom {
+            background: rgba(255, 255, 255, 0.03);
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 20px;
+            font-family: monospace;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-risk {
+            font-family: monospace;
+            font-size: 0.95rem;
+            padding: 8px 16px;
+            border-radius: 30px;
+            background: rgba(255, 0, 85, 0.15);
+            border: 1px solid var(--accent-red);
+            color: var(--accent-red);
+        }
+
+        .btn-platform {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .btn-platform:hover {
+            background: rgba(0, 255, 135, 0.1);
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+            transform: translateY(-2px);
+        }
+
+        .btn-dork {
+            background: rgba(0, 240, 255, 0.05);
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            color: var(--accent-blue);
+            padding: 10px 16px;
+            border-radius: 10px;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+        }
+
+        .btn-dork:hover {
+            background: rgba(0, 240, 255, 0.2);
+            color: #fff;
+            transform: translateX(4px);
+        }
+
+        .btn-dl-pdf {
+            background: linear-gradient(135deg, #00f0ff, #0072ff);
+            color: #000;
+            font-weight: 700;
+            border: none;
+            border-radius: 10px;
+            padding: 8px 18px;
+            transition: opacity 0.2s;
+        }
+
+        .btn-dl-pdf:hover {
+            opacity: 0.9;
+            color: #000;
+        }
+
+        .code-tag {
+            font-family: monospace;
+            color: var(--accent-blue);
+        }
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-dark mb-4 py-3">
+    <nav class="navbar navbar-dark sticky-top mb-4">
         <div class="container">
-            <span class="navbar-brand mb-0 h1 text-primary"><i class="bi bi-shield-lock-fill me-2"></i>KRONOS INTEL OSINT</span>
+            <span class="navbar-brand h1 mb-0"><i class="bi bi-shield-shaded me-2"></i>KRONOS_INTEL // OSINT</span>
             <div class="d-flex gap-2">
-                <a href="/download/pdf/{{ token }}" class="btn btn-download btn-sm"><i class="bi bi-file-earmark-pdf-fill me-1"></i> Baixar PDF</a>
-                <a href="/download/txt/{{ token }}" class="btn btn-outline-light btn-sm"><i class="bi bi-file-earmark-text-fill me-1"></i> Baixar TXT</a>
+                <a href="/download/pdf/{{ token }}" class="btn btn-dl-pdf btn-sm"><i class="bi bi-file-earmark-pdf-fill me-1"></i> Baixar PDF</a>
+                <a href="/download/txt/{{ token }}" class="btn btn-outline-light btn-sm rounded-3"><i class="bi bi-file-earmark-text me-1"></i> TXT</a>
             </div>
         </div>
     </nav>
 
-    <div class="container">
-        <div class="row">
-            <div class="col-md-12">
-                <div class="card">
-                    <div class="card-body d-flex justify-content-between align-items-center flex-wrap">
-                        <div>
-                            <h3 class="card-title text-white mb-1"><i class="bi bi-person-circle me-2"></i>Target: @{{ username }}</h3>
-                            <p class="text-secondary mb-0"><i class="bi bi-clock-history me-1"></i> Varredura realizada em {{ data_atual }}</p>
-                        </div>
-                        <div class="mt-2 mt-md-0">
-                            <span class="badge bg-danger badge-score"><i class="bi bi-exclamation-triangle-fill me-1"></i> Risco: {{ nivel_exposicao }} ({{ score }}/100)</span>
-                        </div>
-                    </div>
+    <div class="container pb-5">
+        <div class="card-custom">
+            <div class="card-body p-4 d-flex justify-content-between align-items-center flex-wrap gap-3">
+                <div>
+                    <span class="text-uppercase text-muted small code-tag">[ ALVO SELECIONADO ]</span>
+                    <h2 class="text-white mb-1 font-monospace"><i class="bi bi-terminal me-2"></i>@{{ username }}</h2>
+                    <p class="text-muted mb-0 small"><i class="bi bi-clock me-1"></i> Auditado em: {{ data_atual }}</p>
+                </div>
+                <div>
+                    <span class="badge-risk"><i class="bi bi-shield-exclamation me-1"></i> EXPOSIÇÃO {{ nivel_exposicao }} ({{ score }}/100)</span>
                 </div>
             </div>
         </div>
 
         <div class="row">
-            <div class="col-md-7">
-                <div class="card">
-                    <div class="card-header"><i class="bi bi-grid-3x3-gap-fill me-2"></i>Perfis Mapeados ({{ encontrados|length }} Encontrados)</div>
-                    <div class="card-body">
+            <div class="col-lg-7">
+                <div class="card-custom">
+                    <div class="card-header-custom text-uppercase">
+                        <i class="bi bi-diagram-3 me-2 text-primary"></i>Perfis Mapeados ({{ encontrados|length }})
+                    </div>
+                    <div class="card-body p-4">
                         {% if encontrados %}
-                        <div class="row g-2">
+                        <div class="row g-3">
                             {% for p in encontrados %}
-                            <div class="col-sm-6">
-                                <a href="{{ p.url }}" target="_blank" class="btn btn-platform w-100 d-flex justify-content-between align-items-center py-2 px-3">
-                                    <span><i class="bi bi-globe me-2"></i>{{ p.nome }}</span>
-                                    <i class="bi bi-box-arrow-up-right"></i>
+                            <div class="col-md-6">
+                                <a href="{{ p.url }}" target="_blank" class="btn-platform">
+                                    <span><i class="bi bi-link-45deg me-2 code-tag"></i>{{ p.nome }}</span>
+                                    <i class="bi bi-box-arrow-up-right small"></i>
                                 </a>
                             </div>
                             {% endfor %}
                         </div>
                         {% else %}
-                        <p class="text-secondary mb-0">Nenhum perfil público indexado nas bases padrão.</p>
+                        <p class="text-muted mb-0">Nenhum perfil público indexado nas bases de varredura padrão.</p>
                         {% endif %}
                     </div>
                 </div>
             </div>
 
-            <div class="col-md-5">
-                <div class="card">
-                    <div class="card-header text-warning"><i class="bi bi-incognito me-2"></i>Vazamentos & Leaks</div>
-                    <div class="card-body d-grid gap-2">
-                        <a href="https://haveibeenpwned.com/account/{{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-search me-2"></i>Have I Been Pwned</a>
-                        <a href="https://intelx.io/?s={{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-cpu me-2"></i>Intelligence X (IntelX)</a>
-                        <a href="https://dehashed.com/search?query={{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-database-check me-2"></i>DeHashed Search</a>
-                        <a href="https://leakcheck.io/search?type=username&query={{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-shield-exclamation me-2"></i>LeakCheck Base</a>
-                        <a href="https://www.google.com/search?q=site:pastebin.com+%22{{ username }}%22" target="_blank" class="btn btn-dork"><i class="bi bi-file-code me-2"></i>Pastebin Dork Search</a>
+            <div class="col-lg-5">
+                <div class="card-custom">
+                    <div class="card-header-custom text-uppercase text-warning">
+                        <i class="bi bi-incognito me-2"></i>Bases de Vazamentos & Leaks
+                    </div>
+                    <div class="card-body p-4 d-grid gap-2">
+                        <a href="https://haveibeenpwned.com/account/{{ username }}" target="_blank" class="btn-dork"><i class="bi bi-search me-2"></i>Have I Been Pwned</a>
+                        <a href="https://intelx.io/?s={{ username }}" target="_blank" class="btn-dork"><i class="bi bi-cpu me-2"></i>Intelligence X (IntelX)</a>
+                        <a href="https://dehashed.com/search?query={{ username }}" target="_blank" class="btn-dork"><i class="bi bi-database-check me-2"></i>DeHashed Base</a>
+                        <a href="https://leakcheck.io/search?type=username&query={{ username }}" target="_blank" class="btn-dork"><i class="bi bi-shield-slash me-2"></i>LeakCheck Search</a>
+                        <a href="https://www.google.com/search?q=site:pastebin.com+%22{{ username }}%22" target="_blank" class="btn-dork"><i class="bi bi-file-code me-2"></i>Pastebin Dump Dork</a>
                     </div>
                 </div>
 
-                <div class="card">
-                    <div class="card-header text-info"><i class="bi bi-briefcase-fill me-2"></i>Diários Oficiais & Justiça</div>
-                    <div class="card-body d-grid gap-2">
-                        <a href="https://www.google.com/search?q=site:jusbrasil.com.br+%22{{ username }}%22" target="_blank" class="btn btn-outline-info"><i class="bi bi-journal-text me-2"></i>Jusbrasil Search</a>
-                        <a href="https://www.google.com/search?q=site:escavador.com+%22{{ username }}%22" target="_blank" class="btn btn-outline-info"><i class="bi bi-file-earmark-person me-2"></i>Escavador Processos</a>
+                <div class="card-custom">
+                    <div class="card-header-custom text-uppercase text-info">
+                        <i class="bi bi-briefcase me-2"></i>Diários Oficiais & Processos
+                    </div>
+                    <div class="card-body p-4 d-grid gap-2">
+                        <a href="https://www.google.com/search?q=site:jusbrasil.com.br+%22{{ username }}%22" target="_blank" class="btn-dork"><i class="bi bi-journal-text me-2"></i>Jusbrasil Search</a>
+                        <a href="https://www.google.com/search?q=site:escavador.com+%22{{ username }}%22" target="_blank" class="btn-dork"><i class="bi bi-file-earmark-person me-2"></i>Escavador Processos</a>
                     </div>
                 </div>
             </div>
@@ -557,7 +669,7 @@ HTML_DASHBOARD_TEMPLATE = """
 def ver_relatorio_web(token):
     p = db_execute("SELECT target_username, results_json, created_at FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
     if not p:
-        return "Relatório não encontrado ou pagamento pendente.", 404
+        return "Relatório não encontrado ou acesso pendente.", 404
 
     username, results_json, created_at = p[0], json.loads(p[1]), p[2]
     encontrados_raw = [plat for plat, data in results_json.items() if data.get("exists") is True]
@@ -589,12 +701,14 @@ def download_pdf(token):
     username, results_json = p[0], json.loads(p[1])
     pdf_buf = construir_relatorio_pdf(username, results_json)
     if not pdf_buf:
-        return "Erro ao gerar PDF.", 500
+        return "Erro interno ao compilar PDF (ReportLab indisponível).", 500
 
-    return Response(
-        pdf_buf.getvalue(),
+    pdf_buf.seek(0)
+    return send_file(
+        pdf_buf,
         mimetype="application/pdf",
-        headers={"Content-Disposition": f"attachment;filename=Relatorio_OSINT_{username}.pdf"}
+        as_attachment=True,
+        download_name=f"Relatorio_OSINT_{username}.pdf"
     )
 
 @app.route("/download/txt/<token>")
@@ -605,11 +719,13 @@ def download_txt(token):
 
     username, results_json = p[0], json.loads(p[1])
     txt_buf = construir_relatorio_osint(username, results_json)
+    txt_buf.seek(0)
 
-    return Response(
-        txt_buf.getvalue(),
+    return send_file(
+        txt_buf,
         mimetype="text/plain",
-        headers={"Content-Disposition": f"attachment;filename=Relatorio_OSINT_{username}.txt"}
+        as_attachment=True,
+        download_name=f"Relatorio_OSINT_{username}.txt"
     )
 
 # --- HANDLERS TELEGRAM ---
@@ -621,7 +737,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v5.2\n\n"
+            f"👋 Kronos Intel — OSINT Bot v5.3\n\n"
             f"Envie o nome de usuário desejado para verificar em quais plataformas ele está cadastrado.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
@@ -669,7 +785,7 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # FLUXO ADMIN (ENTREGA EXCLUSIVA DO BOTÃO PAINEL WEB)
+        # FLUXO ADMIN
         if eh_admin_mode:
             msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando @{username}...")
             resultados = executar_varredura_osint(username)
@@ -700,7 +816,7 @@ if bot:
             )
             return
 
-        # FLUXO PRINCIPAL (PRÉVIA ILIMITADA COM GATILHO)
+        # FLUXO PRINCIPAL
         msg_status = bot.reply_to(message, f"🔎 Mapeando plataformas para @{username}...")
         resultados = executar_varredura_osint(username)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
@@ -885,7 +1001,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v5.2 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v5.3 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
