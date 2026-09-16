@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Monetização Pix, QR Code, Suporte, Painel de Estatísticas e Modo Admin Manual."""
+"""Username OSINT Checker com Cota Diária Gratuita, Notificações ao Admin e Monetização Pix."""
 from __future__ import annotations
 
 import base64
@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, date
 from threading import Lock
 from typing import Any
 
@@ -35,13 +35,15 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- SISTEMA DE MÉTRICAS E CONTROLE DE ACESSOS (PAINEL ADMIN) ---
+# --- SISTEMA DE MÉTRICAS E COTA DIÁRIA ---
 STATS_LOCK = Lock()
 UNIQUE_USERS: set[int] = set()
 TOTAL_SEARCHES: int = 0
 TOTAL_REPORTS_GENERATED: int = 0
 
-# --- TRAVA ANTIDUPLICIDADE DE PAGAMENTOS ---
+# Armazena o ID do usuário e a última data que ele usou a cota gratuita: {user_id: date_object}
+FREE_DAILY_USAGE: dict[int, date] = {}
+
 PROCESSED_PAYMENTS: set[str] = set()
 payments_lock = Lock()
 
@@ -97,6 +99,16 @@ NOT_FOUND_MARKERS = {
 
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
+
+def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
+    """Retorna True se o usuário tiver direito a 1 busca gratuita hoje."""
+    hoje = date.today()
+    with STATS_LOCK:
+        ultima_consulta = FREE_DAILY_USAGE.get(user_id)
+        if ultima_consulta != hoje:
+            FREE_DAILY_USAGE[user_id] = hoje
+            return True
+        return False
 
 def registrar_acesso_usuario(user_id: int):
     global TOTAL_SEARCHES
@@ -254,6 +266,24 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     file_buffer.name = f"Relatorio_OSINT_{username}.txt"
     return file_buffer
 
+def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
+    """Envia uma cópia do relatório gerado para o Administrador."""
+    if bot and ADMIN_ID:
+        try:
+            documento.seek(0)
+            bot.send_document(
+                chat_id=ADMIN_ID,
+                document=documento,
+                caption=f"👁‍🗨 *[ESPELHO OSINT]*\n"
+                        f"• Tipo: {tipo_consulta}\n"
+                        f"• Usuário Solicitante: `{user_id}`\n"
+                        f"• Alvo Pesquisado: `@{username}`",
+                parse_mode="Markdown"
+            )
+            documento.seek(0)
+        except Exception as e:
+            logger.error("Erro ao enviar cópia do relatório ao admin: %s", str(e))
+
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
@@ -261,12 +291,13 @@ if bot:
         bot.reply_to(
             message,
             f"👋 Kronos Intel — OSINT Bot\n\n"
-            f"Envie qualquer nome de usuário para realizar a varredura gratuita inicial.\n"
-            f"Exemplo: nome_do_alvo\n\n"
-            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato direto: @{SUPORTE_USERNAME}"
+            f"Você tem direito a **1 relatório completo gratuito por dia**.\n"
+            f"Envie o nome de usuário desejado para iniciar a consulta.\n"
+            f"Exemplo: `nome_do_alvo`\n\n"
+            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}",
+            parse_mode="Markdown"
         )
 
-    # --- PAINEL DE ESTATÍSTICAS EXCLUSIVO DO ADMIN ---
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -287,7 +318,6 @@ if bot:
         )
         bot.send_message(message.chat.id, painel, parse_mode="Markdown")
 
-    # --- COMANDO EXCLUSIVO DE ADMIN: /admin <username> (Gera o relatório direto) ---
     @bot.message_handler(commands=['admin'])
     def handle_admin_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -313,17 +343,37 @@ if bot:
             caption=f"👑 [ADMIN ACCESS] Relatório OSINT Completo — @{username}"
         )
 
-    # --- FLUXO PADRÃO (VOCÊ TAMBÉM VÊ COMO USUÁRIO NORMAL) ---
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
-        registrar_acesso_usuario(message.from_user.id)
+        user_id = message.from_user.id
+        registrar_acesso_usuario(user_id)
         username = message.text.strip().replace("@", "")
 
         if not valid_username(username):
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # AGORA VOCÊ MANDA O USERNAME E TESTA A EXPERIÊNCIA DO CLIENTE
+        # CHECAGEM DE COTA DIÁRIA GRATUITA
+        tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
+
+        if tem_cota_gratis or user_id == ADMIN_ID:
+            bot.reply_to(message, f"🎁 Cota diária gratuita ativada! Processando relatório para @{username}...")
+            tool = OSINTTool(username)
+            resultados = tool.run_checks()
+            documento = construir_relatorio_osint(username, resultados)
+            registrar_relatorio_gerado()
+
+            # Envia cópia para o Admin
+            enviar_relatorio_espelho_admin(username, documento, user_id, "COTA GRATUITA DIÁRIA")
+
+            bot.send_document(
+                chat_id=message.chat.id,
+                document=documento,
+                caption=f"📄 Relatório OSINT Completo — @{username}\n\n✨ Sua cota diária gratuita de hoje foi utilizada."
+            )
+            return
+
+        # SE JÁ USOU A COTA DIÁRIA, SEGUE PARA O FLUXO DE PRÉVIA E PIX
         bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -335,8 +385,9 @@ if bot:
             texto_gratuito = (
                 f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
                 f"───────────────────────────────\n"
+                f"⚠️ Sua cota gratuita de hoje já foi utilizada.\n\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔒 Deseja liberar o relatório completo com todas as URLs, fóruns e mapeamento detalhado por apenas R$ 9,99?"
+                f"🔒 Deseja liberar o relatório completo por apenas R$ 9,99?"
             )
             
             markup = InlineKeyboardMarkup(row_width=2)
@@ -348,9 +399,8 @@ if bot:
 
             bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup)
         else:
-            bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil padrão localizado para @{username}.")
+            bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
 
-    # --- LISTENER DE CLIQUES (PIX, CÓPIA E RETENÇÃO) ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
         if call.data.startswith("buy_"):
@@ -405,7 +455,7 @@ if bot:
                 f"O relatório completo revela todas as menções do username em:\n"
                 f"• Motores de busca avançados (Google Exact Match)\n"
                 f"• Fóruns técnicos e comunidades (Reddit, Pastebin)\n"
-                f"• Histórico de cadastros e vazamentos públicos\n\n"
+                f"• Histórico de cadastros e registros públicos\n\n"
                 f"💡 *Aproveite por apenas R$ 9,99 e receba o documento na hora!*"
             )
 
@@ -427,7 +477,7 @@ if bot:
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text="👍 Entendido! Se precisar de uma nova consulta, basta enviar outro nome de usuário."
+                text="👍 Entendido! Se precisar de uma nova consulta, aguarde o reset diário ou realize o pagamento Pix."
             )
 
         elif call.data.startswith("getkey_"):
@@ -513,6 +563,9 @@ def webhook():
                         resultados = tool.run_checks()
                         documento = construir_relatorio_osint(target_username, resultados)
                         registrar_relatorio_gerado()
+
+                        # Envia cópia para o Admin
+                        enviar_relatorio_espelho_admin(target_username, documento, telegram_id, "VENDA PIX APROVADA")
 
                         bot.send_document(
                             chat_id=telegram_id,
