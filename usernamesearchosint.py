@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Salvamento em JSON, Gatilho VIP e Pix a R$ 4,99."""
+"""Username OSINT Checker com Experiência de Usuário Comum por Padrão e Comando /admin Sob Demanda."""
 from __future__ import annotations
 
 import base64
@@ -46,7 +46,7 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "20")), 30))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- PERSISTÊNCIA EM ARQUIVO JSON (SISTEMA DE MEMÓRIA PERMANENTE) ---
+# --- PERSISTÊNCIA EM ARQUIVO JSON ---
 DATA_FILE = "cota_diaria.json"
 STATS_LOCK = Lock()
 
@@ -85,7 +85,6 @@ def salvar_dados_disco():
     except Exception as e:
         logger.error("Erro ao salvar banco de dados JSON: %s", str(e))
 
-# Carrega os dados salvos na inicialização do script
 carregar_dados_disco()
 
 # --- CONFIGURAÇÃO DE ADMINISTRADOR E SUPORTE ---
@@ -175,7 +174,6 @@ def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
     uid_str = str(user_id)
     
     with STATS_LOCK:
-        # Se tem crédito acumulado por indicação
         creditos = USER_CREDITS.get(uid_str, 0)
         if creditos > 0:
             USER_CREDITS[uid_str] -= 1
@@ -563,55 +561,61 @@ if bot:
         )
         bot.send_message(message.chat.id, painel)
 
-    @bot.message_handler(commands=['admin'])
-    def handle_admin_command(message):
-        if message.from_user.id != ADMIN_ID:
-            bot.reply_to(message, "⛔ Acesso negado. Comando exclusivo para o Administrador.")
-            return
-
-        parts = message.text.strip().split()
-        if len(parts) < 2:
-            bot.reply_to(message, "⚠️ Uso correto: /admin <username>")
-            return
-
-        username = parts[1].replace("@", "")
-        bot.reply_to(message, f"⚡ Modo Admin Ativo! Gerando relatório para @{username}...")
-
-        tool = OSINTTool(username)
-        resultados = tool.run_checks()
-        documento = construir_relatorio_osint(username, resultados)
-        pdf_doc = construir_relatorio_pdf(username, resultados)
-        guia_pdf = construir_guia_protecao_pdf()
-        registrar_relatorio_gerado()
-
-        if pdf_doc:
-            bot.send_document(
-                chat_id=message.chat.id,
-                document=pdf_doc,
-                caption=f"👑 [ADMIN ACCESS] Relatório OSINT Executivo PDF — @{username}"
-            )
-        bot.send_document(
-            chat_id=message.chat.id,
-            document=documento,
-            caption=f"📄 Relatório OSINT Texto — @{username}"
-        )
-        if guia_pdf:
-            bot.send_document(
-                chat_id=message.chat.id,
-                document=guia_pdf,
-                caption="📘 Guia de Sanitização da Pegada Digital (Bônus)"
-            )
-
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         user_id = message.from_user.id
         registrar_acesso_usuario(user_id)
-        username = message.text.strip().replace("@", "")
+        
+        texto_msg = message.text.strip()
+        eh_comando_admin = False
+
+        # SE O TEXTO CONTIER A PALAVRA "ADMIN" E O SOLICITANTE FOR O SEU ADMIN_ID
+        if "admin" in texto_msg.lower() and user_id == ADMIN_ID:
+            eh_comando_admin = True
+            username = texto_msg.lower().replace("admin", "").replace("@", "").strip()
+        else:
+            username = texto_msg.replace("@", "").strip()
 
         if not valid_username(username):
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
+        # FLUXO SE VOCÊ CHAMAR COMO ADMIN
+        if eh_comando_admin:
+            msg_status = bot.reply_to(message, f"👑 [ACESSO ADMIN] Processando Pacote VIP para @{username}...")
+            
+            tool = OSINTTool(username)
+            resultados = tool.run_checks()
+            documento = construir_relatorio_osint(username, resultados)
+            pdf_doc = construir_relatorio_pdf(username, resultados)
+            guia_pdf = construir_guia_protecao_pdf()
+            registrar_relatorio_gerado()
+
+            try:
+                bot.edit_message_text(f"✅ Varredura concluída para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
+
+            if pdf_doc:
+                bot.send_document(
+                    chat_id=message.chat.id,
+                    document=pdf_doc,
+                    caption=f"📄 [ADMIN VIP] Relatório OSINT Executivo (PDF) — @{username}"
+                )
+            bot.send_document(
+                chat_id=message.chat.id,
+                document=documento,
+                caption=f"📝 [ADMIN VIP] Relatório OSINT Texto Bruto — @{username}"
+            )
+            if guia_pdf:
+                bot.send_document(
+                    chat_id=message.chat.id,
+                    document=guia_pdf,
+                    caption="📘 [ADMIN VIP] Guia Bônus: Checklist de Proteção da Pegada Digital"
+                )
+            return
+
+        # FLUXO DE USUÁRIO COMUM (INCLUSO PARA VOCÊ SE NÃO USAR 'ADMIN')
         tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
 
         if tem_cota_gratis:
@@ -656,7 +660,7 @@ if bot:
                 )
             return
 
-        # FLUXO QUANDO A COTA EXPIROU (OFERTA PAGA R$ 4,99 COM GATILHO COMPLETO)
+        # FLUXO SE A COTA DIÁRIA EXPIROU (PAGAMENTO R$ 4,99)
         bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
