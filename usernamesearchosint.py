@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Monetização Pix, QR Code, Suporte, Painel de Estatísticas e Gatilho do 'Não'."""
+"""Username OSINT Checker com Monetização Pix, QR Code, Suporte, Painel de Estatísticas e Modo Admin Manual."""
 from __future__ import annotations
 
 import base64
@@ -266,7 +266,7 @@ if bot:
             f"🛠 Precisa de ajuda ou suporte?\nEntre em contato direto: @{SUPORTE_USERNAME}"
         )
 
-    # --- COMANDO EXCLUSIVO DE PAINEL DE ESTATÍSTICAS DO ADMIN ---
+    # --- PAINEL DE ESTATÍSTICAS EXCLUSIVO DO ADMIN ---
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -287,7 +287,7 @@ if bot:
         )
         bot.send_message(message.chat.id, painel, parse_mode="Markdown")
 
-    # --- COMANDO EXCLUSIVO DE ADMIN (/admin <username>) ---
+    # --- COMANDO EXCLUSIVO DE ADMIN: /admin <username> (Gera o relatório direto) ---
     @bot.message_handler(commands=['admin'])
     def handle_admin_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -313,7 +313,7 @@ if bot:
             caption=f"👑 [ADMIN ACCESS] Relatório OSINT Completo — @{username}"
         )
 
-    # --- PROCESSAMENTO DE BUSCA COM REGISTRO DE TRÁFEGO ---
+    # --- FLUXO PADRÃO (VOCÊ TAMBÉM VÊ COMO USUÁRIO NORMAL) ---
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         registrar_acesso_usuario(message.from_user.id)
@@ -323,20 +323,7 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        if message.from_user.id == ADMIN_ID:
-            bot.reply_to(message, f"👑 Olá Admin! Gerando relatório direto para @{username}...")
-            tool = OSINTTool(username)
-            resultados = tool.run_checks()
-            documento = construir_relatorio_osint(username, resultados)
-            registrar_relatorio_gerado()
-
-            bot.send_document(
-                chat_id=message.chat.id,
-                document=documento,
-                caption=f"📄 Relatório OSINT Completo — @{username}"
-            )
-            return
-
+        # AGORA VOCÊ MANDA O USERNAME E TESTA A EXPERIÊNCIA DO CLIENTE
         bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -410,7 +397,6 @@ if bot:
                 bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
 
         elif call.data.startswith("confirm_cancel_"):
-            # GATILHO PERSUASIVO AO CLICAR EM 'NÃO, OBRIGADO'
             target_username = call.data.split("confirm_cancel_")[1]
             bot.answer_callback_query(call.id, "Atenção...")
 
