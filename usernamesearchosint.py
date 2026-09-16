@@ -1,6 +1,6 @@
 """
-Kronos Intel OSINT Bot v5.0
-- Relatório Interativo Web (HTML Dashboard) com Links Clicáveis
+Kronos Intel OSINT Bot v5.1
+- Relatório Interativo Web (HTML Dashboard) para Usuários e ADMIN
 - Opções de Download em PDF e TXT na Web e Telegram
 - URL Base configurada: https://usernameosint-1-vcj4.onrender.com
 - Sem cota diária (Prévia em texto pura com gatilho)
@@ -280,7 +280,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v5.0
+SISTEMA DE MAPEAMENTO: Kronos Engine v5.1
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -642,7 +642,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v5.0\n\n"
+            f"👋 Kronos Intel — OSINT Bot v5.1\n\n"
             f"Envie o nome de usuário desejado para verificar em quais plataformas ele está cadastrado.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
@@ -690,10 +690,21 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # FLUXO ADMIN
+        # FLUXO ADMIN (GERA PAINEL WEB + DOCUMENTOS DIRETOS)
         if eh_admin_mode:
             msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando @{username}...")
             resultados = executar_varredura_osint(username)
+            results_json = json.dumps(resultados)
+            token_relatorio = secrets.token_urlsafe(16)
+            pid_admin = f"admin_{int(time.time())}"
+
+            # Registra no banco para liberar o link Web do relatório para o Admin
+            db_execute(
+                "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, created_at) VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?)",
+                (pid_admin, user_id, username, token_relatorio, results_json, datetime.now().isoformat()),
+                commit=True
+            )
+
             doc_txt = construir_relatorio_osint(username, resultados)
             doc_pdf = construir_relatorio_pdf(username, resultados)
             guia_pdf = construir_guia_protecao_pdf()
@@ -703,6 +714,16 @@ if bot:
                 bot.edit_message_text(f"✅ Varredura concluída para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
             except Exception:
                 pass
+
+            link_web = f"{WEB_BASE_URL.rstrip('/')}/relatorio/{token_relatorio}"
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(InlineKeyboardButton("🌐 Acessar Painel Interativo Web (ADMIN)", url=link_web))
+
+            bot.send_message(
+                message.chat.id,
+                f"👑 [MODO ADMIN] Painel Interativo Web gerado para @{username}:",
+                reply_markup=markup
+            )
 
             if doc_pdf:
                 bot.send_document(message.chat.id, doc_pdf, caption=f"📄 [ADMIN VIP] Relatório PDF — @{username}")
@@ -905,7 +926,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v5.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v5.1 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
