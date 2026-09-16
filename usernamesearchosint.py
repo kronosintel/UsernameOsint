@@ -55,7 +55,7 @@ sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wIA")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
 
-# --- BASE EXPANDIDA DE PLATAFORMAS (SEMELHANTE AO DEEPFIND / OSINT DEEP SEARCH) ---
+# --- BASE EXPANDIDA DE PLATAFORMAS ---
 PLATFORM_URLS = {
     # Desenvolvedores & Código
     "GitHub": "https://api.github.com/users/{username}",
@@ -305,14 +305,16 @@ def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id
     if bot and ADMIN_ID:
         try:
             documento.seek(0)
+            captura_legenda = (
+                f"👁‍🗨 [ESPELHO OSINT]\n"
+                f"• Tipo: {tipo_consulta}\n"
+                f"• Usuário Solicitante: {user_id}\n"
+                f"• Alvo Pesquisado: @{username}"
+            )
             bot.send_document(
                 chat_id=ADMIN_ID,
                 document=documento,
-                caption=f"👁‍🗨 *[ESPELHO OSINT]*\n"
-                        f"• Tipo: {tipo_consulta}\n"
-                        f"• Usuário Solicitante: `{user_id}`\n"
-                        f"• Alvo Pesquisado: `@{username}`",
-                parse_mode="Markdown"
+                caption=captura_legenda
             )
             documento.seek(0)
         except Exception as e:
@@ -325,11 +327,10 @@ if bot:
         bot.reply_to(
             message,
             f"👋 Kronos Intel — OSINT Bot\n\n"
-            f"Você tem direito a **1 relatório completo gratuito por dia**.\n"
+            f"Você tem direito a 1 relatório completo gratuito por dia.\n"
             f"Envie o nome de usuário desejado para iniciar a consulta.\n"
-            f"Exemplo: `nome_do_alvo`\n\n"
-            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}",
-            parse_mode="Markdown"
+            f"Exemplo: nome_do_alvo\n\n"
+            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}"
         )
 
     @bot.message_handler(commands=['stats'])
@@ -343,14 +344,14 @@ if bot:
             total_relatorios = TOTAL_REPORTS_GENERATED
 
         painel = (
-            f"📊 *PAINEL DE ESTATÍSTICAS DO BOT*\n"
+            f"📊 PAINEL DE ESTATÍSTICAS DO BOT\n"
             f"───────────────────────────────\n"
-            f"👤 *Usuários Únicos:* {total_unicos}\n"
-            f"🔎 *Total de Pesquisas:* {total_buscas}\n"
-            f"📄 *Relatórios Gerados:* {total_relatorios}\n"
-            f"💰 *Vendas Aprovadas:* {len(PROCESSED_PAYMENTS)}"
+            f"👤 Usuários Únicos: {total_unicos}\n"
+            f"🔎 Total de Pesquisas: {total_buscas}\n"
+            f"📄 Relatórios Gerados: {total_relatorios}\n"
+            f"💰 Vendas Aprovadas: {len(PROCESSED_PAYMENTS)}"
         )
-        bot.send_message(message.chat.id, painel, parse_mode="Markdown")
+        bot.send_message(message.chat.id, painel)
 
     @bot.message_handler(commands=['admin'])
     def handle_admin_command(message):
@@ -482,12 +483,12 @@ if bot:
             bot.answer_callback_query(call.id, "Atenção...")
 
             texto_atencao = (
-                f"⚠️ *Tem certeza de que deseja cancelar a consulta de @{target_username}?*\n\n"
+                f"⚠️ Tem certeza de que deseja cancelar a consulta de @{target_username}?\n\n"
                 f"O relatório completo revela todas as menções do username em:\n"
                 f"• Motores de busca avançados (Google Exact Match)\n"
                 f"• Fóruns técnicos e comunidades (Reddit, Pastebin)\n"
                 f"• Histórico de cadastros e registros públicos\n\n"
-                f"💡 *Aproveite por apenas R$ 9,99 e receba o documento na hora!*"
+                f"💡 Aproveite por apenas R$ 9,99 e receba o documento na hora!"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
@@ -499,8 +500,7 @@ if bot:
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
                 text=texto_atencao,
-                reply_markup=markup,
-                parse_mode="Markdown"
+                reply_markup=markup
             )
 
         elif call.data == "final_cancel":
