@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Cota Diária Gratuita, Notificações ao Admin e Monetização Pix."""
+"""Username OSINT Checker com Busca Expandida, Cota Diária Gratuita, Notificações ao Admin e Monetização Pix."""
 from __future__ import annotations
 
 import base64
@@ -32,7 +32,7 @@ app.config.update(
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
-MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
+MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "20")), 30))
 PORT = int(os.getenv("PORT", "5000"))
 
 # --- SISTEMA DE MÉTRICAS E COTA DIÁRIA ---
@@ -41,9 +41,7 @@ UNIQUE_USERS: set[int] = set()
 TOTAL_SEARCHES: int = 0
 TOTAL_REPORTS_GENERATED: int = 0
 
-# Armazena o ID do usuário e a última data que ele usou a cota gratuita: {user_id: date_object}
 FREE_DAILY_USAGE: dict[int, date] = {}
-
 PROCESSED_PAYMENTS: set[str] = set()
 payments_lock = Lock()
 
@@ -57,7 +55,9 @@ sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wIA")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
 
+# --- BASE EXPANDIDA DE PLATAFORMAS (SEMELHANTE AO DEEPFIND / OSINT DEEP SEARCH) ---
 PLATFORM_URLS = {
+    # Desenvolvedores & Código
     "GitHub": "https://api.github.com/users/{username}",
     "GitLab": "https://gitlab.com/{username}",
     "Bitbucket": "https://bitbucket.org/{username}/",
@@ -66,21 +66,52 @@ PLATFORM_URLS = {
     "Docker Hub": "https://hub.docker.com/u/{username}",
     "Hugging Face": "https://huggingface.co/{username}",
     "Kaggle": "https://www.kaggle.com/{username}",
-    "Keybase": "https://keybase.io/{username}",
+    "Replit": "https://replit.com/@{username}",
+    "CodePen": "https://codepen.io/{username}",
+    "StackOverflow": "https://stackoverflow.com/users/{username}",
+
+    # Mídias Sociais & Comunicação
     "Instagram": "https://www.instagram.com/{username}/",
-    "X": "https://x.com/{username}",
+    "X (Twitter)": "https://x.com/{username}",
     "LinkedIn": "https://www.linkedin.com/in/{username}/",
     "Reddit": "https://www.reddit.com/user/{username}/",
     "TikTok": "https://www.tiktok.com/@{username}",
     "Pinterest": "https://www.pinterest.com/{username}/",
     "Telegram": "https://t.me/{username}",
+    "Snapchat": "https://www.snapchat.com/add/{username}",
+    "Tumblr": "https://{username}.tumblr.com",
+    "Threads": "https://www.threads.net/@{username}",
+    "Mastodon": "https://mastodon.social/@{username}",
+    "Bluesky": "https://bsky.app/profile/{username}.bsky.social",
+
+    # Publicações, Blogs & Mídia
     "Medium": "https://medium.com/@{username}",
     "Substack": "https://{username}.substack.com",
     "DeviantArt": "https://www.deviantart.com/{username}",
+    "Behance": "https://www.behance.net/{username}",
+    "Dribbble": "https://dribbble.com/{username}",
+    "Vimeo": "https://vimeo.com/{username}",
+    "Patreon": "https://www.patreon.com/{username}",
+    "Flickr": "https://www.flickr.com/people/{username}/",
+    "WordPress": "https://{username}.wordpress.com",
+
+    # Games & Streaming
     "Steam": "https://steamcommunity.com/id/{username}",
-    "SoundCloud": "https://soundcloud.com/{username}",
+    "Twitch": "https://www.twitch.tv/{username}",
     "YouTube": "https://www.youtube.com/@{username}",
+    "SoundCloud": "https://soundcloud.com/{username}",
+    "Spotify": "https://open.spotify.com/user/{username}",
     "Chess.com": "https://www.chess.com/member/{username}",
+    "Roblox": "https://www.roblox.com/user.aspx?username={username}",
+    "Lichess": "https://lichess.org/@/{username}",
+    "Kick": "https://kick.com/{username}",
+
+    # Identidade & Serviços
+    "Keybase": "https://keybase.io/{username}",
+    "About.me": "https://about.me/{username}",
+    "Linktree": "https://linktr.ee/{username}",
+    "Disqus": "https://disqus.com/by/{username}/",
+    "Gravatar": "https://en.gravatar.com/{username}",
 }
 
 NOT_FOUND_MARKERS = {
@@ -95,13 +126,17 @@ NOT_FOUND_MARKERS = {
     "telegram": ("if you have telegram",),
     "substack": ("page not found",),
     "youtube": ("this page isn't available",),
+    "medium": ("404", "out of bounds"),
+    "vimeo": ("404", "not found"),
+    "behance": ("oops! we can't find that page",),
+    "dribbble": ("404", "page not found"),
+    "replit": ("404", "not found"),
 }
 
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
 
 def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
-    """Retorna True se o usuário tiver direito a 1 busca gratuita hoje."""
     hoje = date.today()
     with STATS_LOCK:
         ultima_consulta = FREE_DAILY_USAGE.get(user_id)
@@ -233,7 +268,7 @@ SISTEMA DE MAPEAMENTO: Kronos Intelligence Engine v2.0
     if encontrados:
         for p in encontrados:
             url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=username))
-            corpo_relatorio += f"[+] {p.ljust(15)} : {url}\n"
+            corpo_relatorio += f"[+] {p.ljust(18)} : {url}\n"
     else:
         corpo_relatorio += "[-] Nenhum perfil público indexado nas bases padrão.\n"
 
@@ -267,7 +302,6 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     return file_buffer
 
 def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
-    """Envia uma cópia do relatório gerado para o Administrador."""
     if bot and ADMIN_ID:
         try:
             documento.seek(0)
@@ -353,7 +387,6 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # CHECAGEM DE COTA DIÁRIA GRATUITA
         tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
 
         if tem_cota_gratis or user_id == ADMIN_ID:
@@ -363,7 +396,6 @@ if bot:
             documento = construir_relatorio_osint(username, resultados)
             registrar_relatorio_gerado()
 
-            # Envia cópia para o Admin
             enviar_relatorio_espelho_admin(username, documento, user_id, "COTA GRATUITA DIÁRIA")
 
             bot.send_document(
@@ -373,7 +405,6 @@ if bot:
             )
             return
 
-        # SE JÁ USOU A COTA DIÁRIA, SEGUE PARA O FLUXO DE PRÉVIA E PIX
         bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -564,7 +595,6 @@ def webhook():
                         documento = construir_relatorio_osint(target_username, resultados)
                         registrar_relatorio_gerado()
 
-                        # Envia cópia para o Admin
                         enviar_relatorio_espelho_admin(target_username, documento, telegram_id, "VENDA PIX APROVADA")
 
                         bot.send_document(
