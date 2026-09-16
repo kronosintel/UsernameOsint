@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Busca Expandida, Cota Diária Única, Notificações e Monetização Pix."""
+"""Username OSINT Checker com Busca Expandida, Relatório em PDF, Score de Risco, Indique e Ganhe e Monetização Pix."""
 from __future__ import annotations
 
 import base64
@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from threading import Lock
@@ -17,6 +18,16 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
 from flask import Flask, jsonify, request
+
+# Importação condicional do ReportLab para geração de PDF executivo
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    HAS_REPORTLAB = True
+except ImportError:
+    HAS_REPORTLAB = False
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -35,19 +46,23 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "20")), 30))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- SISTEMA DE MÉTRICAS E COTA DIÁRIA ---
+# --- SISTEMA DE MÉTRICAS, COTA DIÁRIA E INDICAÇÕES ---
 STATS_LOCK = Lock()
 UNIQUE_USERS: set[int] = set()
 TOTAL_SEARCHES: int = 0
 TOTAL_REPORTS_GENERATED: int = 0
 
 FREE_DAILY_USAGE: dict[int, date] = {}
+USER_CREDITS: dict[int, int] = {}
+REFERRALS: dict[int, list[int]] = {}  # {user_id: [invited_user_ids]}
+
 PROCESSED_PAYMENTS: set[str] = set()
 payments_lock = Lock()
 
 # --- CONFIGURAÇÃO DE ADMINISTRADOR E SUPORTE ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosIntelBot")
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
@@ -130,6 +145,12 @@ def valid_username(value: str | None) -> bool:
 def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
     hoje = date.today()
     with STATS_LOCK:
+        # Se tem crédito acumulado por indicação
+        creditos = USER_CREDITS.get(user_id, 0)
+        if creditos > 0:
+            USER_CREDITS[user_id] -= 1
+            return True
+            
         ultima_consulta = FREE_DAILY_USAGE.get(user_id)
         if ultima_consulta != hoje:
             FREE_DAILY_USAGE[user_id] = hoje
@@ -146,6 +167,25 @@ def registrar_relatorio_gerado():
     global TOTAL_REPORTS_GENERATED
     with STATS_LOCK:
         TOTAL_REPORTS_GENERATED += 1
+
+def registrar_indicacao(referrer_id: int, new_user_id: int):
+    with STATS_LOCK:
+        if referrer_id not in REFERRALS:
+            REFERRALS[referrer_id] = []
+        if new_user_id not in REFERRALS[referrer_id]:
+            REFERRALS[referrer_id].append(new_user_id)
+            # A cada 3 indicações, concede +1 crédito
+            if len(REFERRALS[referrer_id]) % 3 == 0:
+                USER_CREDITS[referrer_id] = USER_CREDITS.get(referrer_id, 0) + 1
+                if bot:
+                    try:
+                        bot.send_message(
+                            referrer_id,
+                            "🎉 *Parabéns!* Você indicou 3 novos amigos e ganhou **+1 consulta gratuita** no Kronos Intel!",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
 
 def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.99) -> tuple[str | None, bytes | None]:
     if not sdk:
@@ -227,9 +267,22 @@ class OSINTTool:
                 future.result()
         return {p: self.results[p] for p in self.platforms if p in self.results}
 
+def calcular_score_exposicao(encontrados_count: int, total_auditado: int) -> tuple[int, str]:
+    if total_auditado == 0:
+        return 0, "BAIXA"
+    score = min(100, int((encontrados_count / total_auditado) * 350))
+    if score >= 65:
+        nivel = "ELEVADA"
+    elif score >= 30:
+        nivel = "MODERADA"
+    else:
+        nivel = "BAIXA"
+    return score, nivel
+
 def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    score, nivel_exposicao = calcular_score_exposicao(len(encontrados), len(resultados))
 
     google_dork_exact = f"https://www.google.com/search?q=%22{username}%22"
     bing_dork_exact = f"https://www.bing.com/search?q=%22{username}%22"
@@ -240,18 +293,19 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
     forum_dork = f"https://www.google.com/search?q=inurl:forum+%22{username}%22"
 
     corpo_relatorio = f"""===================================================================
-                   KRONOS INTEL — RELATÓRIO OSINT
+                   KRONOS INTEL — RELATÓRIO OSINT EXECUTIVO
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Intelligence Engine v2.0
+SISTEMA DE MAPEAMENTO: Kronos Intelligence Engine v2.5
 ===================================================================
 
-1. RESUMO EXECUTIVO
+1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
 -------------------------------------------------------------------
 - Total de plataformas auditadas: {len(resultados)}
 - Perfis e marcadores ativos confirmados: {len(encontrados)}
-- Nível de pegada digital (Exposição): {"ELEVADO" if len(encontrados) > 5 else "MODERADO"}
+- Score OSINT de Exposição Digital: {score}/100
+- Classificação de Risco: {nivel_exposicao}
 
 2. PLATAFORMAS E PERFIS ENCONTRADOS DIRETAMENTE
 -------------------------------------------------------------------
@@ -278,7 +332,7 @@ Mapeamento em Fóruns e Texto Colado (Dorks Específicos):
 [+] Registros no Pastebin    : {pastebin_dork}
 [+] Mapeamento em Fóruns     : {forum_dork}
 
-4. RECOMENDAÇÕES DE PRIVACIDADE
+4. RECOMENDAÇÕES DE PRIVACIDADE E MITIGAÇÃO
 -------------------------------------------------------------------
 - Alterar nomes de usuário repetidos em plataformas críticas.
 - Remover links cruzados entre perfis pessoais e fóruns técnicos.
@@ -292,8 +346,119 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     file_buffer.name = f"Relatorio_OSINT_{username}.txt"
     return file_buffer
 
+def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO | None:
+    if not HAS_REPORTLAB:
+        return None
+
+    try:
+        encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+        data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        score, nivel_exposicao = calcular_score_exposicao(len(encontrados), len(resultados))
+
+        pdf_buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            pdf_buffer,
+            pagesize=letter,
+            rightMargin=36,
+            leftMargin=36,
+            topMargin=36,
+            bottomMargin=36
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'TitleStyle',
+            parent=styles['Heading1'],
+            fontName='Helvetica-Bold',
+            fontSize=20,
+            textColor=colors.HexColor('#1E293B'),
+            spaceAfter=6
+        )
+        subtitle_style = ParagraphStyle(
+            'SubTitleStyle',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=10,
+            textColor=colors.HexColor('#64748B'),
+            spaceAfter=15
+        )
+        heading_style = ParagraphStyle(
+            'HeadingStyle',
+            parent=styles['Heading2'],
+            fontName='Helvetica-Bold',
+            fontSize=12,
+            textColor=colors.HexColor('#0F172A'),
+            spaceBefore=12,
+            spaceAfter=8
+        )
+        body_style = ParagraphStyle(
+            'BodyStyle',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=9,
+            textColor=colors.HexColor('#334155'),
+            leading=12
+        )
+
+        elements = []
+        elements.append(Paragraph("KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT", title_style))
+        elements.append(Paragraph(f"<b>Alvo Analisado:</b> @{username} | <b>Data:</b> {data_atual}", subtitle_style))
+        elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=15))
+
+        # Tabela de Resumo Executivo
+        resumo_data = [
+            [Paragraph("<b>Métrica</b>", body_style), Paragraph("<b>Resultado</b>", body_style)],
+            [Paragraph("Plataformas Auditadas", body_style), Paragraph(str(len(resultados)), body_style)],
+            [Paragraph("Perfis Confirmados", body_style), Paragraph(str(len(encontrados)), body_style)],
+            [Paragraph("Score de Exposição Digital", body_style), Paragraph(f"<b>{score}/100 ({nivel_exposicao})</b>", body_style)]
+        ]
+        t_resumo = Table(resumo_data, colWidths=[200, 300])
+        t_resumo.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F1F5F9')),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
+            ('PADDING', (0,0), (-1,-1), 6),
+        ]))
+        elements.append(t_resumo)
+        elements.append(Spacer(1, 15))
+
+        # Tabela de Perfis Encontrados
+        elements.append(Paragraph("Perfis e Marcadores Ativos Identificados", heading_style))
+        if encontrados:
+            perfis_data = [[Paragraph("<b>Plataforma</b>", body_style), Paragraph("<b>URL do Perfil</b>", body_style)]]
+            for p in encontrados:
+                url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=username))
+                url_link = f"<a href='{url}' color='#2563EB'>{url}</a>"
+                perfis_data.append([Paragraph(p, body_style), Paragraph(url_link, body_style)])
+            
+            t_perfis = Table(perfis_data, colWidths=[150, 350])
+            t_perfis.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#E2E8F0')),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
+                ('PADDING', (0,0), (-1,-1), 5),
+            ]))
+            elements.append(t_perfis)
+        else:
+            elements.append(Paragraph("<i>Nenhum perfil público indexado nas bases padrão.</i>", body_style))
+
+        elements.append(Spacer(1, 15))
+        elements.append(Paragraph("Links de Varredura Profunda & Google Dorks", heading_style))
+        
+        dorks_text = (
+            f"• <b>Google Exact Match:</b> <a href='https://www.google.com/search?q=%22{username}%22' color='#2563EB'>Pesquisar @{username}</a><br/>"
+            f"• <b>Reddit Dork:</b> <a href='https://www.google.com/search?q=site:reddit.com+%22{username}%22' color='#2563EB'>Buscar Menções no Reddit</a><br/>"
+            f"• <b>Pastebin Dork:</b> <a href='https://www.google.com/search?q=site:pastebin.com+%22{username}%22' color='#2563EB'>Buscar Pastes e Vazamentos</a>"
+        )
+        elements.append(Paragraph(dorks_text, body_style))
+
+        doc.build(elements)
+        pdf_buffer.seek(0)
+        pdf_buffer.name = f"Relatorio_OSINT_{username}.pdf"
+        return pdf_buffer
+    except Exception as e:
+        logger.error("Erro ao gerar PDF: %s", str(e))
+        return None
+
 def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
-    # SÓ ENVIA O ESPELHO SE O SOLICITANTE NÃO FOR O PRÓPRIO ADMIN
     if bot and ADMIN_ID and user_id != ADMIN_ID:
         try:
             documento.seek(0)
@@ -315,13 +480,27 @@ def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
-        registrar_acesso_usuario(message.from_user.id)
+        user_id = message.from_user.id
+        registrar_acesso_usuario(user_id)
+        
+        # Processa parâmetro de indicação ex: /start ref_12345
+        args = message.text.strip().split()
+        if len(args) > 1 and args[1].startswith("ref_"):
+            try:
+                referrer_id = int(args[1].replace("ref_", ""))
+                if referrer_id != user_id:
+                    registrar_indicacao(referrer_id, user_id)
+            except ValueError:
+                pass
+
         bot.reply_to(
             message,
             f"👋 Kronos Intel — OSINT Bot\n\n"
             f"Você tem direito a 1 relatório completo gratuito por dia.\n"
             f"Envie o nome de usuário desejado para iniciar a consulta.\n"
             f"Exemplo: nome_do_alvo\n\n"
+            f"🎁 Want Extra Free Reports?\nUse seu link de indicação: `https://t.me/{BOT_USERNAME}?start=ref_{user_id}`\n"
+            f"(A cada 3 amigos indicados, ganhe +1 consulta extra!)\n\n"
             f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}"
         )
 
@@ -362,12 +541,19 @@ if bot:
         tool = OSINTTool(username)
         resultados = tool.run_checks()
         documento = construir_relatorio_osint(username, resultados)
+        pdf_doc = construir_relatorio_pdf(username, resultados)
         registrar_relatorio_gerado()
 
+        if pdf_doc:
+            bot.send_document(
+                chat_id=message.chat.id,
+                document=pdf_doc,
+                caption=f"👑 [ADMIN ACCESS] Relatório OSINT Executivo PDF — @{username}"
+            )
         bot.send_document(
             chat_id=message.chat.id,
             document=documento,
-            caption=f"👑 [ADMIN ACCESS] Relatório OSINT Completo — @{username}"
+            caption=f"📄 Relatório OSINT Texto — @{username}"
         )
 
     @bot.message_handler(func=lambda message: True)
@@ -380,27 +566,53 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # VERIFICA A COTA GRATUITA (RÍGIDO: APENAS 1 POR DIA PARA QUALQUER USUÁRIO)
         tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
 
         if tem_cota_gratis:
-            bot.reply_to(message, f"🎁 Cota diária gratuita ativada! Processando relatório para @{username}...")
+            msg_status = bot.reply_to(message, f"⏳ Iniciando varredura OSINT para @{username}...")
+            
+            # Animação de status interativo
+            time.sleep(1)
+            try:
+                bot.edit_message_text("⏳ Verificando redes de desenvolvedores e código...", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
+
             tool = OSINTTool(username)
             resultados = tool.run_checks()
+            
+            try:
+                bot.edit_message_text("⏳ Mapeando mídias sociais e plataformas de streaming...", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
+
             documento = construir_relatorio_osint(username, resultados)
+            pdf_doc = construir_relatorio_pdf(username, resultados)
             registrar_relatorio_gerado()
 
             enviar_relatorio_espelho_admin(username, documento, user_id, "COTA GRATUITA DIÁRIA")
 
-            bot.send_document(
-                chat_id=message.chat.id,
-                document=documento,
-                caption=f"📄 Relatório OSINT Completo — @{username}\n\n✨ Sua cota diária gratuita de hoje foi utilizada."
-            )
+            try:
+                bot.edit_message_text(f"✅ Varredura concluída para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
+
+            if pdf_doc:
+                bot.send_document(
+                    chat_id=message.chat.id,
+                    document=pdf_doc,
+                    caption=f"📄 Relatório OSINT Executivo (PDF) — @{username}\n\n✨ Sua cota diária gratuita de hoje foi utilizada."
+                )
+            else:
+                bot.send_document(
+                    chat_id=message.chat.id,
+                    document=documento,
+                    caption=f"📄 Relatório OSINT Completo — @{username}\n\n✨ Sua cota diária gratuita de hoje foi utilizada."
+                )
             return
 
         # A PARTIR DA 2ª CONSULTA DO DIA, EXIGE PAGAMENTO
-        bot.reply_to(message, f"🔎 Iniciando varredura OSINT para @{username}...")
+        bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
         results = tool.run_checks()
@@ -413,7 +625,7 @@ if bot:
                 f"───────────────────────────────\n"
                 f"⚠️ Sua cota gratuita de hoje já foi utilizada.\n\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔒 Deseja liberar o relatório completo por apenas R$ 9,99?"
+                f"🔒 Deseja liberar o relatório executivo completo por apenas R$ 9,99?"
             )
             
             markup = InlineKeyboardMarkup(row_width=2)
@@ -444,7 +656,7 @@ if bot:
                     f"• Todas as URLs diretas mapeadas\n"
                     f"• Mapeamento de fóruns e comunidades\n"
                     f"• Análise de exposição e recomendações\n"
-                    f"• Relatório em formato de documento (.TXT)\n\n"
+                    f"• Relatório em formato de documento (.PDF / .TXT)\n\n"
                     f"💰 Valor: R$ 9,99\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
@@ -587,15 +799,23 @@ def webhook():
                         tool = OSINTTool(target_username)
                         resultados = tool.run_checks()
                         documento = construir_relatorio_osint(target_username, resultados)
+                        pdf_doc = construir_relatorio_pdf(target_username, resultados)
                         registrar_relatorio_gerado()
 
                         enviar_relatorio_espelho_admin(target_username, documento, telegram_id, "VENDA PIX APROVADA")
 
-                        bot.send_document(
-                            chat_id=telegram_id,
-                            document=documento,
-                            caption=f"📄 Relatório OSINT Completo — @{target_username}\nObrigado por utilizar o Kronos Intel Bot!"
-                        )
+                        if pdf_doc:
+                            bot.send_document(
+                                chat_id=telegram_id,
+                                document=pdf_doc,
+                                caption=f"📄 Relatório OSINT Executivo PDF — @{target_username}\nObrigado por utilizar o Kronos Intel Bot!"
+                            )
+                        else:
+                            bot.send_document(
+                                chat_id=telegram_id,
+                                document=documento,
+                                caption=f"📄 Relatório OSINT Completo — @{target_username}\nObrigado por utilizar o Kronos Intel Bot!"
+                            )
 
                     if bot and ADMIN_ID:
                         notificacao_admin = (
