@@ -1,9 +1,9 @@
 """
-Kronos Intel OSINT Bot v3.8 (Estável, Rápido e Sem Erros de Envio)
-- Resposta instantânea e envio garantido de mensagens e botões
-- Varredura otimizada com limite de tempo rigoroso por requisição
-- Banco de Dados SQLite (kronos_osint.db)
-- Valor promocional de R$ 3,90 no Pix
+Kronos Intel OSINT Bot v4.0
+- Sem limite de cota diária (Prévia gratuita ilimitada com lista de plataformas em texto)
+- Botão VIP com destaque visual instigante
+- Funil focado em curiosidade e conversão rápida no Pix (R$ 3,90)
+- Banco de Dados SQLite & Histórico de Vendas
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import secrets
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, date
+from datetime import datetime
 from threading import Lock, Thread
 from typing import Any
 
@@ -48,7 +48,7 @@ app.config.update(
 )
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-DEFAULT_TIMEOUT = 3.0  # Tempo limite baixo para varredura rápida
+DEFAULT_TIMEOUT = 3.0
 PORT = int(os.getenv("PORT", "5000"))
 PRECO_VIP = 3.90
 DB_FILE = "kronos_osint.db"
@@ -62,16 +62,7 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                last_free_date TEXT,
-                credits INTEGER DEFAULT 0,
                 created_at TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                referrer_id INTEGER,
-                referred_id INTEGER,
-                PRIMARY KEY (referrer_id, referred_id)
             )
         """)
         cursor.execute("""
@@ -206,44 +197,7 @@ def registrar_acesso(user_id: int):
 def registrar_relatorio():
     db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_reports'", commit=True)
 
-def verificar_e_consumir_cota(user_id: int) -> bool:
-    hoje_str = date.today().isoformat()
-    user = db_execute("SELECT credits, last_free_date FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    
-    if not user:
-        db_execute("INSERT INTO users (user_id, last_free_date, credits, created_at) VALUES (?, ?, 0, ?)",
-                   (user_id, hoje_str, datetime.now().isoformat()), commit=True)
-        return True
-
-    credits, last_free_date = user[0], user[1]
-
-    if credits > 0:
-        db_execute("UPDATE users SET credits = credits - 1 WHERE user_id = ?", (user_id,), commit=True)
-        return True
-
-    if last_free_date != hoje_str:
-        db_execute("UPDATE users SET last_free_date = ? WHERE user_id = ?", (hoje_str, user_id), commit=True)
-        return True
-
-    return False
-
-def registrar_indicacao(referrer_id: int, new_user_id: int):
-    if referrer_id == new_user_id:
-        return
-
-    db_execute("INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
-               (referrer_id, new_user_id), commit=True)
-    
-    count = db_execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (referrer_id,), fetchone=True)[0]
-    if count > 0 and count % 3 == 0:
-        db_execute("UPDATE users SET credits = credits + 1 WHERE user_id = ?", (referrer_id,), commit=True)
-        if bot:
-            try:
-                bot.send_message(referrer_id, "🎉 Você indicou 3 amigos e ganhou +1 consulta gratuita no Kronos Intel!")
-            except Exception:
-                pass
-
-# --- MOTOR OSINT PARALELO RÁPIDO ---
+# --- MOTOR OSINT PARALELO ---
 class FastOSINTChecker:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
         self.username = username
@@ -316,7 +270,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v3.8
+SISTEMA DE MAPEAMENTO: Kronos Engine v4.0
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -479,9 +433,9 @@ def worker_remarketing_pix():
                                 f"Clique no botão abaixo para concluir no Pix ou tirar dúvidas com nosso suporte."
                             )
                             markup = InlineKeyboardMarkup(row_width=1)
-                            markup.add(InlineKeyboardButton(f"⚡ Liberar Relatório de @{target} (R$ 3,90)", callback_data=f"buy_{target}"))
+                            markup.add(InlineKeyboardButton(f"⚡ 🔓 SIM, QUERO O RELATÓRIO DE @{target} (R$ 3,90) 🔓 ⚡", callback_data=f"buy_{target}"))
                             markup.add(InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{SUPORTE_USERNAME}"))
-                            bot.send_message(uid, msg_lembrete, reply_markup=markup)
+                            bot.send_message(uid, msg_lembrete)
                 except Exception as ex:
                     logger.error("Erro no remarketing: %s", str(ex))
 
@@ -497,19 +451,10 @@ if bot:
         user_id = message.from_user.id
         registrar_acesso(user_id)
 
-        args = message.text.strip().split()
-        if len(args) > 1 and args[1].startswith("ref_"):
-            try:
-                referrer_id = int(args[1].replace("ref_", ""))
-                registrar_indicacao(referrer_id, user_id)
-            except ValueError:
-                pass
-
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v3.8\n\n"
-            f"Você tem direito a 1 consulta gratuita por dia.\n"
-            f"Envie o nome de usuário desejado para pesquisar a pegada digital.\n"
+            f"👋 Kronos Intel — OSINT Bot v4.0\n\n"
+            f"Envie o nome de usuário desejado para verificar em quais plataformas ele está cadastrado.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
         )
@@ -537,22 +482,6 @@ if bot:
             f"📦 ReportLab PDF: {'Ativo' if HAS_REPORTLAB else 'Inativo'}"
         )
         bot.send_message(message.chat.id, painel)
-
-    @bot.message_handler(commands=['conceder'])
-    def handle_conceder_credit(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        parts = message.text.strip().split()
-        if len(parts) < 3:
-            bot.reply_to(message, "⚠️ Uso correto: /conceder <user_id> <quantidade>")
-            return
-        try:
-            target_id = int(parts[1])
-            qtd = int(parts[2])
-            db_execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (qtd, target_id), commit=True)
-            bot.reply_to(message, f"✅ Concedidos {qtd} crédito(s) para o usuário {target_id}.")
-        except Exception as e:
-            bot.reply_to(message, f"⚠️ Erro ao conceder créditos: {str(e)}")
 
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
@@ -593,68 +522,35 @@ if bot:
                 bot.send_document(message.chat.id, guia_pdf, caption="📘 Guia de Proteção Digital")
             return
 
-        # FLUXO USUÁRIO COMUM (COTA DIÁRIA)
-        tem_cota = verificar_e_consumir_cota(user_id)
-
-        if tem_cota:
-            msg_status = bot.reply_to(message, f"🔎 Mapeando pegada digital de @{username}...")
-            resultados = executar_varredura_osint(username)
-            encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
-
-            try:
-                bot.edit_message_text(f"✅ Mapeamento concluído para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
-
-            if encontrados:
-                lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
-
-                texto_resultado = (
-                    f"🎯 PLATAFORMAS ENCONTRADAS PARA @{username}\n"
-                    f"───────────────────────────────\n\n"
-                    f"{lista_plataformas}\n\n"
-                    f"⚠️ O usuário possui {len(encontrados)} contas ativas identificadas.\n\n"
-                    f"Deseja liberar o Relatório Completo com todas as URLs diretas, Dorks Judiciais (Jusbrasil/Processos) e Checagem de Vazamentos?\n\n"
-                    f"🔥 OFERTA ESPECIAL: De R$ 19,90 por apenas R$ 3,90!"
-                )
-
-                markup = InlineKeyboardMarkup(row_width=1)
-                btn_sim = InlineKeyboardButton("🔓 Sim, quero o relatório completo (R$ 3,90)", callback_data=f"buy_{username}")
-                btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
-                btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
-                markup.add(btn_sim, btn_nao, btn_suporte)
-
-                bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
-            else:
-                bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
-            return
-
-        # COTA EXPIRADA
-        bot.reply_to(message, f"🔎 Mapeando plataformas para @{username}...")
+        # FLUXO PRINCIPAL (PRÉVIA ILIMITADA COM GATILHO)
+        msg_status = bot.reply_to(message, f"🔎 Mapeando plataformas para @{username}...")
         resultados = executar_varredura_osint(username)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
-        if encontrados:
-            lista_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
-            ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+        try:
+            bot.edit_message_text(f"✅ Mapeamento concluído para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+        except Exception:
+            pass
 
-            texto_expirado = (
-                f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
-                f"───────────────────────────────\n"
-                f"⚠️ Sua cota diária gratuita expirou.\n\n"
-                f"O usuário foi localizado em {len(encontrados)} plataformas, incluindo:\n"
-                f"{lista_plataformas}\n"
-                f"• ... e outras!\n\n"
-                f"Deseja desbloquear as URLs diretas e o Relatório Executivo em PDF por apenas R$ 3,90?"
+        if encontrados:
+            lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+
+            texto_resultado = (
+                f"🎯 PLATAFORMAS ENCONTRADAS PARA @{username}\n"
+                f"───────────────────────────────\n\n"
+                f"{lista_plataformas}\n\n"
+                f"⚠️ O usuário possui {len(encontrados)} contas ativas identificadas nas redes acima.\n\n"
+                f"Deseja obter o Relatório Completo com as URLs diretas de cada perfil, Dorks Judiciais em Diários Oficiais (Jusbrasil) e Checagem de Vazamento de Senhas?\n\n"
+                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3,90 no Pix!"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("🔓 Sim, quero o relatório completo (R$ 3,90)", callback_data=f"buy_{username}")
+            btn_sim = InlineKeyboardButton("⚡ 🔓 SIM, QUERO O RELATÓRIO COMPLETO 🔓 ⚡", callback_data=f"buy_{username}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao, btn_suporte)
 
-            bot.send_message(message.chat.id, texto_expirado, reply_markup=markup)
+            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
 
@@ -698,17 +594,15 @@ if bot:
 
         elif call.data.startswith("confirm_cancel_"):
             target_username = call.data.split("confirm_cancel_")[1]
-            user_id = call.from_user.id
-            ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-
+            
             texto_atencao = (
                 f"🚨 TEM CERTEZA QUE NÃO DESEJA O RELATÓRIO COMPLETO?\n\n"
                 f"O perfil @{target_username} tem rastros ativos na internet que podem conter dados de contato e vazamentos.\n\n"
-                f"💰 Adquira por apenas R$ 3,90 no Pix ou indique 3 amigos usando este link para desbloquear 100% grátis:\n{ref_link}"
+                f"💰 Desbloqueie agora por apenas R$ 3,90 no Pix!"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("⚡ Sim! Liberar Pacote VIP (R$ 3,90)", callback_data=f"buy_{target_username}")
+            btn_sim = InlineKeyboardButton("⚡ 🔓 SIM, QUERO O RELATÓRIO COMPLETO (R$ 3,90) 🔓 ⚡", callback_data=f"buy_{target_username}")
             btn_nao = InlineKeyboardButton("❌ Confirmar Cancelamento", callback_data="final_cancel")
             markup.add(btn_sim, btn_nao)
 
@@ -716,7 +610,7 @@ if bot:
 
         elif call.data == "final_cancel":
             bot.answer_callback_query(call.id, "Consulta finalizada.")
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="👍 Entendido! Se precisar de uma nova consulta, envie o comando novamente.")
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="👍 Entendido! Envie outro nome de usuário quando quiser realizar uma nova pesquisa.")
 
         elif call.data.startswith("getkey_"):
             bot.answer_callback_query(call.id, "Enviando chave...")
@@ -807,7 +701,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v3.8 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v4.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
