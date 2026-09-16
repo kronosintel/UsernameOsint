@@ -1,10 +1,9 @@
 """
-Kronos Intel OSINT Bot v3.7 (Estável & Sem Loop)
-- Varredura Multithreaded Síncrona com ThreadPoolExecutor (rápida e totalmente estável)
+Kronos Intel OSINT Bot v3.8 (Estável, Rápido e Sem Erros de Envio)
+- Resposta instantânea e envio garantido de mensagens e botões
+- Varredura otimizada com limite de tempo rigoroso por requisição
 - Banco de Dados SQLite (kronos_osint.db)
-- Painel Admin (/stats e /conceder)
-- Desconto Ancorado de R$ 3,90 no Pix com Mercado Pago
-- Remarketing Automático em Background
+- Valor promocional de R$ 3,90 no Pix
 """
 from __future__ import annotations
 
@@ -49,7 +48,7 @@ app.config.update(
 )
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "5"))
+DEFAULT_TIMEOUT = 3.0  # Tempo limite baixo para varredura rápida
 PORT = int(os.getenv("PORT", "5000"))
 PRECO_VIP = 3.90
 DB_FILE = "kronos_osint.db"
@@ -244,15 +243,15 @@ def registrar_indicacao(referrer_id: int, new_user_id: int):
             except Exception:
                 pass
 
-# --- MOTOR OSINT SEGURO COM MULTITHREADING ---
-class OSINTChecker:
+# --- MOTOR OSINT PARALELO RÁPIDO ---
+class FastOSINTChecker:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
         self.username = username
         self.timeout = timeout
         self.results: dict[str, dict[str, Any]] = {}
         self._lock = Lock()
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
@@ -263,7 +262,7 @@ class OSINTChecker:
             if status == 404:
                 res = {"exists": False}
             elif 200 <= status < 400:
-                text = resp.text[:100000].lower()
+                text = resp.text[:50000].lower()
                 markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
                 if any(m in text for m in markers):
                     res = {"exists": False}
@@ -278,19 +277,22 @@ class OSINTChecker:
             self.results[platform] = res
 
     def run(self) -> dict[str, dict[str, Any]]:
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=30) as executor:
             futures = [
                 executor.submit(self.check_site, p, u.format(username=self.username))
                 for p, u in PLATFORM_URLS.items()
             ]
             for f in futures:
-                f.result()
+                try:
+                    f.result(timeout=4.0)
+                except Exception:
+                    pass
         return self.results
 
 def executar_varredura_osint(username: str) -> dict[str, dict[str, Any]]:
-    return OSINTChecker(username).run()
+    return FastOSINTChecker(username).run()
 
-# --- RELATÓRIOS E ANÁLISE DE VAZAMENTOS ---
+# --- GERADORES DE RELATÓRIO ---
 def calcular_score_exposicao(encontrados_count: int, total_auditado: int) -> tuple[int, str]:
     if total_auditado == 0:
         return 0, "BAIXA"
@@ -314,7 +316,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v3.7
+SISTEMA DE MAPEAMENTO: Kronos Engine v3.8
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -450,7 +452,7 @@ def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id
         except Exception as e:
             logger.error("Erro ao enviar cópia ao admin: %s", str(e))
 
-# --- REMARKETING EM THREAD PARALELA ---
+# --- REMARKETING THREAD ---
 def worker_remarketing_pix():
     while True:
         try:
@@ -471,15 +473,15 @@ def worker_remarketing_pix():
                         db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
                         if bot:
                             msg_lembrete = (
-                                f"⏳ *SUA CHAVE PIX PARA @{target} ESTÁ QUASE EXPIRANDO!*\n\n"
-                                f"Notamos que você gerou a liberação do **Relatório VIP OSINT**, mas o pagamento ainda não foi concluído.\n\n"
-                                f"💡 *Aproveite a promoção de R$ 19,90 por apenas R$ 3,90!*\n"
+                                f"⏳ SUA CHAVE PIX PARA @{target} ESTÁ QUASE EXPIRANDO!\n\n"
+                                f"Notamos que você gerou a liberação do Relatório VIP OSINT, mas o pagamento ainda não foi concluído.\n\n"
+                                f"💡 Aproveite a promoção de R$ 19,90 por apenas R$ 3,90!\n"
                                 f"Clique no botão abaixo para concluir no Pix ou tirar dúvidas com nosso suporte."
                             )
                             markup = InlineKeyboardMarkup(row_width=1)
                             markup.add(InlineKeyboardButton(f"⚡ Liberar Relatório de @{target} (R$ 3,90)", callback_data=f"buy_{target}"))
                             markup.add(InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{SUPORTE_USERNAME}"))
-                            bot.send_message(uid, msg_lembrete, reply_markup=markup, parse_mode="Markdown")
+                            bot.send_message(uid, msg_lembrete, reply_markup=markup)
                 except Exception as ex:
                     logger.error("Erro no remarketing: %s", str(ex))
 
@@ -488,7 +490,7 @@ def worker_remarketing_pix():
 
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
-# --- COMANDOS E HANDLERS DO BOT ---
+# --- HANDLERS TELEGRAM ---
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
@@ -505,7 +507,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v3.7\n\n"
+            f"👋 Kronos Intel — OSINT Bot v3.8\n\n"
             f"Você tem direito a 1 consulta gratuita por dia.\n"
             f"Envie o nome de usuário desejado para pesquisar a pegada digital.\n"
             f"Exemplo: nome_do_alvo\n\n"
@@ -572,7 +574,7 @@ if bot:
 
         # FLUXO ADMIN
         if eh_admin_mode:
-            msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Executando varredura rápida para @{username}...")
+            msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando @{username}...")
             resultados = executar_varredura_osint(username)
             doc_txt = construir_relatorio_osint(username, resultados)
             doc_pdf = construir_relatorio_pdf(username, resultados)
@@ -600,7 +602,7 @@ if bot:
             encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
             try:
-                bot.edit_message_text(f"✅ Varredura concluída para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+                bot.edit_message_text(f"✅ Mapeamento concluído para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
             except Exception:
                 pass
 
@@ -611,9 +613,9 @@ if bot:
                     f"🎯 PLATAFORMAS ENCONTRADAS PARA @{username}\n"
                     f"───────────────────────────────\n\n"
                     f"{lista_plataformas}\n\n"
-                    f"⚠️ O usuário possui **{len(encontrados)} contas ativas** identificadas.\n\n"
-                    f"Deseja liberar o **Relatório Completo** com todas as URLs diretas, Dorks Judiciais (Jusbrasil/Processos) e Checagem de Vazamentos?\n\n"
-                    f"🔥 *OFERTA ESPECIAL:* De ~R$ 19,90~ por apenas **R$ 3,90**!"
+                    f"⚠️ O usuário possui {len(encontrados)} contas ativas identificadas.\n\n"
+                    f"Deseja liberar o Relatório Completo com todas as URLs diretas, Dorks Judiciais (Jusbrasil/Processos) e Checagem de Vazamentos?\n\n"
+                    f"🔥 OFERTA ESPECIAL: De R$ 19,90 por apenas R$ 3,90!"
                 )
 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -622,7 +624,7 @@ if bot:
                 btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
                 markup.add(btn_sim, btn_nao, btn_suporte)
 
-                bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
+                bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
             else:
                 bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
             return
@@ -643,7 +645,7 @@ if bot:
                 f"O usuário foi localizado em {len(encontrados)} plataformas, incluindo:\n"
                 f"{lista_plataformas}\n"
                 f"• ... e outras!\n\n"
-                f"Deseja desbloquear as **URLs diretas** e o **Relatório Executivo em PDF** por apenas **R$ 3,90**?"
+                f"Deseja desbloquear as URLs diretas e o Relatório Executivo em PDF por apenas R$ 3,90?"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
@@ -652,7 +654,7 @@ if bot:
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao, btn_suporte)
 
-            bot.send_message(message.chat.id, texto_expirado, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(message.chat.id, texto_expirado, reply_markup=markup)
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
 
@@ -676,21 +678,21 @@ if bot:
                     f"4. Dorks Judiciais (Jusbrasil / Processos)\n"
                     f"5. Checagem de Vazamentos de Senhas / Leaks\n"
                     f"6. Guia Bônus em PDF de Proteção Digital\n\n"
-                    f"💰 Valor: De ~R$ 19,90~ por **R$ 3,90 no Pix**\n\n"
+                    f"💰 Valor: De R$ 19,90 por R$ 3,90 no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
-                    f"`{qr_pix}`\n\n"
+                    f"{qr_pix}\n\n"
                     f"⚡ Os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
                 )
 
                 markup = InlineKeyboardMarkup(row_width=1)
-                btn_copiar = InlineKeyboardButton("📋 Copiar Chave Pix", callback_data=f"getkey_{user_id}")
+                btn_copiar = InlineKeyboardButton("📋 Copiar Chave Pix (Texto)", callback_data=f"getkey_{user_id}")
                 btn_suporte = InlineKeyboardButton("💬 Precisa de Ajuda?", url=f"https://t.me/{SUPORTE_USERNAME}")
                 markup.add(btn_copiar, btn_suporte)
 
                 if qr_img_bytes:
-                    bot.send_photo(call.message.chat.id, photo=qr_img_bytes, caption=texto_oferta, reply_markup=markup, parse_mode="Markdown")
+                    bot.send_photo(call.message.chat.id, photo=qr_img_bytes, caption=texto_oferta, reply_markup=markup)
                 else:
-                    bot.send_message(call.message.chat.id, text=texto_oferta, reply_markup=markup, parse_mode="Markdown")
+                    bot.send_message(call.message.chat.id, text=texto_oferta, reply_markup=markup)
             else:
                 bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar chave Pix. Tente novamente em instantes.")
 
@@ -700,9 +702,9 @@ if bot:
             ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
             texto_atencao = (
-                f"🚨 *TEM CERTEZA QUE NÃO DESEJA O RELATÓRIO COMPLETO?*\n\n"
+                f"🚨 TEM CERTEZA QUE NÃO DESEJA O RELATÓRIO COMPLETO?\n\n"
                 f"O perfil @{target_username} tem rastros ativos na internet que podem conter dados de contato e vazamentos.\n\n"
-                f"💰 Adquira por apenas **R$ 3,90** no Pix ou indique 3 amigos usando este link para desbloquear **100% grátis**:\n{ref_link}"
+                f"💰 Adquira por apenas R$ 3,90 no Pix ou indique 3 amigos usando este link para desbloquear 100% grátis:\n{ref_link}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
@@ -710,7 +712,7 @@ if bot:
             btn_nao = InlineKeyboardButton("❌ Confirmar Cancelamento", callback_data="final_cancel")
             markup.add(btn_sim, btn_nao)
 
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=texto_atencao, reply_markup=markup, parse_mode="Markdown")
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=texto_atencao, reply_markup=markup)
 
         elif call.data == "final_cancel":
             bot.answer_callback_query(call.id, "Consulta finalizada.")
@@ -723,7 +725,7 @@ if bot:
             pix_key = None
             for l in lines:
                 if len(l) > 50 and not l.startswith("🔒") and not l.startswith("⚡"):
-                    pix_key = l.replace("`", "").strip()
+                    pix_key = l.strip()
                     break
             if pix_key:
                 bot.send_message(call.message.chat.id, text=f"`{pix_key}`", parse_mode="Markdown")
@@ -805,7 +807,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v3.7 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v3.8 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
