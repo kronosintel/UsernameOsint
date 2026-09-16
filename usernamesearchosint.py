@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Busca Expandida, Relatório em PDF, Score de Risco, Indique e Ganhe e Monetização Pix."""
+"""Username OSINT Checker com Busca Expandida, Cota Diária, Indicação Estratégica e Pix a R$ 4,99."""
 from __future__ import annotations
 
 import base64
@@ -19,7 +19,6 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
 from flask import Flask, jsonify, request
 
-# Importação condicional do ReportLab para geração de PDF executivo
 try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
@@ -54,7 +53,7 @@ TOTAL_REPORTS_GENERATED: int = 0
 
 FREE_DAILY_USAGE: dict[int, date] = {}
 USER_CREDITS: dict[int, int] = {}
-REFERRALS: dict[int, list[int]] = {}  # {user_id: [invited_user_ids]}
+REFERRALS: dict[int, list[int]] = {}
 
 PROCESSED_PAYMENTS: set[str] = set()
 payments_lock = Lock()
@@ -145,7 +144,6 @@ def valid_username(value: str | None) -> bool:
 def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
     hoje = date.today()
     with STATS_LOCK:
-        # Se tem crédito acumulado por indicação
         creditos = USER_CREDITS.get(user_id, 0)
         if creditos > 0:
             USER_CREDITS[user_id] -= 1
@@ -174,20 +172,20 @@ def registrar_indicacao(referrer_id: int, new_user_id: int):
             REFERRALS[referrer_id] = []
         if new_user_id not in REFERRALS[referrer_id]:
             REFERRALS[referrer_id].append(new_user_id)
-            # A cada 3 indicações, concede +1 crédito
             if len(REFERRALS[referrer_id]) % 3 == 0:
                 USER_CREDITS[referrer_id] = USER_CREDITS.get(referrer_id, 0) + 1
                 if bot:
                     try:
                         bot.send_message(
                             referrer_id,
-                            "🎉 *Parabéns!* Você indicou 3 novos amigos e ganhou **+1 consulta gratuita** no Kronos Intel!",
+                            "🎉 Você indicou 3 amigos e ganhou **+1 consulta gratuita** no Kronos Intel!",
                             parse_mode="Markdown"
                         )
                     except Exception:
                         pass
 
-def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.99) -> tuple[str | None, bytes | None]:
+# --- GERADOR PIX AJUSTADO PARA R$ 4,99 ---
+def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 4.99) -> tuple[str | None, bytes | None]:
     if not sdk:
         logger.error("SDK do Mercado Pago não inicializada.")
         return None, None
@@ -405,7 +403,6 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
         elements.append(Paragraph(f"<b>Alvo Analisado:</b> @{username} | <b>Data:</b> {data_atual}", subtitle_style))
         elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=15))
 
-        # Tabela de Resumo Executivo
         resumo_data = [
             [Paragraph("<b>Métrica</b>", body_style), Paragraph("<b>Resultado</b>", body_style)],
             [Paragraph("Plataformas Auditadas", body_style), Paragraph(str(len(resultados)), body_style)],
@@ -421,7 +418,6 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
         elements.append(t_resumo)
         elements.append(Spacer(1, 15))
 
-        # Tabela de Perfis Encontrados
         elements.append(Paragraph("Perfis e Marcadores Ativos Identificados", heading_style))
         if encontrados:
             perfis_data = [[Paragraph("<b>Plataforma</b>", body_style), Paragraph("<b>URL do Perfil</b>", body_style)]]
@@ -483,7 +479,6 @@ if bot:
         user_id = message.from_user.id
         registrar_acesso_usuario(user_id)
         
-        # Processa parâmetro de indicação ex: /start ref_12345
         args = message.text.strip().split()
         if len(args) > 1 and args[1].startswith("ref_"):
             try:
@@ -496,12 +491,11 @@ if bot:
         bot.reply_to(
             message,
             f"👋 Kronos Intel — OSINT Bot\n\n"
-            f"Você tem direito a 1 relatório completo gratuito por dia.\n"
+            f"Você tem direito a **1 relatório completo gratuito por dia**.\n"
             f"Envie o nome de usuário desejado para iniciar a consulta.\n"
-            f"Exemplo: nome_do_alvo\n\n"
-            f"🎁 Want Extra Free Reports?\nUse seu link de indicação: `https://t.me/{BOT_USERNAME}?start=ref_{user_id}`\n"
-            f"(A cada 3 amigos indicados, ganhe +1 consulta extra!)\n\n"
-            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}"
+            f"Exemplo: `nome_do_alvo`\n\n"
+            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}",
+            parse_mode="Markdown"
         )
 
     @bot.message_handler(commands=['stats'])
@@ -571,7 +565,6 @@ if bot:
         if tem_cota_gratis:
             msg_status = bot.reply_to(message, f"⏳ Iniciando varredura OSINT para @{username}...")
             
-            # Animação de status interativo
             time.sleep(1)
             try:
                 bot.edit_message_text("⏳ Verificando redes de desenvolvedores e código...", chat_id=message.chat.id, message_id=msg_status.message_id)
@@ -611,7 +604,7 @@ if bot:
                 )
             return
 
-        # A PARTIR DA 2ª CONSULTA DO DIA, EXIGE PAGAMENTO
+        # FLUXO QUANDO A COTA EXPIROU (PAGAMENTO R$ 4,99 OU INDICAÇÃO)
         bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -620,22 +613,28 @@ if bot:
 
         if encontrados:
             preview_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
+            
+            ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+            
             texto_gratuito = (
                 f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
                 f"───────────────────────────────\n"
-                f"⚠️ Sua cota gratuita de hoje já foi utilizada.\n\n"
+                f"⚠️ Sua cota gratuita de hoje foi expirada.\n\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔒 Deseja liberar o relatório executivo completo por apenas R$ 9,99?"
+                f"🔒 Deseja liberar o relatório executivo completo agora por apenas R$ 4,99?\n\n"
+                f"🎁 *GANHE CONSULTAS GRÁTIS:*\n"
+                f"Envie o seu link abaixo para 3 amigos e ganhe +1 consulta gratuita:\n"
+                f"`{ref_link}`"
             )
             
             markup = InlineKeyboardMarkup(row_width=2)
-            btn_sim = InlineKeyboardButton("✅ Sim, quero o relatório!", callback_data=f"buy_{username}")
+            btn_sim = InlineKeyboardButton("⚡ Liberar Relatório (R$ 4,99)", callback_data=f"buy_{username}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao)
             markup.add(btn_suporte)
 
-            bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup)
+            bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup, parse_mode="Markdown")
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
 
@@ -645,9 +644,9 @@ if bot:
             target_username = call.data.split("buy_")[1]
             user_id = call.from_user.id
             
-            bot.answer_callback_query(call.id, "Gerando QR Code e Chave Pix...")
+            bot.answer_callback_query(call.id, "Gerando QR Code e Chave Pix de R$ 4,99...")
 
-            qr_pix, qr_img_bytes = gerar_pix_mercadopago(user_id, target_username, valor=9.99)
+            qr_pix, qr_img_bytes = gerar_pix_mercadopago(user_id, target_username, valor=4.99)
 
             if qr_pix:
                 texto_oferta = (
@@ -656,8 +655,8 @@ if bot:
                     f"• Todas as URLs diretas mapeadas\n"
                     f"• Mapeamento de fóruns e comunidades\n"
                     f"• Análise de exposição e recomendações\n"
-                    f"• Relatório em formato de documento (.PDF / .TXT)\n\n"
-                    f"💰 Valor: R$ 9,99\n\n"
+                    f"• Relatório executivo (.PDF / .TXT)\n\n"
+                    f"💰 Valor: R$ 4,99\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
                     f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmado."
@@ -686,7 +685,10 @@ if bot:
 
         elif call.data.startswith("confirm_cancel_"):
             target_username = call.data.split("confirm_cancel_")[1]
+            user_id = call.from_user.id
             bot.answer_callback_query(call.id, "Atenção...")
+
+            ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
             texto_atencao = (
                 f"⚠️ Tem certeza de que deseja cancelar a consulta de @{target_username}?\n\n"
@@ -694,11 +696,12 @@ if bot:
                 f"• Motores de busca avançados (Google Exact Match)\n"
                 f"• Fóruns técnicos e comunidades (Reddit, Pastebin)\n"
                 f"• Histórico de cadastros e registros públicos\n\n"
-                f"💡 Aproveite por apenas R$ 9,99 e receba o documento na hora!"
+                f"💡 Aproveite a promoção por apenas R$ 4,99 ou indique 3 amigos usando o link abaixo para desbloquear de graça:\n"
+                f"{ref_link}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("✅ Mudei de ideia, quero o relatório!", callback_data=f"buy_{target_username}")
+            btn_sim = InlineKeyboardButton("⚡ Quero liberar agora (R$ 4,99)", callback_data=f"buy_{target_username}")
             btn_nao = InlineKeyboardButton("❌ Sim, quero cancelar mesmo", callback_data="final_cancel")
             markup.add(btn_sim, btn_nao)
 
@@ -793,7 +796,7 @@ def webhook():
                     if telegram_id and bot:
                         bot.send_message(
                             telegram_id,
-                            f"✅ Pagamento de R$ 9,99 Confirmado via Pix!\n\nGerando relatório avançado para @{target_username}..."
+                            f"✅ Pagamento de R$ 4,99 Confirmado via Pix!\n\nGerando relatório avançado para @{target_username}..."
                         )
 
                         tool = OSINTTool(target_username)
@@ -821,7 +824,7 @@ def webhook():
                         notificacao_admin = (
                             f"💰 NOVA VENDA APROVADA!\n"
                             f"───────────────────────────────\n"
-                            f"• Valor: R$ 9,99 (Pix)\n"
+                            f"• Valor: R$ 4,99 (Pix)\n"
                             f"• ID Pagamento: {payment_id}\n"
                             f"• Alvo Pesquisado: @{target_username}\n"
                             f"• ID do Comprador: {telegram_id}"
