@@ -1,10 +1,9 @@
 """
-Kronos Intel OSINT Bot v3.0
-- Varredura Assíncrona (aiohttp)
-- Banco de Dados SQLite (kronos_osint.db)
-- Painel Admin com Concessão de Créditos
-- Dorks Judiciais e Fóruns no Pacote VIP
-- Integração com Mercado Pago Pix e Webhook
+Kronos Intel OSINT Bot v3.5
+- Preço Otimizado (R$ 3,90 com Ancoragem)
+- Remarketing Automático para Pix Não Pago
+- Análise de Vazamentos de Dados e E-mail / Breaches
+- Motor Assíncrono (aiohttp) & Banco de Dados SQLite
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ import secrets
 import sqlite3
 import time
 from datetime import datetime, date
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any
 
 import aiohttp
@@ -52,6 +51,7 @@ app.config.update(
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "6"))
 PORT = int(os.getenv("PORT", "5000"))
+PRECO_VIP = 3.90  # VALOR DE ALTA CONVERSÃO
 DB_FILE = "kronos_osint.db"
 db_lock = Lock()
 
@@ -82,6 +82,7 @@ def init_db():
                 target_username TEXT,
                 amount REAL,
                 status TEXT,
+                reminded INTEGER DEFAULT 0,
                 created_at TEXT
             )
         """)
@@ -113,7 +114,7 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
         conn.close()
         return res
 
-# --- CONFIGURAÇÃO DO BOT E MERCADO PAGO ---
+# --- CONFIGURAÇÃO BOT & MERCADO PAGO ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosIntelBot")
@@ -231,8 +232,8 @@ def registrar_indicacao(referrer_id: int, new_user_id: int):
     if referrer_id == new_user_id:
         return
 
-    res = db_execute("INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
-                     (referrer_id, new_user_id), commit=True)
+    db_execute("INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+               (referrer_id, new_user_id), commit=True)
     
     count = db_execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (referrer_id,), fetchone=True)[0]
     if count > 0 and count % 3 == 0:
@@ -285,7 +286,7 @@ class AsyncOSINTTool:
 def executar_varredura_osint(username: str) -> dict[str, dict[str, Any]]:
     return asyncio.run(AsyncOSINTTool(username).run())
 
-# --- GERAÇÃO DE RELATÓRIOS E DORKS ---
+# --- RELATÓRIOS E ANÁLISE DE VAZAMENTOS ---
 def calcular_score_exposicao(encontrados_count: int, total_auditado: int) -> tuple[int, str]:
     if total_auditado == 0:
         return 0, "BAIXA"
@@ -302,13 +303,14 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
     escavador_dork = f"https://www.google.com/search?q=site:escavador.com+%22{username}%22"
     google_dork = f"https://www.google.com/search?q=%22{username}%22"
     pastebin_dork = f"https://www.google.com/search?q=site:pastebin.com+%22{username}%22"
+    breach_dork = f"https://www.google.com/search?q=%22{username}%22+db+OR+leak+OR+password"
 
     corpo = f"""===================================================================
                    KRONOS INTEL — RELATÓRIO OSINT EXECUTIVO
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v3.0 (Async)
+SISTEMA DE MAPEAMENTO: Kronos Engine v3.5 (Async + Leak Check)
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -328,10 +330,11 @@ SISTEMA DE MAPEAMENTO: Kronos Engine v3.0 (Async)
         corpo += "[-] Nenhum perfil público indexado nas bases padrão.\n"
 
     corpo += f"""
-3. DORKS JUDICIAIS E VARREDURA PROFUNDA
+3. DORKS JUDICIAIS E VARREDURA DE VAZAMENTOS (LEAKS)
 -------------------------------------------------------------------
 [+] Busca em Diários Oficiais (Jusbrasil) : {jusbrasil_dork}
 [+] Mapeamento de Processos (Escavador)  : {escavador_dork}
+[+] Checagem de Vazamento de Senhas      : {breach_dork}
 [+] Google Exact Match                   : {google_dork}
 [+] Registros em Pastes / Vazamentos      : {pastebin_dork}
 
@@ -408,7 +411,7 @@ def construir_guia_protecao_pdf() -> io.BytesIO | None:
     except Exception:
         return None
 
-def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 4.99) -> tuple[str | None, bytes | None]:
+def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = PRECO_VIP) -> tuple[str | None, bytes | None]:
     if not sdk:
         return None, None
     payment_data = {
@@ -425,16 +428,57 @@ def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 4.9
         qr_base64 = tx.get("qr_code_base64")
         img_bytes = base64.b64decode(qr_base64) if qr_base64 else None
         
-        # Salva o pagamento no BD
         pid = str(res.get("id"))
-        db_execute("INSERT INTO payments (payment_id, user_id, target_username, amount, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+        db_execute("INSERT INTO payments (payment_id, user_id, target_username, amount, status, reminded, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?)",
                    (pid, user_id, target_username, valor, datetime.now().isoformat()), commit=True)
         return qr_code, img_bytes
     except Exception as e:
         logger.error("Erro ao gerar Pix: %s", str(e))
         return None, None
 
-# --- COMANDOS DO TELEGRAM BOT ---
+# --- RECURSO DE REMARKETING AUTOMÁTICO (CARRINHO ABANDONADO) ---
+def worker_remarketing_pix():
+    """Worker rodando em segundo plano para lembrar usuários de Pix pendentes após 10 minutos."""
+    while True:
+        try:
+            time.sleep(60)  # Checa a cada 1 minuto
+            pendentes = db_execute(
+                "SELECT payment_id, user_id, target_username, created_at FROM payments WHERE status = 'pending' AND reminded = 0",
+                fetchall=True
+            )
+            if not pendentes:
+                continue
+
+            now = datetime.now()
+            for p in pendentes:
+                pid, uid, target, created_str = p[0], p[1], p[2], p[3]
+                try:
+                    created_time = datetime.fromisoformat(created_str)
+                    diff_minutes = (now - created_time).total_seconds() / 60
+                    
+                    if diff_minutes >= 10:
+                        db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
+                        if bot:
+                            msg_lembrete = (
+                                f"⏳ *SUA CHAVE PIX PARA @{target} ESTÁ QUASE EXPIRANDO!*\n\n"
+                                f"Notamos que você gerou a liberação do **Relatório VIP OSINT**, mas o pagamento ainda não foi concluído.\n\n"
+                                f"💡 *Aproveite a promoção de R$ 19,90 por apenas R$ 3,90!*\n"
+                                f"Clique no botão abaixo para concluir no Pix ou tirar dúvidas com nosso suporte."
+                            )
+                            markup = InlineKeyboardMarkup(row_width=1)
+                            markup.add(InlineKeyboardButton(f"⚡ Liberar Relatório de @{target} (R$ 3,90)", callback_data=f"buy_{target}"))
+                            markup.add(InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{SUPORTE_USERNAME}"))
+                            bot.send_message(uid, msg_lembrete, reply_markup=markup, parse_mode="Markdown")
+                except Exception as ex:
+                    logger.error("Erro no envio do remarketing: %s", str(ex))
+
+        except Exception as e:
+            logger.error("Erro no worker de remarketing: %s", str(e))
+
+# Inicia thread de remarketing
+Thread(target=worker_remarketing_pix, daemon=True).start()
+
+# --- COMANDOS E FLUXO TELEGRAM ---
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
@@ -451,7 +495,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v3.0\n\n"
+            f"👋 Kronos Intel — OSINT Bot v3.5\n\n"
             f"Você tem direito a 1 consulta gratuita por dia.\n"
             f"Envie o nome de usuário desejado para pesquisar a pegada digital.\n"
             f"Exemplo: nome_do_alvo\n\n"
@@ -483,7 +527,6 @@ if bot:
         )
         bot.send_message(message.chat.id, painel)
 
-    # CONCEDER CRÉDITO MANUALMENTE (ADMIN)
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_credit(message):
         if message.from_user.id != ADMIN_ID:
@@ -519,7 +562,7 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # FLUXO ADMIN (Sempre entrega VIP)
+        # FLUXO ADMIN
         if eh_admin_mode:
             msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Executando varredura rápida para @{username}...")
             resultados = executar_varredura_osint(username)
@@ -555,18 +598,18 @@ if bot:
 
             if encontrados:
                 lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
-                ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
                 texto_resultado = (
                     f"🎯 PLATAFORMAS ENCONTRADAS PARA @{username}\n"
                     f"───────────────────────────────\n\n"
                     f"{lista_plataformas}\n\n"
                     f"⚠️ O usuário possui **{len(encontrados)} contas ativas** identificadas.\n\n"
-                    f"Deseja liberar o **Relatório Completo** com todas as URLs diretas, Dorks Judiciais (Jusbrasil/Processos) e Análise de Risco?"
+                    f"Deseja liberar o **Relatório Completo** com todas as URLs diretas, Dorks Judiciais (Jusbrasil/Processos) e Checagem de Vazamentos?\n\n"
+                    f"🔥 *OFERTA ESPECIAL:* De ~R$ 19,90~ por apenas **R$ 3,90**!"
                 )
 
                 markup = InlineKeyboardMarkup(row_width=1)
-                btn_sim = InlineKeyboardButton("🔓 Sim, quero o relatório completo", callback_data=f"buy_{username}")
+                btn_sim = InlineKeyboardButton("🔓 Sim, quero o relatório completo (R$ 3,90)", callback_data=f"buy_{username}")
                 btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
                 btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
                 markup.add(btn_sim, btn_nao, btn_suporte)
@@ -592,11 +635,11 @@ if bot:
                 f"O usuário foi localizado em {len(encontrados)} plataformas, incluindo:\n"
                 f"{lista_plataformas}\n"
                 f"• ... e outras!\n\n"
-                f"Deseja desbloquear as **URLs diretas** e o **Relatório Executivo em PDF**?"
+                f"Deseja desbloquear as **URLs diretas** e o **Relatório Executivo em PDF** por apenas **R$ 3,90**?"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("🔓 Sim, quero o relatório completo", callback_data=f"buy_{username}")
+            btn_sim = InlineKeyboardButton("🔓 Sim, quero o relatório completo (R$ 3,90)", callback_data=f"buy_{username}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao, btn_suporte)
@@ -611,8 +654,8 @@ if bot:
             target_username = call.data.split("buy_")[1]
             user_id = call.from_user.id
             
-            bot.answer_callback_query(call.id, "Gerando Chave Pix...")
-            qr_pix, qr_img_bytes = gerar_pix_mercadopago(user_id, target_username, valor=4.99)
+            bot.answer_callback_query(call.id, "Gerando Chave Pix de R$ 3,90...")
+            qr_pix, qr_img_bytes = gerar_pix_mercadopago(user_id, target_username, valor=PRECO_VIP)
 
             if qr_pix:
                 texto_oferta = (
@@ -622,9 +665,10 @@ if bot:
                     f"1. URLs Diretas de todas as plataformas\n"
                     f"2. Relatório Executivo Formatado em PDF\n"
                     f"3. Relatório em Texto Bruto (.TXT)\n"
-                    f"4. Dorks Judiciais (Jusbrasil / Escavador)\n"
-                    f"5. Guia Bônus em PDF de Proteção Digital\n\n"
-                    f"💰 Valor: R$ 4,99 no Pix\n\n"
+                    f"4. Dorks Judiciais (Jusbrasil / Processos)\n"
+                    f"5. Checagem de Vazamentos de Senhas / Leaks\n"
+                    f"6. Guia Bônus em PDF de Proteção Digital\n\n"
+                    f"💰 Valor: De ~R$ 19,90~ por **R$ 3,90 no Pix**\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"`{qr_pix}`\n\n"
                     f"⚡ Os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
@@ -650,11 +694,11 @@ if bot:
             texto_atencao = (
                 f"🚨 *TEM CERTEZA QUE NÃO DESEJA O RELATÓRIO COMPLETO?*\n\n"
                 f"O perfil @{target_username} tem rastros ativos na internet que podem conter dados de contato e vazamentos.\n\n"
-                f"💰 Adquira por **R$ 4,99** ou indique 3 amigos usando este link para desbloquear **100% grátis**:\n{ref_link}"
+                f"💰 Adquira por apenas **R$ 3,90** no Pix ou indique 3 amigos usando este link para desbloquear **100% grátis**:\n{ref_link}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("⚡ Sim! Liberar Pacote VIP (R$ 4,99)", callback_data=f"buy_{target_username}")
+            btn_sim = InlineKeyboardButton("⚡ Sim! Liberar Pacote VIP (R$ 3,90)", callback_data=f"buy_{target_username}")
             btn_nao = InlineKeyboardButton("❌ Confirmar Cancelamento", callback_data="final_cancel")
             markup.add(btn_sim, btn_nao)
 
@@ -710,7 +754,6 @@ def webhook():
 
         pid_str = str(payment_id)
         
-        # Verifica se já foi processado
         p_check = db_execute("SELECT status FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
         if p_check and p_check[0] == "approved":
             return jsonify({"status": "ok"}), 200
@@ -742,7 +785,7 @@ def webhook():
                             bot.send_document(telegram_id, guia_pdf, caption="📘 Guia de Proteção Digital")
 
                     if bot and ADMIN_ID:
-                        bot.send_message(ADMIN_ID, f"💰 NOVA VENDA APROVADA!\n• Valor: R$ 4,99 (Pix)\n• Alvo: @{target_username}\n• Comprador: {telegram_id}")
+                        bot.send_message(ADMIN_ID, f"💰 NOVA VENDA APROVADA!\n• Valor: R$ 3,90 (Pix)\n• Alvo: @{target_username}\n• Comprador: {telegram_id}")
 
             except Exception as e:
                 logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
@@ -754,7 +797,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v3.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v3.5 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
