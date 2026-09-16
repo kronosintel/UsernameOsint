@@ -1,8 +1,8 @@
 """
-Kronos Intel OSINT Bot v4.0
-- Sem limite de cota diária (Prévia gratuita ilimitada com lista de plataformas em texto)
-- Botão VIP com destaque visual instigante
-- Funil focado em curiosidade e conversão rápida no Pix (R$ 3,90)
+Kronos Intel OSINT Bot v4.1
+- Sem limite de cota diária (Prévia gratuita ilimitada)
+- Botão VIP com destaque visual instigante (R$ 3,90 no Pix)
+- Módulo Completo de Leaks e Vazamentos sem API (HIBP, IntelX, DeHashed, LeakCheck, Pastebin, Jusbrasil)
 - Banco de Dados SQLite & Histórico de Vendas
 """
 from __future__ import annotations
@@ -259,18 +259,22 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     score, nivel_exposicao = calcular_score_exposicao(len(encontrados), len(resultados))
 
+    # Links diretos de busca profunda e vazamentos (sem API)
+    hibp_link = f"https://haveibeenpwned.com/account/{username}"
+    intelx_link = f"https://intelx.io/?s={username}"
+    dehashed_link = f"https://dehashed.com/search?query={username}"
+    leakcheck_link = f"https://leakcheck.io/search?type=username&query={username}"
+    pastebin_dork = f"https://www.google.com/search?q=site:pastebin.com+%22{username}%22"
     jusbrasil_dork = f"https://www.google.com/search?q=site:jusbrasil.com.br+%22{username}%22"
     escavador_dork = f"https://www.google.com/search?q=site:escavador.com+%22{username}%22"
     google_dork = f"https://www.google.com/search?q=%22{username}%22"
-    pastebin_dork = f"https://www.google.com/search?q=site:pastebin.com+%22{username}%22"
-    breach_dork = f"https://www.google.com/search?q=%22{username}%22+db+OR+leak+OR+password"
 
     corpo = f"""===================================================================
                    KRONOS INTEL — RELATÓRIO OSINT EXECUTIVO
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v4.0
+SISTEMA DE MAPEAMENTO: Kronos Engine v4.1
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -290,13 +294,16 @@ SISTEMA DE MAPEAMENTO: Kronos Engine v4.0
         corpo += "[-] Nenhum perfil público indexado nas bases padrão.\n"
 
     corpo += f"""
-3. DORKS JUDICIAIS E VARREDURA DE VAZAMENTOS (LEAKS)
+3. VARREDURA DE VAZAMENTOS, PASTES E DORKS JUDICIAIS
 -------------------------------------------------------------------
-[+] Busca em Diários Oficiais (Jusbrasil) : {jusbrasil_dork}
-[+] Mapeamento de Processos (Escavador)  : {escavador_dork}
-[+] Checagem de Vazamento de Senhas      : {breach_dork}
-[+] Google Exact Match                   : {google_dork}
-[+] Registros em Pastes / Vazamentos      : {pastebin_dork}
+[+] Have I Been Pwned      : {hibp_link}
+[+] Intelligence X (IntelX): {intelx_link}
+[+] DeHashed Database      : {dehashed_link}
+[+] LeakCheck Search       : {leakcheck_link}
+[+] Pastes & Dump Text     : {pastebin_dork}
+[+] Diários Oficiais (Jus) : {jusbrasil_dork}
+[+] Processos (Escavador)  : {escavador_dork}
+[+] Google Exact Match     : {google_dork}
 
 ===================================================================
 Documento confidencial gerado por Kronos Intel OSINT Service.
@@ -319,17 +326,19 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
         styles = getSampleStyleSheet()
 
         title_style = ParagraphStyle('TStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#0F172A'), spaceAfter=6)
+        heading_style = ParagraphStyle('HStyle', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#0F172A'), spaceBefore=10, spaceAfter=6)
         body_style = ParagraphStyle('BStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#334155'), leading=12)
 
         elements = [
             Paragraph("KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT", title_style),
             Paragraph(f"<b>Alvo:</b> @{username} | <b>Data:</b> {data_atual}", body_style),
             HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=12),
-            Paragraph(f"<b>Score de Exposição:</b> {score}/100 ({nivel_exposicao})", body_style),
+            Paragraph(f"<b>Score de Exposição Digital:</b> {score}/100 ({nivel_exposicao})", body_style),
             Spacer(1, 10),
         ]
 
         if encontrados:
+            elements.append(Paragraph("Perfis Confirmados e URLs Diretas", heading_style))
             p_data = [[Paragraph("<b>Plataforma</b>", body_style), Paragraph("<b>URL do Perfil</b>", body_style)]]
             for p in encontrados:
                 url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=username))
@@ -341,6 +350,18 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
                 ('PADDING', (0,0), (-1,-1), 4),
             ]))
             elements.append(t)
+
+        elements.append(Spacer(1, 10))
+        elements.append(Paragraph("Links Diretos de Varredura Profunda e Vazamentos", heading_style))
+
+        dorks_text = (
+            f"• <b>Have I Been Pwned:</b> <a href='https://haveibeenpwned.com/account/{username}' color='#2563EB'>Checar Vazamento HIBP</a><br/>"
+            f"• <b>Intelligence X (IntelX):</b> <a href='https://intelx.io/?s={username}' color='#2563EB'>Buscar Base Deep Web</a><br/>"
+            f"• <b>DeHashed Search:</b> <a href='https://dehashed.com/search?query={username}' color='#2563EB'>Pesquisar Credenciais</a><br/>"
+            f"• <b>LeakCheck:</b> <a href='https://leakcheck.io/search?type=username&query={username}' color='#2563EB'>Verificar Bases Comprometidas</a><br/>"
+            f"• <b>Diários Oficiais:</b> <a href='https://www.google.com/search?q=site:jusbrasil.com.br+%22{username}%22' color='#2563EB'>Consultar Jusbrasil</a>"
+        )
+        elements.append(Paragraph(dorks_text, body_style))
 
         doc.build(elements)
         pdf_buffer.seek(0)
@@ -453,7 +474,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v4.0\n\n"
+            f"👋 Kronos Intel — OSINT Bot v4.1\n\n"
             f"Envie o nome de usuário desejado para verificar em quais plataformas ele está cadastrado.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
@@ -540,7 +561,7 @@ if bot:
                 f"───────────────────────────────\n\n"
                 f"{lista_plataformas}\n\n"
                 f"⚠️ O usuário possui {len(encontrados)} contas ativas identificadas nas redes acima.\n\n"
-                f"Deseja obter o Relatório Completo com as URLs diretas de cada perfil, Dorks Judiciais em Diários Oficiais (Jusbrasil) e Checagem de Vazamento de Senhas?\n\n"
+                f"Deseja obter o Relatório Completo com as URLs diretas de cada perfil, Dorks Judiciais em Diários Oficiais (Jusbrasil) e Checagem de Vazamento de Senhas (Have I Been Pwned / IntelX / DeHashed)?\n\n"
                 f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3,90 no Pix!"
             )
 
@@ -572,7 +593,7 @@ if bot:
                     f"2. Relatório Executivo Formatado em PDF\n"
                     f"3. Relatório em Texto Bruto (.TXT)\n"
                     f"4. Dorks Judiciais (Jusbrasil / Processos)\n"
-                    f"5. Checagem de Vazamentos de Senhas / Leaks\n"
+                    f"5. Checagem de Vazamentos (Have I Been Pwned / IntelX / DeHashed)\n"
                     f"6. Guia Bônus em PDF de Proteção Digital\n\n"
                     f"💰 Valor: De R$ 19,90 por R$ 3,90 no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
@@ -701,7 +722,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v4.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v4.1 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
