@@ -1,14 +1,18 @@
 """
-Kronos Intel OSINT Bot v4.1
-- Sem limite de cota diária (Prévia gratuita ilimitada)
-- Botão VIP com destaque visual instigante (R$ 3,90 no Pix)
-- Módulo Completo de Leaks e Vazamentos sem API (HIBP, IntelX, DeHashed, LeakCheck, Pastebin, Jusbrasil)
+Kronos Intel OSINT Bot v5.0
+- Relatório Interativo Web (HTML Dashboard) com Links Clicáveis
+- Opções de Download em PDF e TXT na Web e Telegram
+- URL Base configurada: https://usernameosint-1-vcj4.onrender.com
+- Sem cota diária (Prévia em texto pura com gatilho)
+- Botão VIP Promocional (R$ 3,90 no Pix via Mercado Pago)
+- Módulo de Leaks e Vazamentos (HIBP, IntelX, DeHashed, LeakCheck, Pastebin, Jusbrasil)
 - Banco de Dados SQLite & Histórico de Vendas
 """
 from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import os
 import re
@@ -24,7 +28,7 @@ import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template_string, Response
 
 try:
     from reportlab.lib import colors
@@ -73,6 +77,8 @@ def init_db():
                 amount REAL,
                 status TEXT,
                 reminded INTEGER DEFAULT 0,
+                token TEXT,
+                results_json TEXT,
                 created_at TEXT
             )
         """)
@@ -108,6 +114,7 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosIntelBot")
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com")
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
@@ -273,7 +280,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v4.1
+SISTEMA DE MAPEAMENTO: Kronos Engine v5.0
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -391,15 +398,16 @@ def construir_guia_protecao_pdf() -> io.BytesIO | None:
     except Exception:
         return None
 
-def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = PRECO_VIP) -> tuple[str | None, bytes | None]:
+def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = PRECO_VIP) -> tuple[str | None, bytes | None, str | None]:
     if not sdk:
-        return None, None
+        return None, None, None
+    token_relatorio = secrets.token_urlsafe(16)
     payment_data = {
         "transaction_amount": float(valor),
         "description": f"Relatorio OSINT - @{target_username}",
         "payment_method_id": "pix",
         "payer": {"email": f"user_{user_id}@telegram.com", "first_name": "Usuario", "last_name": str(user_id)},
-        "metadata": {"telegram_user_id": user_id, "target_username": target_username}
+        "metadata": {"telegram_user_id": user_id, "target_username": target_username, "token": token_relatorio}
     }
     try:
         res = sdk.payment().create(payment_data).get("response", {})
@@ -409,12 +417,12 @@ def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = PRE
         img_bytes = base64.b64decode(qr_base64) if qr_base64 else None
         
         pid = str(res.get("id"))
-        db_execute("INSERT INTO payments (payment_id, user_id, target_username, amount, status, reminded, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?)",
-                   (pid, user_id, target_username, valor, datetime.now().isoformat()), commit=True)
-        return qr_code, img_bytes
+        db_execute("INSERT INTO payments (payment_id, user_id, target_username, amount, status, reminded, token, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
+                   (pid, user_id, target_username, valor, token_relatorio, datetime.now().isoformat()), commit=True)
+        return qr_code, img_bytes, token_relatorio
     except Exception as e:
         logger.error("Erro ao gerar Pix: %s", str(e))
-        return None, None
+        return None, None, None
 
 def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
     if bot and ADMIN_ID and user_id != ADMIN_ID:
@@ -464,6 +472,167 @@ def worker_remarketing_pix():
 
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
+# --- TEMPLATE HTML DASHBOARD ---
+HTML_DASHBOARD_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kronos Intel — Relatório OSINT Executivo</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        body { background-color: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        .navbar { background-color: #161b22; border-bottom: 1px solid #30363d; }
+        .card { background-color: #161b22; border: 1px solid #30363d; border-radius: 12px; margin-bottom: 20px; }
+        .card-header { background-color: #21262d; border-bottom: 1px solid #30363d; font-weight: bold; color: #58a6ff; }
+        .badge-score { font-size: 1.2rem; padding: 8px 16px; border-radius: 20px; }
+        .btn-platform { background-color: #21262d; border: 1px solid #30363d; color: #f0f6fc; text-align: left; transition: 0.2s; }
+        .btn-platform:hover { background-color: #238636; border-color: #2ea043; color: #fff; transform: translateY(-2px); }
+        .btn-dork { background-color: #1f6feb; color: #fff; }
+        .btn-dork:hover { background-color: #388bfd; color: #fff; }
+        .btn-download { background-color: #238636; color: #fff; font-weight: bold; }
+        .btn-download:hover { background-color: #2ea043; color: #fff; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark mb-4 py-3">
+        <div class="container">
+            <span class="navbar-brand mb-0 h1 text-primary"><i class="bi bi-shield-lock-fill me-2"></i>KRONOS INTEL OSINT</span>
+            <div class="d-flex gap-2">
+                <a href="/download/pdf/{{ token }}" class="btn btn-download btn-sm"><i class="bi bi-file-earmark-pdf-fill me-1"></i> Baixar PDF</a>
+                <a href="/download/txt/{{ token }}" class="btn btn-outline-light btn-sm"><i class="bi bi-file-earmark-text-fill me-1"></i> Baixar TXT</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-body d-flex justify-content-between align-items-center flex-wrap">
+                        <div>
+                            <h3 class="card-title text-white mb-1"><i class="bi bi-person-circle me-2"></i>Target: @{{ username }}</h3>
+                            <p class="text-secondary mb-0"><i class="bi bi-clock-history me-1"></i> Varredura realizada em {{ data_atual }}</p>
+                        </div>
+                        <div class="mt-2 mt-md-0">
+                            <span class="badge bg-danger badge-score"><i class="bi bi-exclamation-triangle-fill me-1"></i> Risco: {{ nivel_exposicao }} ({{ score }}/100)</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-md-7">
+                <div class="card">
+                    <div class="card-header"><i class="bi bi-grid-3x3-gap-fill me-2"></i>Perfis Mapeados ({{ encontrados|length }} Encontrados)</div>
+                    <div class="card-body">
+                        {% if encontrados %}
+                        <div class="row g-2">
+                            {% for p in encontrados %}
+                            <div class="col-sm-6">
+                                <a href="{{ p.url }}" target="_blank" class="btn btn-platform w-100 d-flex justify-content-between align-items-center py-2 px-3">
+                                    <span><i class="bi bi-globe me-2"></i>{{ p.nome }}</span>
+                                    <i class="bi bi-box-arrow-up-right"></i>
+                                </a>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p class="text-secondary mb-0">Nenhum perfil público indexado nas bases padrão.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-5">
+                <div class="card">
+                    <div class="card-header text-warning"><i class="bi bi-incognito me-2"></i>Vazamentos & Leaks</div>
+                    <div class="card-body d-grid gap-2">
+                        <a href="https://haveibeenpwned.com/account/{{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-search me-2"></i>Have I Been Pwned</a>
+                        <a href="https://intelx.io/?s={{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-cpu me-2"></i>Intelligence X (IntelX)</a>
+                        <a href="https://dehashed.com/search?query={{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-database-check me-2"></i>DeHashed Search</a>
+                        <a href="https://leakcheck.io/search?type=username&query={{ username }}" target="_blank" class="btn btn-dork"><i class="bi bi-shield-exclamation me-2"></i>LeakCheck Base</a>
+                        <a href="https://www.google.com/search?q=site:pastebin.com+%22{{ username }}%22" target="_blank" class="btn btn-dork"><i class="bi bi-file-code me-2"></i>Pastebin Dork Search</a>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header text-info"><i class="bi bi-briefcase-fill me-2"></i>Diários Oficiais & Justiça</div>
+                    <div class="card-body d-grid gap-2">
+                        <a href="https://www.google.com/search?q=site:jusbrasil.com.br+%22{{ username }}%22" target="_blank" class="btn btn-outline-info"><i class="bi bi-journal-text me-2"></i>Jusbrasil Search</a>
+                        <a href="https://www.google.com/search?q=site:escavador.com+%22{{ username }}%22" target="_blank" class="btn btn-outline-info"><i class="bi bi-file-earmark-person me-2"></i>Escavador Processos</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+# --- ROTAS FLASK PARA WEB DASHBOARD E DOWNLOADS ---
+@app.route("/relatorio/<token>")
+def ver_relatorio_web(token):
+    p = db_execute("SELECT target_username, results_json, created_at FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
+    if not p:
+        return "Relatório não encontrado ou pagamento pendente.", 404
+
+    username, results_json, created_at = p[0], json.loads(p[1]), p[2]
+    encontrados_raw = [plat for plat, data in results_json.items() if data.get("exists") is True]
+    
+    encontrados = []
+    for plat in encontrados_raw:
+        url = results_json[plat].get("url", PLATFORM_URLS.get(plat, "").format(username=username))
+        encontrados.append({"nome": plat, "url": url})
+
+    score, nivel_exposicao = calcular_score_exposicao(len(encontrados), len(results_json))
+    data_formatada = datetime.fromisoformat(created_at).strftime("%d/%m/%Y %H:%M:%S")
+
+    return render_template_string(
+        HTML_DASHBOARD_TEMPLATE,
+        username=username,
+        token=token,
+        encontrados=encontrados,
+        score=score,
+        nivel_exposicao=nivel_exposicao,
+        data_atual=data_formatada
+    )
+
+@app.route("/download/pdf/<token>")
+def download_pdf(token):
+    p = db_execute("SELECT target_username, results_json FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
+    if not p:
+        return "Relatório não encontrado.", 404
+
+    username, results_json = p[0], json.loads(p[1])
+    pdf_buf = construir_relatorio_pdf(username, results_json)
+    if not pdf_buf:
+        return "Erro ao gerar PDF.", 500
+
+    return Response(
+        pdf_buf.getvalue(),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment;filename=Relatorio_OSINT_{username}.pdf"}
+    )
+
+@app.route("/download/txt/<token>")
+def download_txt(token):
+    p = db_execute("SELECT target_username, results_json FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
+    if not p:
+        return "Relatório não encontrado.", 404
+
+    username, results_json = p[0], json.loads(p[1])
+    txt_buf = construir_relatorio_osint(username, results_json)
+
+    return Response(
+        txt_buf.getvalue(),
+        mimetype="text/plain",
+        headers={"Content-Disposition": f"attachment;filename=Relatorio_OSINT_{username}.txt"}
+    )
+
 # --- HANDLERS TELEGRAM ---
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
@@ -473,7 +642,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v4.1\n\n"
+            f"👋 Kronos Intel — OSINT Bot v5.0\n\n"
             f"Envie o nome de usuário desejado para verificar em quais plataformas ele está cadastrado.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
@@ -560,7 +729,7 @@ if bot:
                 f"───────────────────────────────\n\n"
                 f"{lista_plataformas}\n\n"
                 f"⚠️ O usuário possui {len(encontrados)} contas ativas identificadas nas redes acima.\n\n"
-                f"Deseja obter o Relatório Completo com as URLs diretas de cada perfil, Dorks Judiciais em Diários Oficiais (Jusbrasil) e Checagem de Vazamento de Senhas (Have I Been Pwned / IntelX / DeHashed)?\n\n"
+                f"Deseja obter o Relatório Interativo Web com links clicáveis de cada perfil, Dorks Judiciais e Checagem de Vazamentos?\n\n"
                 f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3,90 no Pix!"
             )
 
@@ -581,23 +750,22 @@ if bot:
             user_id = call.from_user.id
             
             bot.answer_callback_query(call.id, "Gerando Chave Pix de R$ 3,90...")
-            qr_pix, qr_img_bytes = gerar_pix_mercadopago(user_id, target_username, valor=PRECO_VIP)
+            qr_pix, qr_img_bytes, token = gerar_pix_mercadopago(user_id, target_username, valor=PRECO_VIP)
 
             if qr_pix:
                 texto_oferta = (
                     f"🔒 PACOTE KRONOS INTEL VIP — @{target_username}\n"
                     f"───────────────────────────────\n"
                     f"Você está liberando:\n"
-                    f"1. URLs Diretas de todas as plataformas\n"
-                    f"2. Relatório Executivo Formatado em PDF\n"
-                    f"3. Relatório em Texto Bruto (.TXT)\n"
-                    f"4. Dorks Judiciais (Jusbrasil / Processos)\n"
-                    f"5. Checagem de Vazamentos (Have I Been Pwned / IntelX / DeHashed)\n"
-                    f"6. Guia Bônus em PDF de Proteção Digital\n\n"
+                    f"1. Painel Interativo Web (HTML) com links diretos clicáveis\n"
+                    f"2. Opção de Download em PDF Executivo e TXT\n"
+                    f"3. Dorks Judiciais (Jusbrasil / Processos)\n"
+                    f"4. Checagem de Vazamentos (Have I Been Pwned / IntelX / DeHashed)\n"
+                    f"5. Guia Bônus em PDF de Proteção Digital\n\n"
                     f"💰 Valor: De R$ 19,90 por R$ 3,90 no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
-                    f"⚡ Os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
+                    f"⚡ O painel e os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
                 )
 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -678,7 +846,7 @@ def webhook():
 
         pid_str = str(payment_id)
         
-        p_check = db_execute("SELECT status FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
+        p_check = db_execute("SELECT status, token FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
         if p_check and p_check[0] == "approved":
             return jsonify({"status": "ok"}), 200
 
@@ -689,12 +857,28 @@ def webhook():
                     metadata = payment_info.get("metadata", {})
                     telegram_id = metadata.get("telegram_user_id")
                     target_username = metadata.get("target_username", "alvo")
+                    token_relatorio = metadata.get("token") or secrets.token_urlsafe(16)
 
-                    db_execute("UPDATE payments SET status = 'approved' WHERE payment_id = ?", (pid_str,), commit=True)
+                    resultados = executar_varredura_osint(target_username)
+                    results_json = json.dumps(resultados)
+
+                    db_execute("UPDATE payments SET status = 'approved', token = ?, results_json = ? WHERE payment_id = ?",
+                               (token_relatorio, results_json, pid_str), commit=True)
 
                     if telegram_id and bot:
-                        bot.send_message(telegram_id, f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\nGerando relatórios e extraindo URLs para @{target_username}...")
-                        resultados = executar_varredura_osint(target_username)
+                        link_web = f"{WEB_BASE_URL.rstrip('/')}/relatorio/{token_relatorio}"
+
+                        markup = InlineKeyboardMarkup(row_width=1)
+                        markup.add(InlineKeyboardButton("🌐 Acessar Painel Interativo Web", url=link_web))
+
+                        bot.send_message(
+                            telegram_id,
+                            f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\n"
+                            f"Seu relatório executivo para @{target_username} foi gerado com sucesso!\n\n"
+                            f"🔗 Acesse no navegador para clicar nas plataformas e vazamentos ou utilize os arquivos PDF e TXT abaixo:",
+                            reply_markup=markup
+                        )
+
                         doc_txt = construir_relatorio_osint(target_username, resultados)
                         doc_pdf = construir_relatorio_pdf(target_username, resultados)
                         guia_pdf = construir_guia_protecao_pdf()
@@ -721,7 +905,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v4.1 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v5.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
