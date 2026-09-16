@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Monetização Pix, QR Code, Suporte, Trava Antiduplicidade e Botão de Cópia."""
+"""Username OSINT Checker com Monetização Pix, QR Code, Suporte, Painel de Estatísticas e Gatilho do 'Não'."""
 from __future__ import annotations
 
 import base64
@@ -34,6 +34,12 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "8")), 20))
 PORT = int(os.getenv("PORT", "5000"))
+
+# --- SISTEMA DE MÉTRICAS E CONTROLE DE ACESSOS (PAINEL ADMIN) ---
+STATS_LOCK = Lock()
+UNIQUE_USERS: set[int] = set()
+TOTAL_SEARCHES: int = 0
+TOTAL_REPORTS_GENERATED: int = 0
 
 # --- TRAVA ANTIDUPLICIDADE DE PAGAMENTOS ---
 PROCESSED_PAYMENTS: set[str] = set()
@@ -91,6 +97,17 @@ NOT_FOUND_MARKERS = {
 
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
+
+def registrar_acesso_usuario(user_id: int):
+    global TOTAL_SEARCHES
+    with STATS_LOCK:
+        UNIQUE_USERS.add(user_id)
+        TOTAL_SEARCHES += 1
+
+def registrar_relatorio_gerado():
+    global TOTAL_REPORTS_GENERATED
+    with STATS_LOCK:
+        TOTAL_REPORTS_GENERATED += 1
 
 def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 9.99) -> tuple[str | None, bytes | None]:
     if not sdk:
@@ -240,6 +257,7 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
+        registrar_acesso_usuario(message.from_user.id)
         bot.reply_to(
             message,
             f"👋 Kronos Intel — OSINT Bot\n\n"
@@ -248,6 +266,28 @@ if bot:
             f"🛠 Precisa de ajuda ou suporte?\nEntre em contato direto: @{SUPORTE_USERNAME}"
         )
 
+    # --- COMANDO EXCLUSIVO DE PAINEL DE ESTATÍSTICAS DO ADMIN ---
+    @bot.message_handler(commands=['stats'])
+    def handle_stats_command(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+
+        with STATS_LOCK:
+            total_unicos = len(UNIQUE_USERS)
+            total_buscas = TOTAL_SEARCHES
+            total_relatorios = TOTAL_REPORTS_GENERATED
+
+        painel = (
+            f"📊 *PAINEL DE ESTATÍSTICAS DO BOT*\n"
+            f"───────────────────────────────\n"
+            f"👤 *Usuários Únicos:* {total_unicos}\n"
+            f"🔎 *Total de Pesquisas:* {total_buscas}\n"
+            f"📄 *Relatórios Gerados:* {total_relatorios}\n"
+            f"💰 *Vendas Aprovadas:* {len(PROCESSED_PAYMENTS)}"
+        )
+        bot.send_message(message.chat.id, painel, parse_mode="Markdown")
+
+    # --- COMANDO EXCLUSIVO DE ADMIN (/admin <username>) ---
     @bot.message_handler(commands=['admin'])
     def handle_admin_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -265,6 +305,7 @@ if bot:
         tool = OSINTTool(username)
         resultados = tool.run_checks()
         documento = construir_relatorio_osint(username, resultados)
+        registrar_relatorio_gerado()
 
         bot.send_document(
             chat_id=message.chat.id,
@@ -272,8 +313,10 @@ if bot:
             caption=f"👑 [ADMIN ACCESS] Relatório OSINT Completo — @{username}"
         )
 
+    # --- PROCESSAMENTO DE BUSCA COM REGISTRO DE TRÁFEGO ---
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
+        registrar_acesso_usuario(message.from_user.id)
         username = message.text.strip().replace("@", "")
 
         if not valid_username(username):
@@ -285,6 +328,8 @@ if bot:
             tool = OSINTTool(username)
             resultados = tool.run_checks()
             documento = construir_relatorio_osint(username, resultados)
+            registrar_relatorio_gerado()
+
             bot.send_document(
                 chat_id=message.chat.id,
                 document=documento,
@@ -309,7 +354,7 @@ if bot:
             
             markup = InlineKeyboardMarkup(row_width=2)
             btn_sim = InlineKeyboardButton("✅ Sim, quero o relatório!", callback_data=f"buy_{username}")
-            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="cancel_report")
+            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao)
             markup.add(btn_suporte)
@@ -318,6 +363,7 @@ if bot:
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil padrão localizado para @{username}.")
 
+    # --- LISTENER DE CLIQUES (PIX, CÓPIA E RETENÇÃO) ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
         if call.data.startswith("buy_"):
@@ -337,12 +383,11 @@ if bot:
                     f"• Análise de exposição e recomendações\n"
                     f"• Relatório em formato de documento (.TXT)\n\n"
                     f"💰 Valor: R$ 9,99\n\n"
-                    f"Copie a chave Pix abaixo (basta tocar no código ou clicar no botão abaixo):\n\n"
+                    f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
                     f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmado."
                 )
                 
-                # BOTÃO DE CÓPIA SEPARADO + SUPORTE
                 markup = InlineKeyboardMarkup(row_width=1)
                 btn_copiar = InlineKeyboardButton("📋 Obter Apenas Chave Pix (Texto)", callback_data=f"getkey_{user_id}")
                 btn_suporte = InlineKeyboardButton("💬 Precisa de Ajuda?", url=f"https://t.me/{SUPORTE_USERNAME}")
@@ -364,15 +409,46 @@ if bot:
             else:
                 bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente mais tarde.")
 
+        elif call.data.startswith("confirm_cancel_"):
+            # GATILHO PERSUASIVO AO CLICAR EM 'NÃO, OBRIGADO'
+            target_username = call.data.split("confirm_cancel_")[1]
+            bot.answer_callback_query(call.id, "Atenção...")
+
+            texto_atencao = (
+                f"⚠️ *Tem certeza de que deseja cancelar a consulta de @{target_username}?*\n\n"
+                f"O relatório completo revela todas as menções do username em:\n"
+                f"• Motores de busca avançados (Google Exact Match)\n"
+                f"• Fóruns técnicos e comunidades (Reddit, Pastebin)\n"
+                f"• Histórico de cadastros e vazamentos públicos\n\n"
+                f"💡 *Aproveite por apenas R$ 9,99 e receba o documento na hora!*"
+            )
+
+            markup = InlineKeyboardMarkup(row_width=1)
+            btn_sim = InlineKeyboardButton("✅ Mudei de ideia, quero o relatório!", callback_data=f"buy_{target_username}")
+            btn_nao = InlineKeyboardButton("❌ Sim, quero cancelar mesmo", callback_data="final_cancel")
+            markup.add(btn_sim, btn_nao)
+
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=texto_atencao,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+
+        elif call.data == "final_cancel":
+            bot.answer_callback_query(call.id, "Consulta cancelada.")
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="👍 Entendido! Se precisar de uma nova consulta, basta enviar outro nome de usuário."
+            )
+
         elif call.data.startswith("getkey_"):
-            # Ação disparada pelo botão 'Obter Apenas Chave Pix'
             bot.answer_callback_query(call.id, "Enviando chave em texto...")
-            
-            # Recupera e re-envia a chave em uma mensagem simples para cópia direta
             msg_texto = call.message.caption or call.message.text
             lines = msg_texto.split("\n\n") if msg_texto else []
             
-            # Procura a linha que contém a chave Pix longa
             pix_key = None
             for l in lines:
                 if len(l) > 50 and not l.startswith("🔒") and not l.startswith("⚡"):
@@ -388,14 +464,6 @@ if bot:
             else:
                 bot.send_message(call.message.chat.id, "⚠️ Toque e segure no texto do Pix na mensagem acima para copiar.")
 
-        elif call.data == "cancel_report":
-            bot.answer_callback_query(call.id, "Opção cancelada.")
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="👍 Entendido! Se precisar de uma nova consulta, basta enviar outro nome de usuário."
-            )
-
 # --- ROTA RECEPTORA DO TELEGRAM ---
 @app.route(f"/telegram/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
@@ -407,7 +475,7 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- ROTA WEBHOOK MERCADO PAGO COM TRAVA DE DUPLICIDADE ---
+# --- ROTA WEBHOOK MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -458,6 +526,7 @@ def webhook():
                         tool = OSINTTool(target_username)
                         resultados = tool.run_checks()
                         documento = construir_relatorio_osint(target_username, resultados)
+                        registrar_relatorio_gerado()
 
                         bot.send_document(
                             chat_id=telegram_id,
