@@ -1,7 +1,7 @@
 """
-Kronos Intel OSINT Bot v5.1
-- Relatório Interativo Web (HTML Dashboard) para Usuários e ADMIN
-- Opções de Download em PDF e TXT na Web e Telegram
+Kronos Intel OSINT Bot v5.2
+- Entrega EXCLUSIVA via Painel Web Interativo (Sem arquivos anexos no chat)
+- Opções de Download em PDF e TXT mantidas diretamente no Painel Web
 - URL Base configurada: https://usernameosint-1-vcj4.onrender.com
 - Sem cota diária (Prévia em texto pura com gatilho)
 - Botão VIP Promocional (R$ 3,90 no Pix via Mercado Pago)
@@ -280,7 +280,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v5.1
+SISTEMA DE MAPEAMENTO: Kronos Engine v5.2
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -375,27 +375,6 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
         return pdf_buffer
     except Exception as e:
         logger.error("Erro ao gerar PDF: %s", str(e))
-        return None
-
-def construir_guia_protecao_pdf() -> io.BytesIO | None:
-    if not HAS_REPORTLAB:
-        return None
-    try:
-        pdf_buffer = io.BytesIO()
-        doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-        styles = getSampleStyleSheet()
-        elements = [
-            Paragraph("GUIA KRONOS: SANITIZAÇÃO DE PEGADA DIGITAL", ParagraphStyle('T', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#0F172A'))),
-            HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#10B981'), spaceAfter=10),
-            Paragraph("1. Desvincule usernames repetidos em fóruns e redes públicas.", ParagraphStyle('B', parent=styles['Normal'], fontSize=10, leading=14)),
-            Paragraph("2. Remova registros antigos no Jusbrasil/Escavador através dos painéis de privacidade.", ParagraphStyle('B', parent=styles['Normal'], fontSize=10, leading=14)),
-            Paragraph("3. Ative a Autenticação em Duas Etapas (2FA) em todas as contas ativas.", ParagraphStyle('B', parent=styles['Normal'], fontSize=10, leading=14)),
-        ]
-        doc.build(elements)
-        pdf_buffer.seek(0)
-        pdf_buffer.name = "Guia_Protecao_Pegada_Digital_Kronos.pdf"
-        return pdf_buffer
-    except Exception:
         return None
 
 def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = PRECO_VIP) -> tuple[str | None, bytes | None, str | None]:
@@ -642,7 +621,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v5.1\n\n"
+            f"👋 Kronos Intel — OSINT Bot v5.2\n\n"
             f"Envie o nome de usuário desejado para verificar em quais plataformas ele está cadastrado.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
@@ -690,7 +669,7 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # FLUXO ADMIN (GERA PAINEL WEB + DOCUMENTOS DIRETOS)
+        # FLUXO ADMIN (ENTREGA EXCLUSIVA DO BOTÃO PAINEL WEB)
         if eh_admin_mode:
             msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando @{username}...")
             resultados = executar_varredura_osint(username)
@@ -698,16 +677,11 @@ if bot:
             token_relatorio = secrets.token_urlsafe(16)
             pid_admin = f"admin_{int(time.time())}"
 
-            # Registra no banco para liberar o link Web do relatório para o Admin
             db_execute(
                 "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, created_at) VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?)",
                 (pid_admin, user_id, username, token_relatorio, results_json, datetime.now().isoformat()),
                 commit=True
             )
-
-            doc_txt = construir_relatorio_osint(username, resultados)
-            doc_pdf = construir_relatorio_pdf(username, resultados)
-            guia_pdf = construir_guia_protecao_pdf()
             registrar_relatorio()
 
             try:
@@ -724,12 +698,6 @@ if bot:
                 f"👑 [MODO ADMIN] Painel Interativo Web gerado para @{username}:",
                 reply_markup=markup
             )
-
-            if doc_pdf:
-                bot.send_document(message.chat.id, doc_pdf, caption=f"📄 [ADMIN VIP] Relatório PDF — @{username}")
-            bot.send_document(message.chat.id, doc_txt, caption=f"📝 [ADMIN VIP] Texto Bruto — @{username}")
-            if guia_pdf:
-                bot.send_document(message.chat.id, guia_pdf, caption="📘 Guia de Proteção Digital")
             return
 
         # FLUXO PRINCIPAL (PRÉVIA ILIMITADA COM GATILHO)
@@ -779,14 +747,14 @@ if bot:
                     f"───────────────────────────────\n"
                     f"Você está liberando:\n"
                     f"1. Painel Interativo Web (HTML) com links diretos clicáveis\n"
-                    f"2. Opção de Download em PDF Executivo e TXT\n"
+                    f"2. Opção de Download em PDF Executivo e TXT na Web\n"
                     f"3. Dorks Judiciais (Jusbrasil / Processos)\n"
                     f"4. Checagem de Vazamentos (Have I Been Pwned / IntelX / DeHashed)\n"
-                    f"5. Guia Bônus em PDF de Proteção Digital\n\n"
+                    f"5. Guia Bônus de Proteção Digital\n\n"
                     f"💰 Valor: De R$ 19,90 por R$ 3,90 no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
-                    f"⚡ O painel e os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
+                    f"⚡ O painel interativo será entregue automaticamente assim que o pagamento for confirmado."
                 )
 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -896,22 +864,13 @@ def webhook():
                             telegram_id,
                             f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\n"
                             f"Seu relatório executivo para @{target_username} foi gerado com sucesso!\n\n"
-                            f"🔗 Acesse no navegador para clicar nas plataformas e vazamentos ou utilize os arquivos PDF e TXT abaixo:",
+                            f"🔗 Clique no botão abaixo para acessar o painel completo no seu navegador:",
                             reply_markup=markup
                         )
 
                         doc_txt = construir_relatorio_osint(target_username, resultados)
-                        doc_pdf = construir_relatorio_pdf(target_username, resultados)
-                        guia_pdf = construir_guia_protecao_pdf()
                         registrar_relatorio()
-
                         enviar_relatorio_espelho_admin(target_username, doc_txt, telegram_id, "VENDA PIX APROVADA")
-
-                        if doc_pdf:
-                            bot.send_document(telegram_id, doc_pdf, caption=f"📄 Relatório Executivo PDF — @{target_username}")
-                        bot.send_document(telegram_id, doc_txt, caption=f"📝 Relatório Texto Bruto — @{target_username}")
-                        if guia_pdf:
-                            bot.send_document(telegram_id, guia_pdf, caption="📘 Guia de Proteção Digital")
 
                     if bot and ADMIN_ID:
                         bot.send_message(ADMIN_ID, f"💰 NOVA VENDA APROVADA!\n• Valor: R$ 3,90 (Pix)\n• Alvo: @{target_username}\n• Comprador: {telegram_id}")
@@ -926,7 +885,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v5.1 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v5.2 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
