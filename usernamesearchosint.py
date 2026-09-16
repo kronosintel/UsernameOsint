@@ -1,4 +1,4 @@
-"""Username OSINT Checker com Trava Rígida de Cota Única por Dia e Salvação JSON Imediata."""
+"""Username OSINT Checker com Ocultação de URLs na Consulta Gratuita e Liberação VIP por Pagamento."""
 from __future__ import annotations
 
 import base64
@@ -182,9 +182,8 @@ def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
             
         ultima_consulta = FREE_DAILY_USAGE.get(uid_str)
         if ultima_consulta == hoje_str:
-            return False  # Cota já utilizada hoje
+            return False
 
-        # Consome a cota e grava IMEDIATAMENTE no disco
         FREE_DAILY_USAGE[uid_str] = hoje_str
         salvar_dados_disco()
         return True
@@ -380,6 +379,7 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
 
 def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO | None:
     if not HAS_REPORTLAB:
+        logger.warning("ReportLab não instalado. PDF não será gerado.")
         return None
 
     try:
@@ -537,8 +537,8 @@ if bot:
         bot.reply_to(
             message,
             f"👋 Kronos Intel — OSINT Bot\n\n"
-            f"Você tem direito a 1 relatório completo gratuito por dia.\n"
-            f"Envie o nome de usuário desejado para iniciar a consulta.\n"
+            f"Você tem direito a 1 consulta gratuita por dia.\n"
+            f"Envie o nome de usuário desejado para verificar em quais plataformas ele aparece.\n"
             f"Exemplo: nome_do_alvo\n\n"
             f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}"
         )
@@ -559,7 +559,8 @@ if bot:
             f"👤 Usuários Únicos: {total_unicos}\n"
             f"🔎 Total de Pesquisas: {total_buscas}\n"
             f"📄 Relatórios Gerados: {total_relatorios}\n"
-            f"💰 Vendas Aprovadas: {len(PROCESSED_PAYMENTS)}"
+            f"💰 Vendas Aprovadas: {len(PROCESSED_PAYMENTS)}\n"
+            f"📦 Suporte PDF (ReportLab): {'Ativo' if HAS_REPORTLAB else 'Inativo'}"
         )
         bot.send_message(message.chat.id, painel)
 
@@ -581,7 +582,7 @@ if bot:
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # FLUXO SE VOCÊ ATIVAR O MODO ADMIN
+        # FLUXO MODO ADMIN (LIBERAÇÃO VIP DIRETA COM PDF E TXT)
         if eh_comando_admin:
             msg_status = bot.reply_to(message, f"👑 [ACESSO ADMIN] Processando Pacote VIP para @{username}...")
             
@@ -616,87 +617,81 @@ if bot:
                 )
             return
 
-        # VERIFICAÇÃO E CONSUMO RÍGIDO DE COTA
+        # FLUXO USUÁRIO COMUM - CONSULTA GRATUITA DO DIA
         tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
 
         if tem_cota_gratis:
-            msg_status = bot.reply_to(message, f"⏳ Iniciando varredura OSINT para @{username}...")
-            
-            time.sleep(1)
-            try:
-                bot.edit_message_text("⏳ Verificando redes de desenvolvedores e código...", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
+            msg_status = bot.reply_to(message, f"⏳ Mapeando plataformas para @{username}...")
 
             tool = OSINTTool(username)
             resultados = tool.run_checks()
-            
+            encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+
             try:
-                bot.edit_message_text("⏳ Mapeando mídias sociais e plataformas de streaming...", chat_id=message.chat.id, message_id=msg_status.message_id)
+                bot.edit_message_text(f"✅ Mapeamento concluído para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
             except Exception:
                 pass
 
-            documento = construir_relatorio_osint(username, resultados)
-            pdf_doc = construir_relatorio_pdf(username, resultados)
-            registrar_relatorio_gerado()
+            if encontrados:
+                lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+                ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
-            enviar_relatorio_espelho_admin(username, documento, user_id, "COTA GRATUITA DIÁRIA")
-
-            try:
-                bot.edit_message_text(f"✅ Varredura concluída para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
-
-            # ENVIO DE UM ÚNICO RELATÓRIO (PDF OU TXT)
-            if pdf_doc:
-                bot.send_document(
-                    chat_id=message.chat.id,
-                    document=pdf_doc,
-                    caption=f"📄 Relatório OSINT Executivo (PDF) — @{username}\n\n✨ Sua cota diária gratuita de hoje foi utilizada."
+                texto_resultado = (
+                    f"🔎 RESULTADO DA CONSULTA — @{username}\n"
+                    f"───────────────────────────────\n"
+                    f"O nome de usuário aparece nas seguintes plataformas ({len(encontrados)}):\n\n"
+                    f"{lista_plataformas}\n\n"
+                    f"🔒 *URLS E LINKS DIRETOS BLOQUEADOS*\n"
+                    f"Para obter os links diretos para cada perfil, o relatório em PDF formatado, Google Dorks e o Guia Bônus, libere o **Pacote VIP**:\n\n"
+                    f"💰 Apenas R$ 4,99 no Pix ou indique 3 amigos:\n"
+                    f"{ref_link}"
                 )
+
+                markup = InlineKeyboardMarkup(row_width=1)
+                btn_sim = InlineKeyboardButton("⚡ Liberar URLs e Relatório VIP (R$ 4,99)", callback_data=f"buy_{username}")
+                btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
+                markup.add(btn_sim, btn_suporte)
+
+                bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
             else:
-                bot.send_document(
-                    chat_id=message.chat.id,
-                    document=documento,
-                    caption=f"📄 Relatório OSINT Completo — @{username}\n\n✨ Sua cota diária gratuita de hoje foi utilizada."
-                )
+                bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
+
             return
 
-        # FLUXO APÓS A COTA TER SIDO UTILIZADA NO DIA
-        bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
+        # FLUXO APÓS COTA EXPIRAR NO DIA
+        bot.reply_to(message, f"🔎 Mapeando plataformas para @{username}...")
 
         tool = OSINTTool(username)
         results = tool.run_checks()
         encontrados = [p for p, data in results.items() if data.get("exists") is True]
 
         if encontrados:
-            preview_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
+            lista_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
             ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
             
-            texto_gratuito = (
+            texto_expirado = (
                 f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
                 f"───────────────────────────────\n"
-                f"⚠️ Sua cota gratuita de hoje foi expirada.\n\n"
-                f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔥 *O QUE VOCÊ VAI RECEBER NO PACOTE VIP (R$ 4,99):*\n"
+                f"⚠️ Sua cota diária gratuita expirou.\n\n"
+                f"Identificamos que o usuário existe em {len(encontrados)} plataformas, incluindo:\n"
+                f"{lista_plataformas}\n"
+                f"• ... e mais!\n\n"
+                f"🔥 *PACOTE VIP (R$ 4,99):*\n"
+                f"• 🔗 URLs Diretas de todos os perfis\n"
                 f"• 📄 Relatório Executivo Formatado em PDF\n"
-                f"• 📝 Relatório com URLs Brutas e Estruturadas (.TXT)\n"
-                f"• 🎯 Score OSINT de Nível de Exposição e Risco Digital\n"
-                f"• 🔎 Links de Busca Profunda (Google Exact Match & Dorks)\n"
-                f"• 📘 Guia Bônus em PDF: Checklist de Proteção Digital\n\n"
-                f"🎁 *QUER DESBLOQUEAR DE GRAÇA?*\n"
-                f"Envie o seu link abaixo para 3 amigos e ganhe +1 consulta gratuita:\n"
-                f"{ref_link}"
+                f"• 📝 Relatório com Dados Estruturados (.TXT)\n"
+                f"• 🎯 Score OSINT e Risco Digital\n"
+                f"• 🔎 Google Dorks de Busca Profunda\n"
+                f"• 📘 Guia Bônus em PDF\n\n"
+                f"🎁 *LIBERE DE GRAÇA:* Indique 3 amigos usando este link:\n{ref_link}"
             )
             
-            markup = InlineKeyboardMarkup(row_width=2)
-            btn_sim = InlineKeyboardButton("⚡ Liberar Pacote VIP (R$ 4,99)", callback_data=f"buy_{username}")
-            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
+            markup = InlineKeyboardMarkup(row_width=1)
+            btn_sim = InlineKeyboardButton("⚡ Liberar URLs e Relatório VIP (R$ 4,99)", callback_data=f"buy_{username}")
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
-            markup.add(btn_sim, btn_nao)
-            markup.add(btn_suporte)
+            markup.add(btn_sim, btn_suporte)
 
-            bot.send_message(message.chat.id, texto_gratuito, reply_markup=markup)
+            bot.send_message(message.chat.id, texto_expirado, reply_markup=markup, parse_mode="Markdown")
         else:
             bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
 
@@ -715,15 +710,15 @@ if bot:
                     f"🔒 PACOTE KRONOS INTEL VIP — @{target_username}\n"
                     f"───────────────────────────────\n"
                     f"Você está adquirindo:\n"
-                    f"1. Relatório Executivo em PDF\n"
-                    f"2. Relatório Completo em TXT\n"
-                    f"3. Score de Risco OSINT\n"
-                    f"4. Links de Dorks de Busca Profunda\n"
+                    f"1. URLs Diretas de todos os perfis\n"
+                    f"2. Relatório Executivo em PDF\n"
+                    f"3. Relatório Completo em TXT\n"
+                    f"4. Score de Risco OSINT & Dorks\n"
                     f"5. Guia Bônus em PDF de Proteção Digital\n\n"
                     f"💰 Valor: R$ 4,99\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
-                    f"⚡ Os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
+                    f"⚡ Os arquivos e links serão entregues automaticamente assim que o pagamento for confirmado."
                 )
                 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -757,6 +752,7 @@ if bot:
             texto_atencao = (
                 f"⚠️ Tem certeza de que deseja cancelar a consulta de @{target_username}?\n\n"
                 f"Ao liberar o Pacote VIP (R$ 4,99), você recebe:\n"
+                f"• URLs diretas de todas as redes encontradas\n"
                 f"• Relatório Executivo OSINT em PDF\n"
                 f"• Dorks e Mapeamento de Busca Profunda\n"
                 f"• Guia Bônus em PDF de Sanitização Digital\n\n"
@@ -781,7 +777,7 @@ if bot:
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text="👍 Entendido! Sua cota diária expirou. Envie seu link para 3 amigos ou aguarde até amanhã para fazer uma nova consulta gratuita."
+                text="👍 Entendido! Envie seu link para 3 amigos ou aguarde até amanhã para fazer uma nova consulta."
             )
 
         elif call.data.startswith("getkey_"):
@@ -862,7 +858,7 @@ def webhook():
                             telegram_id,
                             f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\n"
                             f"Obrigado por adquirir o pacote completo de @{target_username}!\n"
-                            f"Gerando relatórios e bônus executivos..."
+                            f"Gerando relatórios executivos com as URLs diretas..."
                         )
 
                         tool = OSINTTool(target_username)
