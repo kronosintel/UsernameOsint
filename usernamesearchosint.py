@@ -1,8 +1,9 @@
-"""Username OSINT Checker com Busca Expandida, Pacote VIP Bônus, PDF Executivo e Pix a R$ 4,99."""
+"""Username OSINT Checker com Salvamento em JSON, Gatilho VIP e Pix a R$ 4,99."""
 from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import os
 import re
@@ -45,18 +46,47 @@ DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
 MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "20")), 30))
 PORT = int(os.getenv("PORT", "5000"))
 
-# --- SISTEMA DE MÉTRICAS, COTA DIÁRIA E INDICAÇÕES ---
+# --- PERSISTÊNCIA EM ARQUIVO JSON (SISTEMA DE MEMÓRIA PERMANENTE) ---
+DATA_FILE = "cota_diaria.json"
 STATS_LOCK = Lock()
+
 UNIQUE_USERS: set[int] = set()
 TOTAL_SEARCHES: int = 0
 TOTAL_REPORTS_GENERATED: int = 0
 
-FREE_DAILY_USAGE: dict[int, date] = {}
-USER_CREDITS: dict[int, int] = {}
-REFERRALS: dict[int, list[int]] = {}
+FREE_DAILY_USAGE: dict[str, str] = {}
+USER_CREDITS: dict[str, int] = {}
+REFERRALS: dict[str, list[int]] = {}
 
 PROCESSED_PAYMENTS: set[str] = set()
 payments_lock = Lock()
+
+def carregar_dados_disco():
+    global FREE_DAILY_USAGE, USER_CREDITS, REFERRALS
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+                FREE_DAILY_USAGE = dados.get("daily_usage", {})
+                USER_CREDITS = dados.get("credits", {})
+                REFERRALS = dados.get("referrals", {})
+        except Exception as e:
+            logger.error("Erro ao carregar banco de dados JSON: %s", str(e))
+
+def salvar_dados_disco():
+    try:
+        dados = {
+            "daily_usage": FREE_DAILY_USAGE,
+            "credits": USER_CREDITS,
+            "referrals": REFERRALS
+        }
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(dados, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("Erro ao salvar banco de dados JSON: %s", str(e))
+
+# Carrega os dados salvos na inicialização do script
+carregar_dados_disco()
 
 # --- CONFIGURAÇÃO DE ADMINISTRADOR E SUPORTE ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
@@ -69,7 +99,6 @@ sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wIA")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
 
-# --- BASE EXPANDIDA DE PLATAFORMAS ---
 PLATFORM_URLS = {
     "GitHub": "https://api.github.com/users/{username}",
     "GitLab": "https://gitlab.com/{username}",
@@ -142,16 +171,21 @@ def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
 
 def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
-    hoje = date.today()
+    hoje_str = date.today().isoformat()
+    uid_str = str(user_id)
+    
     with STATS_LOCK:
-        creditos = USER_CREDITS.get(user_id, 0)
+        # Se tem crédito acumulado por indicação
+        creditos = USER_CREDITS.get(uid_str, 0)
         if creditos > 0:
-            USER_CREDITS[user_id] -= 1
+            USER_CREDITS[uid_str] -= 1
+            salvar_dados_disco()
             return True
             
-        ultima_consulta = FREE_DAILY_USAGE.get(user_id)
-        if ultima_consulta != hoje:
-            FREE_DAILY_USAGE[user_id] = hoje
+        ultima_consulta = FREE_DAILY_USAGE.get(uid_str)
+        if ultima_consulta != hoje_str:
+            FREE_DAILY_USAGE[uid_str] = hoje_str
+            salvar_dados_disco()
             return True
         return False
 
@@ -167,13 +201,14 @@ def registrar_relatorio_gerado():
         TOTAL_REPORTS_GENERATED += 1
 
 def registrar_indicacao(referrer_id: int, new_user_id: int):
+    ref_str = str(referrer_id)
     with STATS_LOCK:
-        if referrer_id not in REFERRALS:
-            REFERRALS[referrer_id] = []
-        if new_user_id not in REFERRALS[referrer_id]:
-            REFERRALS[referrer_id].append(new_user_id)
-            if len(REFERRALS[referrer_id]) % 3 == 0:
-                USER_CREDITS[referrer_id] = USER_CREDITS.get(referrer_id, 0) + 1
+        if ref_str not in REFERRALS:
+            REFERRALS[ref_str] = []
+        if new_user_id not in REFERRALS[ref_str]:
+            REFERRALS[ref_str].append(new_user_id)
+            if len(REFERRALS[ref_str]) % 3 == 0:
+                USER_CREDITS[ref_str] = USER_CREDITS.get(ref_str, 0) + 1
                 if bot:
                     try:
                         bot.send_message(
@@ -182,6 +217,7 @@ def registrar_indicacao(referrer_id: int, new_user_id: int):
                         )
                     except Exception:
                         pass
+            salvar_dados_disco()
 
 def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 4.99) -> tuple[str | None, bytes | None]:
     if not sdk:
@@ -353,12 +389,7 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
 
         pdf_buffer = io.BytesIO()
         doc = SimpleDocTemplate(
-            pdf_buffer,
-            pagesize=letter,
-            rightMargin=36,
-            leftMargin=36,
-            topMargin=36,
-            bottomMargin=36
+            pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
         )
 
         styles = getSampleStyleSheet()
@@ -431,7 +462,6 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
         logger.error("Erro ao gerar PDF: %s", str(e))
         return None
 
-# --- GERADOR DE GUIA BÔNUS EM PDF (ENTREGÁVEL EXCLUSIVO VIP) ---
 def construir_guia_protecao_pdf() -> io.BytesIO | None:
     if not HAS_REPORTLAB:
         return None
@@ -626,7 +656,7 @@ if bot:
                 )
             return
 
-        # FLUXO QUANDO A COTA EXPIROU (OFERTA PAGA R$ 4,99)
+        # FLUXO QUANDO A COTA EXPIROU (OFERTA PAGA R$ 4,99 COM GATILHO COMPLETO)
         bot.reply_to(message, f"🔎 Iniciando prévia da varredura OSINT para @{username}...")
 
         tool = OSINTTool(username)
@@ -635,7 +665,6 @@ if bot:
 
         if encontrados:
             preview_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
-            
             ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
             
             texto_gratuito = (
@@ -643,11 +672,13 @@ if bot:
                 f"───────────────────────────────\n"
                 f"⚠️ Sua cota gratuita de hoje foi expirada.\n\n"
                 f"✅ Perfis Encontrados ({len(encontrados)}):\n{preview_plataformas}\n\n"
-                f"🔒 Deseja liberar o Pacote VIP Completo por apenas R$ 4,99?\n"
-                f"• Relatório OSINT Executivo em PDF\n"
-                f"• Módulo de Dorks de Busca Profunda\n"
-                f"• Guia Bônus de Sanitização Digital em PDF\n\n"
-                f"🎁 GANHE CONSULTAS GRÁTIS:\n"
+                f"🔥 *O QUE VOCÊ VAI RECEBER NO PACOTE VIP (R$ 4,99):*\n"
+                f"• 📄 Relatório Executivo Formatado em PDF\n"
+                f"• 📝 Relatório com URLs Brutas e Estruturadas (.TXT)\n"
+                f"• 🎯 Score OSINT de Nível de Exposição e Risco Digital\n"
+                f"• 🔎 Links de Busca Profunda (Google Exact Match & Dorks)\n"
+                f"• 📘 Guia Bônus em PDF: Checklist de Proteção Digital\n\n"
+                f"🎁 *QUER DESBLOQUEAR DE GRAÇA?*\n"
                 f"Envie o seu link abaixo para 3 amigos e ganhe +1 consulta gratuita:\n"
                 f"{ref_link}"
             )
@@ -675,17 +706,18 @@ if bot:
 
             if qr_pix:
                 texto_oferta = (
-                    f"🔒 RELATÓRIO COMPLETO — @{target_username}\n"
+                    f"🔒 PACOTE KRONOS INTEL VIP — @{target_username}\n"
                     f"───────────────────────────────\n"
-                    f"• Todas as URLs diretas mapeadas\n"
-                    f"• Mapeamento de fóruns e comunidades\n"
-                    f"• Análise de exposição e recomendações\n"
-                    f"• Relatório executivo (.PDF / .TXT)\n"
-                    f"• Guia Bônus de Proteção Digital inclusos!\n\n"
+                    f"Você está adquirindo:\n"
+                    f"1. Relatório Executivo em PDF\n"
+                    f"2. Relatório Completo em TXT\n"
+                    f"3. Score de Risco OSINT\n"
+                    f"4. Links de Dorks de Busca Profunda\n"
+                    f"5. Guia Bônus em PDF de Proteção Digital\n\n"
                     f"💰 Valor: R$ 4,99\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
-                    f"⚡ O relatório será enviado automaticamente assim que o pagamento for confirmado."
+                    f"⚡ Os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
                 )
                 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -718,17 +750,16 @@ if bot:
 
             texto_atencao = (
                 f"⚠️ Tem certeza de que deseja cancelar a consulta de @{target_username}?\n\n"
-                f"O Pacote VIP revela todas as menções do username em:\n"
-                f"• Motores de busca avançados (Google Exact Match)\n"
-                f"• Fóruns técnicos e comunidades (Reddit, Pastebin)\n"
-                f"• Histórico de cadastros e registros públicos\n"
-                f"• Inclui Guia Bônus em PDF de Proteção Digital\n\n"
+                f"Ao liberar o Pacote VIP (R$ 4,99), você recebe:\n"
+                f"• Relatório Executivo OSINT em PDF\n"
+                f"• Dorks e Mapeamento de Busca Profunda\n"
+                f"• Guia Bônus em PDF de Sanitização Digital\n\n"
                 f"💡 Aproveite a promoção por apenas R$ 4,99 ou indique 3 amigos usando o link abaixo para desbloquear de graça:\n"
                 f"{ref_link}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("⚡ Quero liberar Pacote VIP (R$ 4,99)", callback_data=f"buy_{target_username}")
+            btn_sim = InlineKeyboardButton("⚡ Liberar Pacote VIP (R$ 4,99)", callback_data=f"buy_{target_username}")
             btn_nao = InlineKeyboardButton("❌ Sim, quero cancelar mesmo", callback_data="final_cancel")
             markup.add(btn_sim, btn_nao)
 
@@ -744,7 +775,7 @@ if bot:
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text="👍 Entendido! Se precisar de uma nova consulta, aguarde o reset diário ou realize o pagamento Pix."
+                text="👍 Entendido! Sua cota diária expirou. Envie seu link para 3 amigos ou aguarde até amanhã para fazer uma nova consulta gratuita."
             )
 
         elif call.data.startswith("getkey_"):
@@ -778,7 +809,7 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- ROTA WEBHOOK MERCADO PAGO (PACOTE VIP COMPLETO PÓS-PAGAMENTO) ---
+# --- ROTA WEBHOOK MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -837,7 +868,6 @@ def webhook():
 
                         enviar_relatorio_espelho_admin(target_username, documento, telegram_id, "VENDA PIX APROVADA")
 
-                        # 1. Envia Relatório Executivo em PDF (Se disponível)
                         if pdf_doc:
                             bot.send_document(
                                 chat_id=telegram_id,
@@ -845,14 +875,12 @@ def webhook():
                                 caption=f"📄 Relatório OSINT Executivo PDF — @{target_username}"
                             )
 
-                        # 2. Envia Relatório Completo em TXT
                         bot.send_document(
                             chat_id=telegram_id,
                             document=documento,
                             caption=f"📝 Relatório OSINT Texto Bruto — @{target_username}"
                         )
 
-                        # 3. Envia Guia Bônus em PDF
                         if guia_pdf:
                             bot.send_document(
                                 chat_id=telegram_id,
