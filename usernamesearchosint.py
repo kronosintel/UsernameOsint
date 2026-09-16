@@ -259,7 +259,6 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     score, nivel_exposicao = calcular_score_exposicao(len(encontrados), len(resultados))
 
-    # Links diretos de busca profunda e vazamentos (sem API)
     hibp_link = f"https://haveibeenpwned.com/account/{username}"
     intelx_link = f"https://intelx.io/?s={username}"
     dehashed_link = f"https://dehashed.com/search?query={username}"
