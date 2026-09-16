@@ -1,13 +1,13 @@
 """
-Kronos Intel OSINT Bot v3.6 (Sem Travar / Sem Loop)
-- Execução isolada de Asyncio via Thread para evitar loops no Flask/Telebot
-- Preço Otimizado (R$ 3,90 com Ancoragem)
+Kronos Intel OSINT Bot v3.7 (Estável & Sem Loop)
+- Varredura Multithreaded Síncrona com ThreadPoolExecutor (rápida e totalmente estável)
+- Banco de Dados SQLite (kronos_osint.db)
+- Painel Admin (/stats e /conceder)
+- Desconto Ancorado de R$ 3,90 no Pix com Mercado Pago
 - Remarketing Automático em Background
-- Banco de Dados SQLite & Dorks Judiciais
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import logging
@@ -21,7 +21,6 @@ from datetime import datetime, date
 from threading import Lock, Thread
 from typing import Any
 
-import aiohttp
 import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
@@ -50,7 +49,7 @@ app.config.update(
 )
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "6"))
+DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "5"))
 PORT = int(os.getenv("PORT", "5000"))
 PRECO_VIP = 3.90
 DB_FILE = "kronos_osint.db"
@@ -245,8 +244,8 @@ def registrar_indicacao(referrer_id: int, new_user_id: int):
             except Exception:
                 pass
 
-# --- ENGINE OSINT MULTI-THREADING (SEGURA E SEM LOOP) ---
-class OSINTTool:
+# --- MOTOR OSINT SEGURO COM MULTITHREADING ---
+class OSINTChecker:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
         self.username = username
         self.timeout = timeout
@@ -257,16 +256,16 @@ class OSINTTool:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-    def validate_profile(self, platform: str, url: str) -> None:
+    def check_site(self, platform: str, url: str) -> None:
         try:
             resp = requests.get(url, headers=self.headers, timeout=self.timeout, allow_redirects=True)
             status = resp.status_code
             if status == 404:
                 res = {"exists": False}
             elif 200 <= status < 400:
-                body = resp.text[:100000].lower()
+                text = resp.text[:100000].lower()
                 markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
-                if any(m in body for m in markers):
+                if any(m in text for m in markers):
                     res = {"exists": False}
                 else:
                     res = {"exists": True, "url": url}
@@ -278,10 +277,10 @@ class OSINTTool:
         with self._lock:
             self.results[platform] = res
 
-    def run_checks(self) -> dict[str, dict[str, Any]]:
-        with ThreadPoolExecutor(max_workers=25) as executor:
+    def run(self) -> dict[str, dict[str, Any]]:
+        with ThreadPoolExecutor(max_workers=20) as executor:
             futures = [
-                executor.submit(self.validate_profile, p, u.format(username=self.username))
+                executor.submit(self.check_site, p, u.format(username=self.username))
                 for p, u in PLATFORM_URLS.items()
             ]
             for f in futures:
@@ -289,7 +288,7 @@ class OSINTTool:
         return self.results
 
 def executar_varredura_osint(username: str) -> dict[str, dict[str, Any]]:
-    return OSINTTool(username).run_checks()
+    return OSINTChecker(username).run()
 
 # --- RELATÓRIOS E ANÁLISE DE VAZAMENTOS ---
 def calcular_score_exposicao(encontrados_count: int, total_auditado: int) -> tuple[int, str]:
@@ -315,7 +314,7 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Engine v3.6
+SISTEMA DE MAPEAMENTO: Kronos Engine v3.7
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
@@ -451,7 +450,7 @@ def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id
         except Exception as e:
             logger.error("Erro ao enviar cópia ao admin: %s", str(e))
 
-# --- REMARKETING AUTOMÁTICO EM THREAD SEPARADA ---
+# --- REMARKETING EM THREAD PARALELA ---
 def worker_remarketing_pix():
     while True:
         try:
@@ -489,7 +488,7 @@ def worker_remarketing_pix():
 
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
-# --- COMANDOS E FLUXO TELEGRAM ---
+# --- COMANDOS E HANDLERS DO BOT ---
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
@@ -506,7 +505,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v3.6\n\n"
+            f"👋 Kronos Intel — OSINT Bot v3.7\n\n"
             f"Você tem direito a 1 consulta gratuita por dia.\n"
             f"Envie o nome de usuário desejado para pesquisar a pegada digital.\n"
             f"Exemplo: nome_do_alvo\n\n"
@@ -806,7 +805,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v3.6 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v3.7 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
