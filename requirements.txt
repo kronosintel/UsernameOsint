@@ -1,6 +1,7 @@
-pyTelegramBotAPI
+Flask
 requests
-flask
-werkzeug
+pyTelegramBotAPI
 mercadopago
 gunicorn
+reportlab
+aiohttp
