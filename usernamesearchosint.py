@@ -1,19 +1,27 @@
-"""Username OSINT Checker com Funil de Vendas Aprimorado e Gatilhos Mentais."""
+"""
+Kronos Intel OSINT Bot v3.0
+- Varredura Assíncrona (aiohttp)
+- Banco de Dados SQLite (kronos_osint.db)
+- Painel Admin com Concessão de Créditos
+- Dorks Judiciais e Fóruns no Pacote VIP
+- Integração com Mercado Pago Pix e Webhook
+"""
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
-import json
 import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from threading import Lock
 from typing import Any
 
+import aiohttp
 import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
@@ -42,52 +50,70 @@ app.config.update(
 )
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "8"))
-MAX_WORKERS = max(1, min(int(os.getenv("MAX_WORKERS", "20")), 30))
+DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "6"))
 PORT = int(os.getenv("PORT", "5000"))
+DB_FILE = "kronos_osint.db"
+db_lock = Lock()
 
-# --- PERSISTÊNCIA EM ARQUIVO JSON ---
-DATA_FILE = "cota_diaria.json"
-STATS_LOCK = Lock()
+# --- BANCO DE DADOS SQLITE ---
+def init_db():
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                last_free_date TEXT,
+                credits INTEGER DEFAULT 0,
+                created_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                referrer_id INTEGER,
+                referred_id INTEGER,
+                PRIMARY KEY (referrer_id, referred_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                payment_id TEXT PRIMARY KEY,
+                user_id INTEGER,
+                target_username TEXT,
+                amount REAL,
+                status TEXT,
+                created_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metrics (
+                key TEXT PRIMARY KEY,
+                value INTEGER DEFAULT 0
+            )
+        """)
+        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
+        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
+        conn.commit()
+        conn.close()
 
-UNIQUE_USERS: set[int] = set()
-TOTAL_SEARCHES: int = 0
-TOTAL_REPORTS_GENERATED: int = 0
+init_db()
 
-FREE_DAILY_USAGE: dict[str, str] = {}
-USER_CREDITS: dict[str, int] = {}
-REFERRALS: dict[str, list[int]] = {}
+def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, commit=False):
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        res = None
+        if fetchone:
+            res = cursor.fetchone()
+        elif fetchall:
+            res = cursor.fetchall()
+        if commit:
+            conn.commit()
+        conn.close()
+        return res
 
-PROCESSED_PAYMENTS: set[str] = set()
-payments_lock = Lock()
-
-def carregar_dados_disco():
-    global FREE_DAILY_USAGE, USER_CREDITS, REFERRALS
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                dados = json.load(f)
-                FREE_DAILY_USAGE = dados.get("daily_usage", {})
-                USER_CREDITS = dados.get("credits", {})
-                REFERRALS = dados.get("referrals", {})
-        except Exception as e:
-            logger.error("Erro ao carregar banco de dados JSON: %s", str(e))
-
-def salvar_dados_disco():
-    try:
-        dados = {
-            "daily_usage": FREE_DAILY_USAGE,
-            "credits": USER_CREDITS,
-            "referrals": REFERRALS
-        }
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(dados, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error("Erro ao salvar banco de dados JSON: %s", str(e))
-
-carregar_dados_disco()
-
-# --- CONFIGURAÇÃO DE ADMINISTRADOR E SUPORTE ---
+# --- CONFIGURAÇÃO DO BOT E MERCADO PAGO ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosIntelBot")
@@ -169,145 +195,102 @@ NOT_FOUND_MARKERS = {
 def valid_username(value: str | None) -> bool:
     return bool(value and USERNAME_RE.fullmatch(value))
 
-def verificar_e_consumir_cota_gratis(user_id: int) -> bool:
-    hoje_str = date.today().isoformat()
-    uid_str = str(user_id)
-    
-    with STATS_LOCK:
-        creditos = USER_CREDITS.get(uid_str, 0)
-        if creditos > 0:
-            USER_CREDITS[uid_str] -= 1
-            salvar_dados_disco()
-            return True
-            
-        ultima_consulta = FREE_DAILY_USAGE.get(uid_str)
-        if ultima_consulta == hoje_str:
-            return False
+def registrar_acesso(user_id: int):
+    now_str = datetime.now().isoformat()
+    db_execute(
+        "INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
+        (user_id, now_str), commit=True
+    )
+    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_searches'", commit=True)
 
-        FREE_DAILY_USAGE[uid_str] = hoje_str
-        salvar_dados_disco()
+def registrar_relatorio():
+    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_reports'", commit=True)
+
+def verificar_e_consumir_cota(user_id: int) -> bool:
+    hoje_str = date.today().isoformat()
+    user = db_execute("SELECT credits, last_free_date FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    
+    if not user:
+        db_execute("INSERT INTO users (user_id, last_free_date, credits, created_at) VALUES (?, ?, 0, ?)",
+                   (user_id, hoje_str, datetime.now().isoformat()), commit=True)
         return True
 
-def registrar_acesso_usuario(user_id: int):
-    global TOTAL_SEARCHES
-    with STATS_LOCK:
-        UNIQUE_USERS.add(user_id)
-        TOTAL_SEARCHES += 1
+    credits, last_free_date = user[0], user[1]
 
-def registrar_relatorio_gerado():
-    global TOTAL_REPORTS_GENERATED
-    with STATS_LOCK:
-        TOTAL_REPORTS_GENERATED += 1
+    if credits > 0:
+        db_execute("UPDATE users SET credits = credits - 1 WHERE user_id = ?", (user_id,), commit=True)
+        return True
+
+    if last_free_date != hoje_str:
+        db_execute("UPDATE users SET last_free_date = ? WHERE user_id = ?", (hoje_str, user_id), commit=True)
+        return True
+
+    return False
 
 def registrar_indicacao(referrer_id: int, new_user_id: int):
-    ref_str = str(referrer_id)
-    with STATS_LOCK:
-        if ref_str not in REFERRALS:
-            REFERRALS[ref_str] = []
-        if new_user_id not in REFERRALS[ref_str]:
-            REFERRALS[ref_str].append(new_user_id)
-            if len(REFERRALS[ref_str]) % 3 == 0:
-                USER_CREDITS[ref_str] = USER_CREDITS.get(ref_str, 0) + 1
-                if bot:
-                    try:
-                        bot.send_message(
-                            referrer_id,
-                            "🎉 Você indicou 3 amigos e ganhou +1 consulta gratuita no Kronos Intel!"
-                        )
-                    except Exception:
-                        pass
-            salvar_dados_disco()
+    if referrer_id == new_user_id:
+        return
 
-def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 4.99) -> tuple[str | None, bytes | None]:
-    if not sdk:
-        logger.error("SDK do Mercado Pago não inicializada.")
-        return None, None
-        
-    payment_data = {
-        "transaction_amount": float(valor),
-        "description": f"Relatorio OSINT Completo - @{target_username}",
-        "payment_method_id": "pix",
-        "payer": {
-            "email": f"user_{user_id}@telegram.com",
-            "first_name": "Usuario",
-            "last_name": str(user_id)
-        },
-        "metadata": {
-            "telegram_user_id": user_id,
-            "target_username": target_username
-        }
-    }
-    try:
-        result = sdk.payment().create(payment_data).get("response", {})
-        tx_data = result.get("point_of_interaction", {}).get("transaction_data", {})
-        
-        qr_copia_cola = tx_data.get("qr_code")
-        qr_base64 = tx_data.get("qr_code_base64")
-        
-        img_bytes = base64.b64decode(qr_base64) if qr_base64 else None
-        
-        return qr_copia_cola, img_bytes
-    except Exception as e:
-        logger.error("Erro ao gerar Pix: %s", str(e))
-        return None, None
+    res = db_execute("INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+                     (referrer_id, new_user_id), commit=True)
+    
+    count = db_execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (referrer_id,), fetchone=True)[0]
+    if count > 0 and count % 3 == 0:
+        db_execute("UPDATE users SET credits = credits + 1 WHERE user_id = ?", (referrer_id,), commit=True)
+        if bot:
+            try:
+                bot.send_message(referrer_id, "🎉 Você indicou 3 amigos e ganhou +1 consulta gratuita no Kronos Intel!")
+            except Exception:
+                pass
 
-class OSINTTool:
+# --- ENGINE OSINT ASSÍNCRONA ---
+class AsyncOSINTTool:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
         self.username = username
-        self.timeout = timeout
-        self.results: dict[str, dict[str, Any]] = {}
-        self._lock = Lock()
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.headers = {
-            "User-Agent": "UsernameSearchOSINT/2.0 (public-profile-checker)",
-            "Accept": "application/json, text/html;q=0.9",
-        }
-        self.platforms = {
-            name: template.format(username=username)
-            for name, template in PLATFORM_URLS.items()
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-    def _save(self, platform: str, result: dict[str, Any]) -> None:
-        with self._lock:
-            self.results[platform] = result
-
-    def validate_profile(self, platform: str, url: str) -> None:
+    async def check_platform(self, session: aiohttp.ClientSession, platform: str, url: str) -> tuple[str, dict[str, Any]]:
         try:
-            response = requests.get(
-                url, headers=self.headers, timeout=self.timeout, allow_redirects=True
-            )
-            status = response.status_code
-            if status == 404:
-                result = {"status": "not_found", "exists": False}
-            elif 200 <= status < 400:
-                body = response.text[:200_000].lower()
-                markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
-                if any(marker in body for marker in markers):
-                    result = {"status": "not_found", "exists": False}
+            async with session.get(url, headers=self.headers, timeout=self.timeout, allow_redirects=True) as resp:
+                status = resp.status
+                if status == 404:
+                    return platform, {"exists": False}
+                elif 200 <= status < 400:
+                    text = (await resp.text(errors='ignore'))[:100000].lower()
+                    markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
+                    if any(m in text for m in markers):
+                        return platform, {"exists": False}
+                    return platform, {"exists": True, "url": url}
                 else:
-                    result = {"status": "found", "exists": True, "url": url}
-            else:
-                result = {"status": "error", "exists": None, "http_status": status}
-            self._save(platform, result)
+                    return platform, {"exists": None}
         except Exception:
-            self._save(platform, {"status": "unavailable", "exists": None})
+            return platform, {"exists": None}
 
-    def run_checks(self) -> dict[str, dict[str, Any]]:
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(self.platforms))) as executor:
-            futures = [executor.submit(self.validate_profile, p, u) for p, u in self.platforms.items()]
-            for future in as_completed(futures):
-                future.result()
-        return {p: self.results[p] for p in self.platforms if p in self.results}
+    async def run(self) -> dict[str, dict[str, Any]]:
+        results = {}
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                self.check_platform(session, p, u.format(username=self.username))
+                for p, u in PLATFORM_URLS.items()
+            ]
+            completed = await asyncio.gather(*tasks)
+            for p, res in completed:
+                results[p] = res
+        return results
 
+def executar_varredura_osint(username: str) -> dict[str, dict[str, Any]]:
+    return asyncio.run(AsyncOSINTTool(username).run())
+
+# --- GERAÇÃO DE RELATÓRIOS E DORKS ---
 def calcular_score_exposicao(encontrados_count: int, total_auditado: int) -> tuple[int, str]:
     if total_auditado == 0:
         return 0, "BAIXA"
     score = min(100, int((encontrados_count / total_auditado) * 350))
-    if score >= 65:
-        nivel = "ELEVADA"
-    elif score >= 30:
-        nivel = "MODERADA"
-    else:
-        nivel = "BAIXA"
+    nivel = "ELEVADA" if score >= 65 else ("MODERADA" if score >= 30 else "BAIXA")
     return score, nivel
 
 def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
@@ -315,144 +298,86 @@ def construir_relatorio_osint(username: str, resultados: dict[str, dict[str, Any
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     score, nivel_exposicao = calcular_score_exposicao(len(encontrados), len(resultados))
 
-    google_dork_exact = f"https://www.google.com/search?q=%22{username}%22"
-    bing_dork_exact = f"https://www.bing.com/search?q=%22{username}%22"
-    ddg_dork_exact = f"https://duckduckgo.com/?q=%22{username}%22"
-    
-    reddit_dork = f"https://www.google.com/search?q=site:reddit.com+%22{username}%22"
+    jusbrasil_dork = f"https://www.google.com/search?q=site:jusbrasil.com.br+%22{username}%22"
+    escavador_dork = f"https://www.google.com/search?q=site:escavador.com+%22{username}%22"
+    google_dork = f"https://www.google.com/search?q=%22{username}%22"
     pastebin_dork = f"https://www.google.com/search?q=site:pastebin.com+%22{username}%22"
-    forum_dork = f"https://www.google.com/search?q=inurl:forum+%22{username}%22"
 
-    corpo_relatorio = f"""===================================================================
+    corpo = f"""===================================================================
                    KRONOS INTEL — RELATÓRIO OSINT EXECUTIVO
 ===================================================================
 ALVO ANALISADO: @{username}
 DATA DA CONSULTA: {data_atual}
-SISTEMA DE MAPEAMENTO: Kronos Intelligence Engine v2.5
+SISTEMA DE MAPEAMENTO: Kronos Engine v3.0 (Async)
 ===================================================================
 
 1. RESUMO EXECUTIVO E MÉTRICA DE RISCO
 -------------------------------------------------------------------
 - Total de plataformas auditadas: {len(resultados)}
-- Perfis e marcadores ativos confirmados: {len(encontrados)}
-- Score OSINT de Exposição Digital: {score}/100
-- Classificação de Risco: {nivel_exposicao}
+- Perfis confirmados: {len(encontrados)}
+- Score de Exposição Digital: {score}/100 ({nivel_exposicao})
 
-2. PLATAFORMAS E PERFIS ENCONTRADOS DIRETAMENTE
+2. PLATAFORMAS E PERFIS MAPEADOS
 -------------------------------------------------------------------
 """
     if encontrados:
         for p in encontrados:
             url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=username))
-            corpo_relatorio += f"[+] {p.ljust(18)} : {url}\n"
+            corpo += f"[+] {p.ljust(18)} : {url}\n"
     else:
-        corpo_relatorio += "[-] Nenhum perfil público indexado nas bases padrão.\n"
+        corpo += "[-] Nenhum perfil público indexado nas bases padrão.\n"
 
-    corpo_relatorio += f"""
-3. ANÁLISE DE FÓRUNS, MENÇÕES E INDEXAÇÃO DE BUSCA (EXACT MATCH)
+    corpo += f"""
+3. DORKS JUDICIAIS E VARREDURA PROFUNDA
 -------------------------------------------------------------------
-Abaixo estão os links de varredura profunda contendo a busca exata entre
-aspas ("{username}") nos motores de busca e comunidades:
-
-[+] Google (Exact Match)     : {google_dork_exact}
-[+] Bing (Exact Match)       : {bing_dork_exact}
-[+] DuckDuckGo (Exact Match) : {ddg_dork_exact}
-
-Mapeamento em Fóruns e Texto Colado (Dorks Específicos):
-[+] Menções no Reddit        : {reddit_dork}
-[+] Registros no Pastebin    : {pastebin_dork}
-[+] Mapeamento em Fóruns     : {forum_dork}
-
-4. RECOMENDAÇÕES DE PRIVACIDADE E MITIGAÇÃO
--------------------------------------------------------------------
-- Alterar nomes de usuário repetidos em plataformas críticas.
-- Remover links cruzados entre perfis pessoais e fóruns técnicos.
-- Monitorar os links de busca acima periodicamente para identificar menções não autorizadas.
+[+] Busca em Diários Oficiais (Jusbrasil) : {jusbrasil_dork}
+[+] Mapeamento de Processos (Escavador)  : {escavador_dork}
+[+] Google Exact Match                   : {google_dork}
+[+] Registros em Pastes / Vazamentos      : {pastebin_dork}
 
 ===================================================================
 Documento confidencial gerado por Kronos Intel OSINT Service.
 ===================================================================
 """
-    file_buffer = io.BytesIO(corpo_relatorio.encode('utf-8'))
-    file_buffer.name = f"Relatorio_OSINT_{username}.txt"
-    return file_buffer
+    buf = io.BytesIO(corpo.encode('utf-8'))
+    buf.name = f"Relatorio_OSINT_{username}.txt"
+    return buf
 
 def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO | None:
     if not HAS_REPORTLAB:
-        logger.warning("ReportLab não instalado. PDF não será gerado.")
         return None
-
     try:
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
         data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         score, nivel_exposicao = calcular_score_exposicao(len(encontrados), len(resultados))
 
         pdf_buffer = io.BytesIO()
-        doc = SimpleDocTemplate(
-            pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
-        )
-
+        doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
         styles = getSampleStyleSheet()
-        title_style = ParagraphStyle(
-            'TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=20, textColor=colors.HexColor('#1E293B'), spaceAfter=6
-        )
-        subtitle_style = ParagraphStyle(
-            'SubTitleStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#64748B'), spaceAfter=15
-        )
-        heading_style = ParagraphStyle(
-            'HeadingStyle', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#0F172A'), spaceBefore=12, spaceAfter=8
-        )
-        body_style = ParagraphStyle(
-            'BodyStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#334155'), leading=12
-        )
 
-        elements = []
-        elements.append(Paragraph("KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT", title_style))
-        elements.append(Paragraph(f"<b>Alvo Analisado:</b> @{username} | <b>Data:</b> {data_atual}", subtitle_style))
-        elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=15))
+        title_style = ParagraphStyle('TStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#0F172A'), spaceAfter=6)
+        body_style = ParagraphStyle('BStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#334155'), leading=12)
 
-        resumo_data = [
-            [Paragraph("<b>Métrica</b>", body_style), Paragraph("<b>Resultado</b>", body_style)],
-            [Paragraph("Plataformas Auditadas", body_style), Paragraph(str(len(resultados)), body_style)],
-            [Paragraph("Perfis Confirmados", body_style), Paragraph(str(len(encontrados)), body_style)],
-            [Paragraph("Score de Exposição Digital", body_style), Paragraph(f"<b>{score}/100 ({nivel_exposicao})</b>", body_style)]
+        elements = [
+            Paragraph("KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT", title_style),
+            Paragraph(f"<b>Alvo:</b> @{username} | <b>Data:</b> {data_atual}", body_style),
+            HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=12),
+            Paragraph(f"<b>Score de Exposição:</b> {score}/100 ({nivel_exposicao})", body_style),
+            Spacer(1, 10),
         ]
-        t_resumo = Table(resumo_data, colWidths=[200, 300])
-        t_resumo.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F1F5F9')),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-            ('PADDING', (0,0), (-1,-1), 6),
-        ]))
-        elements.append(t_resumo)
-        elements.append(Spacer(1, 15))
 
-        elements.append(Paragraph("Perfis e Marcadores Ativos Identificados", heading_style))
         if encontrados:
-            perfis_data = [[Paragraph("<b>Plataforma</b>", body_style), Paragraph("<b>URL do Perfil</b>", body_style)]]
+            p_data = [[Paragraph("<b>Plataforma</b>", body_style), Paragraph("<b>URL do Perfil</b>", body_style)]]
             for p in encontrados:
                 url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=username))
-                url_link = f"<a href='{url}' color='#2563EB'>{url}</a>"
-                perfis_data.append([Paragraph(p, body_style), Paragraph(url_link, body_style)])
-            
-            t_perfis = Table(perfis_data, colWidths=[150, 350])
-            t_perfis.setStyle(TableStyle([
+                p_data.append([Paragraph(p, body_style), Paragraph(f"<a href='{url}' color='#2563EB'>{url}</a>", body_style)])
+            t = Table(p_data, colWidths=[140, 360])
+            t.setStyle(TableStyle([
                 ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#E2E8F0')),
                 ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-                ('PADDING', (0,0), (-1,-1), 5),
+                ('PADDING', (0,0), (-1,-1), 4),
             ]))
-            elements.append(t_perfis)
-        else:
-            elements.append(Paragraph("<i>Nenhum perfil público indexado nas bases padrão.</i>", body_style))
-
-        elements.append(Spacer(1, 15))
-        elements.append(Paragraph("Links de Varredura Profunda & Google Dorks", heading_style))
-        
-        dorks_text = (
-            f"• <b>Google Exact Match:</b> <a href='https://www.google.com/search?q=%22{username}%22' color='#2563EB'>Pesquisar @{username}</a><br/>"
-            f"• <b>Reddit Dork:</b> <a href='https://www.google.com/search?q=site:reddit.com+%22{username}%22' color='#2563EB'>Buscar Menções no Reddit</a><br/>"
-            f"• <b>Pastebin Dork:</b> <a href='https://www.google.com/search?q=site:pastebin.com+%22{username}%22' color='#2563EB'>Buscar Pastes e Vazamentos</a>"
-        )
-        elements.append(Paragraph(dorks_text, body_style))
+            elements.append(t)
 
         doc.build(elements)
         pdf_buffer.seek(0)
@@ -465,166 +390,162 @@ def construir_relatorio_pdf(username: str, resultados: dict[str, dict[str, Any]]
 def construir_guia_protecao_pdf() -> io.BytesIO | None:
     if not HAS_REPORTLAB:
         return None
-
     try:
         pdf_buffer = io.BytesIO()
-        doc = SimpleDocTemplate(
-            pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
-        )
-
+        doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
         styles = getSampleStyleSheet()
-        title_style = ParagraphStyle('TStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#0F172A'), spaceAfter=8)
-        body_style = ParagraphStyle('BStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#334155'), leading=14)
-
         elements = [
-            Paragraph("GUIA KRONOS: SANITIZAÇÃO DE PEGADA DIGITAL", title_style),
-            Paragraph("<b>Bônus Exclusivo do Pacote VIP OSINT</b>", body_style),
-            HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#10B981'), spaceAfter=12),
-            Spacer(1, 10),
-            Paragraph("<b>1. Desvincule usernames repetidos:</b> Evite reutilizar a mesma ID em fóruns, redes sociais e games.", body_style),
-            Spacer(1, 8),
-            Paragraph("<b>2. Remova perfis em desuso:</b> Exclua ou desative contas antigas em plataformas que você não utiliza mais.", body_style),
-            Spacer(1, 8),
-            Paragraph("<b>3. Mantenha 2FA Ativo:</b> Utilize autenticação em duas etapas por aplicativo em serviços críticos.", body_style),
-            Spacer(1, 8),
-            Paragraph("<b>4. Auditoria Periódica:</b> Realize pesquisas regulares para verificar novos registros no seu nome.", body_style),
-            Spacer(1, 15),
-            Paragraph("<i>Documento educativo fornecido por Kronos Intel.</i>", body_style)
+            Paragraph("GUIA KRONOS: SANITIZAÇÃO DE PEGADA DIGITAL", ParagraphStyle('T', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#0F172A'))),
+            HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#10B981'), spaceAfter=10),
+            Paragraph("1. Desvincule usernames repetidos em fóruns e redes públicas.", ParagraphStyle('B', parent=styles['Normal'], fontSize=10, leading=14)),
+            Paragraph("2. Remova registros antigos no Jusbrasil/Escavador através dos painéis de privacidade.", ParagraphStyle('B', parent=styles['Normal'], fontSize=10, leading=14)),
+            Paragraph("3. Ative a Autenticação em Duas Etapas (2FA) em todas as contas ativas.", ParagraphStyle('B', parent=styles['Normal'], fontSize=10, leading=14)),
         ]
-
         doc.build(elements)
         pdf_buffer.seek(0)
         pdf_buffer.name = "Guia_Protecao_Pegada_Digital_Kronos.pdf"
         return pdf_buffer
-    except Exception as e:
-        logger.error("Erro ao gerar Guia PDF: %s", str(e))
+    except Exception:
         return None
 
-def enviar_relatorio_espelho_admin(username: str, documento: io.BytesIO, user_id: int, tipo_consulta: str):
-    if bot and ADMIN_ID and user_id != ADMIN_ID:
-        try:
-            documento.seek(0)
-            captura_legenda = (
-                f"👁‍🗨 [ESPELHO OSINT]\n"
-                f"• Tipo: {tipo_consulta}\n"
-                f"• Usuário Solicitante: {user_id}\n"
-                f"• Alvo Pesquisado: @{username}"
-            )
-            bot.send_document(
-                chat_id=ADMIN_ID,
-                document=documento,
-                caption=captura_legenda
-            )
-            documento.seek(0)
-        except Exception as e:
-            logger.error("Erro ao enviar cópia do relatório ao admin: %s", str(e))
+def gerar_pix_mercadopago(user_id: int, target_username: str, valor: float = 4.99) -> tuple[str | None, bytes | None]:
+    if not sdk:
+        return None, None
+    payment_data = {
+        "transaction_amount": float(valor),
+        "description": f"Relatorio OSINT - @{target_username}",
+        "payment_method_id": "pix",
+        "payer": {"email": f"user_{user_id}@telegram.com", "first_name": "Usuario", "last_name": str(user_id)},
+        "metadata": {"telegram_user_id": user_id, "target_username": target_username}
+    }
+    try:
+        res = sdk.payment().create(payment_data).get("response", {})
+        tx = res.get("point_of_interaction", {}).get("transaction_data", {})
+        qr_code = tx.get("qr_code")
+        qr_base64 = tx.get("qr_code_base64")
+        img_bytes = base64.b64decode(qr_base64) if qr_base64 else None
+        
+        # Salva o pagamento no BD
+        pid = str(res.get("id"))
+        db_execute("INSERT INTO payments (payment_id, user_id, target_username, amount, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+                   (pid, user_id, target_username, valor, datetime.now().isoformat()), commit=True)
+        return qr_code, img_bytes
+    except Exception as e:
+        logger.error("Erro ao gerar Pix: %s", str(e))
+        return None, None
 
+# --- COMANDOS DO TELEGRAM BOT ---
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
         user_id = message.from_user.id
-        registrar_acesso_usuario(user_id)
-        
+        registrar_acesso(user_id)
+
         args = message.text.strip().split()
         if len(args) > 1 and args[1].startswith("ref_"):
             try:
                 referrer_id = int(args[1].replace("ref_", ""))
-                if referrer_id != user_id:
-                    registrar_indicacao(referrer_id, user_id)
+                registrar_indicacao(referrer_id, user_id)
             except ValueError:
                 pass
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot\n\n"
+            f"👋 Kronos Intel — OSINT Bot v3.0\n\n"
             f"Você tem direito a 1 consulta gratuita por dia.\n"
-            f"Envie o nome de usuário desejado para verificar a pegada digital.\n"
+            f"Envie o nome de usuário desejado para pesquisar a pegada digital.\n"
             f"Exemplo: nome_do_alvo\n\n"
-            f"🛠 Precisa de ajuda ou suporte?\nEntre em contato: @{SUPORTE_USERNAME}"
+            f"🛠 Suporte: @{SUPORTE_USERNAME}"
         )
 
+    # PAINEL DE ESTATÍSTICAS ADMIN
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
             return
 
-        with STATS_LOCK:
-            total_unicos = len(UNIQUE_USERS)
-            total_buscas = TOTAL_SEARCHES
-            total_relatorios = TOTAL_REPORTS_GENERATED
+        total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
+        searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)[0]
+        reports = db_execute("SELECT value FROM metrics WHERE key = 'total_reports'", fetchone=True)[0]
+        vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved'", fetchone=True)
+        
+        qtd_vendas = vendas[0] if vendas else 0
+        faturamento = vendas[1] if vendas and vendas[1] else 0.0
 
         painel = (
-            f"📊 PAINEL DE ESTATÍSTICAS DO BOT\n"
+            f"📊 PAINEL DE CONTROLE KRONOS INTEL\n"
             f"───────────────────────────────\n"
-            f"👤 Usuários Únicos: {total_unicos}\n"
-            f"🔎 Total de Pesquisas: {total_buscas}\n"
-            f"📄 Relatórios Gerados: {total_relatorios}\n"
-            f"💰 Vendas Aprovadas: {len(PROCESSED_PAYMENTS)}\n"
-            f"📦 Suporte PDF (ReportLab): {'Ativo' if HAS_REPORTLAB else 'Inativo'}"
+            f"👤 Usuários Registrados: {total_users}\n"
+            f"🔎 Total de Pesquisas: {searches}\n"
+            f"📄 Relatórios Gerados: {reports}\n"
+            f"💰 Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n"
+            f"📦 ReportLab PDF: {'Ativo' if HAS_REPORTLAB else 'Inativo'}"
         )
         bot.send_message(message.chat.id, painel)
 
+    # CONCEDER CRÉDITO MANUALMENTE (ADMIN)
+    @bot.message_handler(commands=['conceder'])
+    def handle_conceder_credit(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        parts = message.text.strip().split()
+        if len(parts) < 3:
+            bot.reply_to(message, "⚠️ Uso correto: /conceder <user_id> <quantidade>")
+            return
+        try:
+            target_id = int(parts[1])
+            qtd = int(parts[2])
+            db_execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (qtd, target_id), commit=True)
+            bot.reply_to(message, f"✅ Concedidos {qtd} crédito(s) para o usuário {target_id}.")
+        except Exception as e:
+            bot.reply_to(message, f"⚠️ Erro ao conceder créditos: {str(e)}")
+
+    # PROCESSADOR PRINCIPAL DE BUSCA
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         user_id = message.from_user.id
-        registrar_acesso_usuario(user_id)
+        registrar_acesso(user_id)
         
-        texto_msg = message.text.strip()
-        eh_comando_admin = False
+        texto = message.text.strip()
+        eh_admin_mode = False
 
-        if "admin" in texto_msg.lower() and user_id == ADMIN_ID:
-            eh_comando_admin = True
-            username = texto_msg.lower().replace("admin", "").replace("@", "").strip()
+        if "admin" in texto.lower() and user_id == ADMIN_ID:
+            eh_admin_mode = True
+            username = texto.lower().replace("admin", "").replace("@", "").strip()
         else:
-            username = texto_msg.replace("@", "").strip()
+            username = texto.replace("@", "").strip()
 
         if not valid_username(username):
             bot.reply_to(message, "⚠️ Nome de usuário inválido.")
             return
 
-        # FLUXO MODO ADMIN (ENTREGA VIP AUTOMÁTICA)
-        if eh_comando_admin:
-            msg_status = bot.reply_to(message, f"👑 [ACESSO ADMIN] Processando Pacote VIP para @{username}...")
-            
-            tool = OSINTTool(username)
-            resultados = tool.run_checks()
-            documento = construir_relatorio_osint(username, resultados)
-            pdf_doc = construir_relatorio_pdf(username, resultados)
+        # FLUXO ADMIN (Sempre entrega VIP)
+        if eh_admin_mode:
+            msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Executando varredura rápida para @{username}...")
+            resultados = executar_varredura_osint(username)
+            doc_txt = construir_relatorio_osint(username, resultados)
+            doc_pdf = construir_relatorio_pdf(username, resultados)
             guia_pdf = construir_guia_protecao_pdf()
-            registrar_relatorio_gerado()
+            registrar_relatorio()
 
             try:
                 bot.edit_message_text(f"✅ Varredura concluída para @{username}!", chat_id=message.chat.id, message_id=msg_status.message_id)
             except Exception:
                 pass
 
-            if pdf_doc:
-                bot.send_document(
-                    chat_id=message.chat.id,
-                    document=pdf_doc,
-                    caption=f"📄 [ADMIN VIP] Relatório OSINT Executivo (PDF) — @{username}"
-                )
-            bot.send_document(
-                chat_id=message.chat.id,
-                document=documento,
-                caption=f"📝 [ADMIN VIP] Relatório OSINT Texto Bruto — @{username}"
-            )
+            if doc_pdf:
+                bot.send_document(message.chat.id, doc_pdf, caption=f"📄 [ADMIN VIP] Relatório PDF — @{username}")
+            bot.send_document(message.chat.id, doc_txt, caption=f"📝 [ADMIN VIP] Texto Bruto — @{username}")
             if guia_pdf:
-                bot.send_document(
-                    chat_id=message.chat.id,
-                    document=guia_pdf,
-                    caption="📘 [ADMIN VIP] Guia Bônus: Checklist de Proteção da Pegada Digital"
-                )
+                bot.send_document(message.chat.id, guia_pdf, caption="📘 Guia de Proteção Digital")
             return
 
-        # FLUXO DE USUÁRIO COMUM - CONSULTA GRATUITA DO DIA
-        tem_cota_gratis = verificar_e_consumir_cota_gratis(user_id)
+        # FLUXO USUÁRIO COMUM (COTA DIÁRIA)
+        tem_cota = verificar_e_consumir_cota(user_id)
 
-        if tem_cota_gratis:
+        if tem_cota:
             msg_status = bot.reply_to(message, f"🔎 Mapeando pegada digital de @{username}...")
-
-            tool = OSINTTool(username)
-            resultados = tool.run_checks()
+            resultados = executar_varredura_osint(username)
             encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
             try:
@@ -634,13 +555,14 @@ if bot:
 
             if encontrados:
                 lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+                ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
                 texto_resultado = (
                     f"🎯 PLATAFORMAS ENCONTRADAS PARA @{username}\n"
                     f"───────────────────────────────\n\n"
                     f"{lista_plataformas}\n\n"
                     f"⚠️ O usuário possui **{len(encontrados)} contas ativas** identificadas.\n\n"
-                    f"Deseja liberar o **Relatório Completo** com todas as URLs diretas, Google Dorks profundos e Análise de Risco?"
+                    f"Deseja liberar o **Relatório Completo** com todas as URLs diretas, Dorks Judiciais (Jusbrasil/Processos) e Análise de Risco?"
                 )
 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -652,20 +574,17 @@ if bot:
                 bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
             else:
                 bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{username}.")
-
             return
 
-        # FLUXO SE A COTA DIÁRIA EXPIROU
+        # COTA EXPIRADA
         bot.reply_to(message, f"🔎 Mapeando plataformas para @{username}...")
-
-        tool = OSINTTool(username)
-        results = tool.run_checks()
-        encontrados = [p for p, data in results.items() if data.get("exists") is True]
+        resultados = executar_varredura_osint(username)
+        encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
         if encontrados:
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados[:5]])
             ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-            
+
             texto_expirado = (
                 f"📊 PRÉVIA DA VARREDURA OSINT — @{username}\n"
                 f"───────────────────────────────\n"
@@ -673,9 +592,9 @@ if bot:
                 f"O usuário foi localizado em {len(encontrados)} plataformas, incluindo:\n"
                 f"{lista_plataformas}\n"
                 f"• ... e outras!\n\n"
-                f"Deseja desbloquear as **URLs diretas** e o **Relatório VIP Executivo em PDF**?"
+                f"Deseja desbloquear as **URLs diretas** e o **Relatório Executivo em PDF**?"
             )
-            
+
             markup = InlineKeyboardMarkup(row_width=1)
             btn_sim = InlineKeyboardButton("🔓 Sim, quero o relatório completo", callback_data=f"buy_{username}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data=f"confirm_cancel_{username}")
@@ -693,7 +612,6 @@ if bot:
             user_id = call.from_user.id
             
             bot.answer_callback_query(call.id, "Gerando Chave Pix...")
-
             qr_pix, qr_img_bytes = gerar_pix_mercadopago(user_id, target_username, valor=4.99)
 
             if qr_pix:
@@ -704,52 +622,34 @@ if bot:
                     f"1. URLs Diretas de todas as plataformas\n"
                     f"2. Relatório Executivo Formatado em PDF\n"
                     f"3. Relatório em Texto Bruto (.TXT)\n"
-                    f"4. Google Dorks e Busca Profunda em Fóruns\n"
+                    f"4. Dorks Judiciais (Jusbrasil / Escavador)\n"
                     f"5. Guia Bônus em PDF de Proteção Digital\n\n"
                     f"💰 Valor: R$ 4,99 no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"`{qr_pix}`\n\n"
-                    f"⚡ Os arquivos e links serão enviados automaticamente após a confirmação."
+                    f"⚡ Os arquivos serão entregues automaticamente assim que o pagamento for confirmado."
                 )
-                
+
                 markup = InlineKeyboardMarkup(row_width=1)
                 btn_copiar = InlineKeyboardButton("📋 Copiar Chave Pix", callback_data=f"getkey_{user_id}")
                 btn_suporte = InlineKeyboardButton("💬 Precisa de Ajuda?", url=f"https://t.me/{SUPORTE_USERNAME}")
                 markup.add(btn_copiar, btn_suporte)
 
                 if qr_img_bytes:
-                    bot.send_photo(
-                        chat_id=call.message.chat.id,
-                        photo=qr_img_bytes,
-                        caption=texto_oferta,
-                        reply_markup=markup,
-                        parse_mode="Markdown"
-                    )
+                    bot.send_photo(call.message.chat.id, photo=qr_img_bytes, caption=texto_oferta, reply_markup=markup, parse_mode="Markdown")
                 else:
-                    bot.send_message(
-                        chat_id=call.message.chat.id,
-                        text=texto_oferta,
-                        reply_markup=markup,
-                        parse_mode="Markdown"
-                    )
+                    bot.send_message(call.message.chat.id, text=texto_oferta, reply_markup=markup, parse_mode="Markdown")
             else:
-                bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar a chave Pix. Tente novamente em instantes.")
+                bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar chave Pix. Tente novamente em instantes.")
 
         elif call.data.startswith("confirm_cancel_"):
             target_username = call.data.split("confirm_cancel_")[1]
             user_id = call.from_user.id
-            bot.answer_callback_query(call.id, "Atenção...")
-
             ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
             texto_atencao = (
                 f"🚨 *TEM CERTEZA QUE NÃO DESEJA O RELATÓRIO COMPLETO?*\n\n"
-                f"O perfil @{target_username} tem rastros ativos na internet que podem conter dados de contato, fóruns antigos e exposições.\n\n"
-                f"O **Pacote VIP** inclui:\n"
-                f"• 🔗 Links diretos para todas as contas\n"
-                f"• 📑 Relatório Executivo em PDF\n"
-                f"• 🔎 Google Dorks e buscas no Pastebin/Reddit\n"
-                f"• 📘 Guia de Sanitização Digital em PDF\n\n"
+                f"O perfil @{target_username} tem rastros ativos na internet que podem conter dados de contato e vazamentos.\n\n"
                 f"💰 Adquira por **R$ 4,99** ou indique 3 amigos usando este link para desbloquear **100% grátis**:\n{ref_link}"
             )
 
@@ -758,43 +658,25 @@ if bot:
             btn_nao = InlineKeyboardButton("❌ Confirmar Cancelamento", callback_data="final_cancel")
             markup.add(btn_sim, btn_nao)
 
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=texto_atencao,
-                reply_markup=markup,
-                parse_mode="Markdown"
-            )
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=texto_atencao, reply_markup=markup, parse_mode="Markdown")
 
         elif call.data == "final_cancel":
             bot.answer_callback_query(call.id, "Consulta finalizada.")
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="👍 Entendido! Envie seu link de indicação para amigos para acumular consultas gratuitas ou consulte um novo username amanhã."
-            )
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="👍 Entendido! Se precisar de uma nova consulta, envie o comando novamente.")
 
         elif call.data.startswith("getkey_"):
             bot.answer_callback_query(call.id, "Enviando chave...")
             msg_texto = call.message.caption or call.message.text
             lines = msg_texto.split("\n\n") if msg_texto else []
-            
             pix_key = None
             for l in lines:
                 if len(l) > 50 and not l.startswith("🔒") and not l.startswith("⚡"):
                     pix_key = l.replace("`", "").strip()
                     break
-
             if pix_key:
-                bot.send_message(
-                    chat_id=call.message.chat.id,
-                    text=f"`{pix_key}`",
-                    parse_mode="Markdown"
-                )
-            else:
-                bot.send_message(call.message.chat.id, "⚠️ Toque no código do Pix na mensagem acima para copiar.")
+                bot.send_message(call.message.chat.id, text=f"`{pix_key}`", parse_mode="Markdown")
 
-# --- ROTA RECEPTORA DO TELEGRAM ---
+# --- ROTA RECEPTORA DO TELEGRAM WEBHOOK ---
 @app.route(f"/telegram/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     if bot:
@@ -805,18 +687,14 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- ROTA WEBHOOK MERCADO PAGO ---
+# --- WEBHOOK MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
         if request.method == "GET" or request.args.get("id") == "123456":
             return jsonify({"status": "ok"}), 200
 
-        payment_id = None
-        topic = request.args.get("topic") or request.args.get("type")
-        if topic == "payment":
-            payment_id = request.args.get("id")
-
+        payment_id = request.args.get("id")
         try:
             data = request.get_json(force=False, silent=True) or {}
             if isinstance(data, dict):
@@ -831,10 +709,11 @@ def webhook():
             return jsonify({"status": "ok"}), 200
 
         pid_str = str(payment_id)
-        with payments_lock:
-            if pid_str in PROCESSED_PAYMENTS:
-                logger.info("Notificação duplicada ignorada para o pagamento: %s", pid_str)
-                return jsonify({"status": "ok"}), 200
+        
+        # Verifica se já foi processado
+        p_check = db_execute("SELECT status FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
+        if p_check and p_check[0] == "approved":
+            return jsonify({"status": "ok"}), 200
 
         if payment_id and sdk:
             try:
@@ -844,68 +723,38 @@ def webhook():
                     telegram_id = metadata.get("telegram_user_id")
                     target_username = metadata.get("target_username", "alvo")
 
-                    with payments_lock:
-                        PROCESSED_PAYMENTS.add(pid_str)
+                    db_execute("UPDATE payments SET status = 'approved' WHERE payment_id = ?", (pid_str,), commit=True)
 
                     if telegram_id and bot:
-                        bot.send_message(
-                            telegram_id,
-                            f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\n"
-                            f"Obrigado por adquirir o pacote completo de @{target_username}!\n"
-                            f"Gerando relatórios executivos e extraindo URLs..."
-                        )
-
-                        tool = OSINTTool(target_username)
-                        resultados = tool.run_checks()
-                        documento = construir_relatorio_osint(target_username, resultados)
-                        pdf_doc = construir_relatorio_pdf(target_username, resultados)
+                        bot.send_message(telegram_id, f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\nGerando relatórios e extraindo URLs para @{target_username}...")
+                        resultados = executar_varredura_osint(target_username)
+                        doc_txt = construir_relatorio_osint(target_username, resultados)
+                        doc_pdf = construir_relatorio_pdf(target_username, resultados)
                         guia_pdf = construir_guia_protecao_pdf()
-                        registrar_relatorio_gerado()
+                        registrar_relatorio()
 
-                        enviar_relatorio_espelho_admin(target_username, documento, telegram_id, "VENDA PIX APROVADA")
+                        enviar_relatorio_espelho_admin(target_username, doc_txt, telegram_id, "VENDA PIX APROVADA")
 
-                        if pdf_doc:
-                            bot.send_document(
-                                chat_id=telegram_id,
-                                document=pdf_doc,
-                                caption=f"📄 Relatório OSINT Executivo PDF — @{target_username}"
-                            )
-
-                        bot.send_document(
-                            chat_id=telegram_id,
-                            document=documento,
-                            caption=f"📝 Relatório OSINT Texto Bruto — @{target_username}"
-                        )
-
+                        if doc_pdf:
+                            bot.send_document(telegram_id, doc_pdf, caption=f"📄 Relatório Executivo PDF — @{target_username}")
+                        bot.send_document(telegram_id, doc_txt, caption=f"📝 Relatório Texto Bruto — @{target_username}")
                         if guia_pdf:
-                            bot.send_document(
-                                chat_id=telegram_id,
-                                document=guia_pdf,
-                                caption="📘 Guia Bônus: Checklist de Proteção da Pegada Digital"
-                            )
+                            bot.send_document(telegram_id, guia_pdf, caption="📘 Guia de Proteção Digital")
 
                     if bot and ADMIN_ID:
-                        notificacao_admin = (
-                            f"💰 NOVA VENDA APROVADA!\n"
-                            f"───────────────────────────────\n"
-                            f"• Valor: R$ 4,99 (Pix)\n"
-                            f"• ID Pagamento: {payment_id}\n"
-                            f"• Alvo Pesquisado: @{target_username}\n"
-                            f"• ID do Comprador: {telegram_id}"
-                        )
-                        bot.send_message(ADMIN_ID, notificacao_admin)
+                        bot.send_message(ADMIN_ID, f"💰 NOVA VENDA APROVADA!\n• Valor: R$ 4,99 (Pix)\n• Alvo: @{target_username}\n• Comprador: {telegram_id}")
 
             except Exception as e:
                 logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
 
     except Exception as general_err:
-        logger.error("Erro generico no webhook do Mercado Pago: %s", str(general_err))
+        logger.error("Erro no webhook do Mercado Pago: %s", str(general_err))
 
     return jsonify({"status": "ok"}), 200
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook Ativos.", 200
+    return "Kronos Intel OSINT Bot & Webhook v3.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
