@@ -1,9 +1,9 @@
 """
-Kronos Intel OSINT Bot v7.2
+Kronos Intel OSINT Bot v7.3
+- Auto-Registro e Diagnóstico de Webhook do Telegram
 - Notificação ao Admin quando alguém dá /start
-- Função /conceder <user_id> <alvo> para liberar acesso cortesia
-- Correção na inicialização do /start
-- Funil de Vendas com Upsell Condicional (Username R$ 3,90 / Processos R$ 2,90)
+- Comando /conceder <user_id> <alvo> para liberar acesso cortesia
+- Funil de Vendas Duplo (Username R$ 3,90 / Processos R$ 2,90)
 - Exclusivo Download em TXT
 - Dashboard HTML Redesenho Premium Neon Dark OSINT
 - URL Base: https://usernameosint-1-vcj4.onrender.com
@@ -108,13 +108,27 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosIntelBot")
-WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com")
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wIA")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
+
+# CONFIGURAÇÃO AUTOMÁTICA DE WEBHOOK DO TELEGRAM
+def setup_webhook():
+    if bot and TELEGRAM_TOKEN:
+        webhook_url = f"{WEB_BASE_URL}/telegram/{TELEGRAM_TOKEN}"
+        try:
+            bot.remove_webhook()
+            time.sleep(1)
+            success = bot.set_webhook(url=webhook_url)
+            logger.info("Configuração do Webhook Telegram (%s): %s", webhook_url, success)
+        except Exception as e:
+            logger.error("Erro ao configurar Webhook Telegram: %s", str(e))
+
+setup_webhook()
 
 PLATFORM_URLS = {
     "GitHub": "https://api.github.com/users/{username}",
@@ -276,7 +290,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {"PROCESSOS JUDICIAIS / NOME COMPLETO" if is_fullname else "USERNAME / REDES SOCIAIS"}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v7.2
+SISTEMA: Kronos Engine v7.3
 ===================================================================
 
 1. FONTES E REGISTROS MAPEADOS
@@ -382,14 +396,14 @@ def worker_remarketing_pix():
 
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
-# --- TEMPLATE HTML DASHBOARD PREMIUM ---
+# --- TEMPLATE HTML DASHBOARD ---
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kronos Intel — Painel Executivo OSINT</title>
+    <title>Kronos Intel — Painel OSINT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <style>
@@ -400,7 +414,6 @@ HTML_DASHBOARD_TEMPLATE = """
             --accent-cyan: #06b6d4;
             --accent-green: #10b981;
             --text-main: #f8fafc;
-            --text-muted: #64748b;
         }
 
         body {
@@ -420,7 +433,6 @@ HTML_DASHBOARD_TEMPLATE = """
         .navbar-brand {
             font-family: monospace;
             font-weight: 700;
-            letter-spacing: 1px;
             color: var(--accent-cyan) !important;
         }
 
@@ -429,7 +441,6 @@ HTML_DASHBOARD_TEMPLATE = """
             backdrop-filter: blur(12px);
             border: 1px solid var(--border-color);
             border-radius: 16px;
-            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
             margin-bottom: 24px;
         }
 
@@ -459,7 +470,6 @@ HTML_DASHBOARD_TEMPLATE = """
             background: rgba(16, 185, 129, 0.1);
             border-color: var(--accent-green);
             color: var(--accent-green);
-            transform: translateY(-2px);
         }
 
         .btn-dork {
@@ -477,7 +487,6 @@ HTML_DASHBOARD_TEMPLATE = """
         .btn-dork:hover {
             background: rgba(6, 182, 212, 0.2);
             color: #fff;
-            transform: translateX(4px);
         }
 
         .code-tag {
@@ -497,7 +506,7 @@ HTML_DASHBOARD_TEMPLATE = """
     <div class="container pb-5">
         <div class="card-custom">
             <div class="card-body p-4">
-                <span class="text-uppercase text-muted small code-tag">[ ALVO SELECIONADO ]</span>
+                <span class="text-uppercase text-muted small code-tag">[ ALVO ANALISADO ]</span>
                 <h2 class="text-white mb-1 font-monospace"><i class="bi bi-terminal-fill me-2 text-cyan"></i>{{ target }}</h2>
                 <p class="text-muted mb-0 small"><i class="bi bi-clock me-1"></i> Auditado em: {{ data_atual }} | Módulo: {{ query_type }}</p>
             </div>
@@ -606,7 +615,7 @@ if bot:
         
         registrar_acesso(user_id)
 
-        # NOTIFICAÇÃO AO ADMIN SOBRE NOVO START
+        # NOTIFICAÇÃO AO ADMIN SOBRE ACESSO NO BOT
         if bot and ADMIN_ID and user_id != ADMIN_ID:
             try:
                 bot.send_message(
@@ -622,7 +631,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v7.2\n\n"
+            f"👋 Kronos Intel — OSINT Bot v7.3\n\n"
             f"Envie o **nome de usuário (username)** desejado para mapear contas ativas e vazamentos na internet.\n"
             f"Exemplo: `alvo123`\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}",
@@ -661,11 +670,10 @@ if bot:
         )
         registrar_relatorio()
 
-        link_web = f"{WEB_BASE_URL.rstrip('/')}/relatorio/{token_relatorio}"
+        link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("🌐 Acessar Seu Painel VIP Concedido", url=link_web))
 
-        # TENTA ENVIAR A MENSAGEM PARA O USUÁRIO BENEFICIADO
         try:
             bot.send_message(
                 target_user_id,
@@ -677,7 +685,7 @@ if bot:
             )
             bot.reply_to(message, f"✅ **Acesso cortesia concedido com sucesso!**\n• Usuário: `{target_user_id}`\n• Alvo: {alvo}", parse_mode="Markdown")
         except Exception as e:
-            bot.reply_to(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário `{target_user_id}` (ele pode ter bloqueado o bot).\nLink do painel: {link_web}", parse_mode="Markdown")
+            bot.reply_to(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário `{target_user_id}`.\nLink do painel: {link_web}", parse_mode="Markdown")
 
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
@@ -722,7 +730,7 @@ if bot:
 
         is_fullname = e_nome_completo(target)
 
-        # FLUXO ADMIN (SUPORTA TANTO USERNAME QUANTO NOME COMPLETO SEM BLOQUEIO)
+        # FLUXO ADMIN (SUPORTA USERNAME OU NOME COMPLETO)
         if eh_admin_mode:
             msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando {target}...")
             resultados = executar_varredura_osint(target, is_fullname=is_fullname)
@@ -742,7 +750,7 @@ if bot:
             except Exception:
                 pass
 
-            link_web = f"{WEB_BASE_URL.rstrip('/')}/relatorio/{token_relatorio}"
+            link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
             markup = InlineKeyboardMarkup(row_width=1)
             markup.add(InlineKeyboardButton("🌐 Acessar Painel Interativo Web (ADMIN)", url=link_web))
 
@@ -957,7 +965,7 @@ def webhook():
                                (token_relatorio, results_json, query_type, pid_str), commit=True)
 
                     if telegram_id and bot:
-                        link_web = f"{WEB_BASE_URL.rstrip('/')}/relatorio/{token_relatorio}"
+                        link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
 
                         markup = InlineKeyboardMarkup(row_width=1)
                         markup.add(InlineKeyboardButton("🌐 Acessar Painel Interativo Web", url=link_web))
@@ -999,7 +1007,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v7.2 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v7.3 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
