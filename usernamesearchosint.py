@@ -1,12 +1,12 @@
 """
-Kronos Intel OSINT Bot v12.0
-- Modo Admin Expandido com 3 comandos específicos:
-  1. admin user <username>   -> Mapeamento de Redes Sociais
-  2. admin nome <Nome>       -> Processos Judiciais e Diários Oficiais
-  3. admin email <E-mail>   -> Vazamento de Credenciais
-- Notificação de Prova Social no Canal Principal (-1003802363624) ao dar /start
-- Logs e alertas financeiros no Grupo Privado (-5294217144)
-- Dashboards HTML e Relatórios TXT personalizados por tipo de consulta
+Kronos Intel OSINT Bot v14.0
+- Validação Estrita no /user:
+  - Bloqueia e-mails, nomes completos (espaços), URLs/Links
+  - Bloqueia arquivos, PDFs, imagens, fotos, vídeos, áudios e mídias
+- Resposta automática com 'Comando inválido' e Guia Prático de Utilização
+- Mapeamento e Dashboards HTML/TXT isolados para /user, /nome e /email
+- Relatório Financeiro e Métricas (/stats) enviados ao Grupo Privado (-5294217144)
+- Prova social e boas-vindas enviadas ao Canal Principal (-1003802363624)
 """
 from __future__ import annotations
 
@@ -215,6 +215,27 @@ def e_nome_completo(termo: str) -> bool:
     partes = termo.strip().split()
     return len(partes) >= 2 and all(len(p) >= 2 for p in partes)
 
+def e_url(termo: str) -> bool:
+    padrao_url = re.compile(
+        r'^(?:http|ftp)s?://'  # http:// ou https://
+        r'|(?:www\.)'          # www.
+        r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)' # domínios
+    , re.IGNORECASE)
+    return bool(padrao_url.search(termo))
+
+def orientar_uso_correto(chat_id: int):
+    msg_guia = (
+        "💡 **COMO UTILIZAR O BOT CORRETAMENTE:**\n\n"
+        "1️⃣ **Para buscar por Username/Redes:**\n"
+        "• Use: `/user alvo123` ou digite apenas o username no chat.\n"
+        "*(Importante: Não envie URLs/links, e-mails, fotos, arquivos ou textos com espaço)*\n\n"
+        "2️⃣ **Para buscar por Nome Completo (Processos Judiciais):**\n"
+        "• Use: `/nome João da Silva`\n\n"
+        "3️⃣ **Para buscar por E-mail (Vazamentos):**\n"
+        "• Use: `/email exemplo@dominio.com`"
+    )
+    bot.send_message(chat_id, msg_guia, parse_mode="Markdown")
+
 # --- MOTOR OSINT PARALELO ---
 class FastOSINTChecker:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
@@ -308,7 +329,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v12.0
+SISTEMA: Kronos Engine v14.0
 ===================================================================
 """
     if is_email:
@@ -666,7 +687,7 @@ if bot:
         
         registrar_acesso(user_id)
 
-        # NOTIFICAÇÃO PÚBLICA NO CANAL VIA ID NUMÉRICO (EXIBIÇÃO DE PROVA SOCIAL)
+        # NOTIFICAÇÃO PÚBLICA NO CANAL PRINCIPAL
         if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
             try:
                 msg_canal = (
@@ -680,22 +701,20 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v12.0**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v14.0**.\n\n"
             f"Sua plataforma avançada para investigação digital, inteligência cibernética e mapeamento de dados públicos.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
-            f"Digite diretamente o @username no chat (ex: `alvo123`).\n"
+            f"• Use `/user alvo123` ou digite apenas o username no chat.\n"
             f"• Identifica perfis ativos em mais de 45 redes.\n"
             f"• Mapeia presença digital no Google, Yandex e Bing.\n\n"
             f"2️⃣ **BUSCA POR NOME COMPLETO (JUDICIAL):**\n"
-            f"Digite o comando `/nome` seguido do Nome Completo.\n"
-            f"Exemplo: `/nome João da Silva`\n"
+            f"• Use `/nome João da Silva`\n"
             f"• Mapeia processos, citações no Jusbrasil e Diários Oficiais.\n\n"
             f"3️⃣ **BUSCA POR E-MAIL (VAZAMENTOS):**\n"
-            f"Digite o comando `/email` seguido do e-mail.\n"
-            f"Exemplo: `/email alvo@gmail.com`\n"
-            f"• Mapeia vazamentos de credenciais no HIBP, IntelX, DeHashed e BreachDirectory.\n\n"
-            f"📢 **Acompanhe atualizações e inteligência em nosso canal oficial:** {CANAL_TAG_PUBLICO}\n"
+            f"• Use `/email alvo@gmail.com`\n"
+            f"• Mapeia vazamentos de credenciais em bases globais.\n\n"
+            f"📢 **Canal Oficial:** {CANAL_TAG_PUBLICO}\n"
             f"💬 **Suporte Direto:** @{SUPORTE_USERNAME}"
         )
 
@@ -706,6 +725,66 @@ if bot:
 
         bot.send_message(message.chat.id, menu_boas_vindas, parse_mode="Markdown", reply_markup=markup)
 
+    # BLOCK DE MÍDIAS, DOCUMENTOS, PDFS E FOTOS FORA DO ESCOPO
+    @bot.message_handler(content_types=['document', 'photo', 'audio', 'video', 'voice', 'sticker'])
+    def handle_invalid_media(message):
+        bot.reply_to(message, "⚠️ **Comando Inválido!**\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos para consultas de username.", parse_mode="Markdown")
+        orientar_uso_correto(message.chat.id)
+
+    @bot.message_handler(commands=['user'])
+    def handle_user_command(message):
+        user_id = message.from_user.id
+        registrar_acesso(user_id)
+
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            bot.reply_to(message, "⚠️ **Comando Incompleto!**\nEnvie o username após o comando `/user`.\nExemplo: `/user alvo123`", parse_mode="Markdown")
+            orientar_uso_correto(message.chat.id)
+            return
+
+        target_user = partes[1].replace("@", "").strip()
+
+        # VALIDAÇÃO ESTRITA DE ESCOPO USERNAME (Sem e-mail, sem espaço/nome completo e sem URLs/links)
+        if "@" in target_user or " " in target_user or e_url(target_user):
+            bot.reply_to(message, "⚠️ **Comando Inválido!**\nO comando `/user` aceita apenas nomes de usuário (sem e-mails, sem URLs/links e sem espaços).", parse_mode="Markdown")
+            orientar_uso_correto(message.chat.id)
+            return
+
+        msg_status = bot.reply_to(message, f"🔎 Mapeando plataformas para @{target_user}...")
+        resultados = executar_varredura_osint(target_user, is_fullname=False, is_email=False)
+        encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+
+        try:
+            bot.edit_message_text(f"✅ Mapeamento concluído para @{target_user}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+        except Exception:
+            pass
+
+        if encontrados:
+            lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+            texto_resultado = (
+                f"🎯 PLATAFORMAS ENCONTRADAS PARA @{target_user}\n"
+                f"───────────────────────────────\n\n"
+                f"{lista_plataformas}\n\n"
+                f"⚠️ Identificamos {len(encontrados)} contas ativas indexadas para este perfil.\n\n"
+                f"Deseja obter o Painel Interativo Web com os links clicáveis de cada perfil, presença digital (Yandex/Google) e relatório TXT?\n\n"
+                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
+            )
+
+            markup = InlineKeyboardMarkup(row_width=1)
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 SIM, QUERO O RELATÓRIO COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buy_{target_user}")
+            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
+            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="final_cancel")
+            markup.add(btn_sim, btn_canal, btn_nao)
+
+            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
+        else:
+            bot.send_message(
+                message.chat.id,
+                f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{target_user}.\n\n"
+                f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
+            )
+
     @bot.message_handler(commands=['nome'])
     def handle_nome_command(message):
         user_id = message.from_user.id
@@ -714,11 +793,13 @@ if bot:
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             bot.reply_to(message, "⚠️ Envie o nome completo após o comando.\nExemplo: `/nome João da Silva`", parse_mode="Markdown")
+            orientar_uso_correto(message.chat.id)
             return
 
         nome_alvo = partes[1].strip()
-        if not e_nome_completo(nome_alvo):
-            bot.reply_to(message, "⚠️ Digite o nome e sobrenome completo.")
+        if not e_nome_completo(nome_alvo) or e_url(nome_alvo):
+            bot.reply_to(message, "⚠️ Digite o nome e sobrenome completo (sem links ou e-mails).")
+            orientar_uso_correto(message.chat.id)
             return
 
         msg_status = bot.reply_to(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{nome_alvo}'...")
@@ -752,8 +833,9 @@ if bot:
         registrar_acesso(user_id)
 
         partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2 or "@" not in partes[1]:
+        if len(partes) < 2 or "@" not in partes[1] or e_url(partes[1]):
             bot.reply_to(message, "⚠️ Envie um e-mail válido após o comando.\nExemplo: `/email alvo@gmail.com`", parse_mode="Markdown")
+            orientar_uso_correto(message.chat.id)
             return
 
         email_alvo = partes[1].strip()
@@ -778,6 +860,39 @@ if bot:
         markup.add(btn_sim, btn_canal, btn_nao)
 
         bot.send_message(message.chat.id, texto_email, reply_markup=markup)
+
+    @bot.message_handler(commands=['stats'])
+    def handle_stats_command(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+
+        total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
+        searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)[0]
+        reports = db_execute("SELECT value FROM metrics WHERE key = 'total_reports'", fetchone=True)[0]
+        vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved'", fetchone=True)
+        
+        qtd_vendas = vendas[0] if vendas else 0
+        faturamento = vendas[1] if vendas and vendas[1] else 0.0
+
+        relatorio_financeiro = (
+            f"📊 **RELATÓRIO FINANCEIRO E METRICAS DE USO**\n"
+            f"───────────────────────────────\n"
+            f"👤 **Usuários Totais Registrados:** {total_users}\n"
+            f"🔎 **Total de Buscas Executadas:** {searches}\n"
+            f"📄 **Relatórios VIP Gerados:** {reports}\n"
+            f"💰 **Vendas Aprovadas (Pix):** {qtd_vendas}\n"
+            f"💵 **Faturamento Total Adquirido:** R$ {faturamento:.2f}\n"
+            f"───────────────────────────────\n"
+            f"📅 Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+        )
+
+        bot.send_message(message.chat.id, relatorio_financeiro, parse_mode="Markdown")
+
+        if GRUPO_LOGS_ID:
+            try:
+                bot.send_message(GRUPO_LOGS_ID, relatorio_financeiro, parse_mode="Markdown")
+            except Exception as e:
+                logger.error("Erro ao enviar relatório de stats para grupo de logs: %s", str(e))
 
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_command(message):
@@ -828,29 +943,6 @@ if bot:
         except Exception as e:
             bot.reply_to(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário {target_user_id}.\nLink do painel: {link_web}")
 
-    @bot.message_handler(commands=['stats'])
-    def handle_stats_command(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-
-        total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
-        searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)[0]
-        reports = db_execute("SELECT value FROM metrics WHERE key = 'total_reports'", fetchone=True)[0]
-        vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved'", fetchone=True)
-        
-        qtd_vendas = vendas[0] if vendas else 0
-        faturamento = vendas[1] if vendas and vendas[1] else 0.0
-
-        painel = (
-            f"📊 PAINEL DE CONTROLE KRONOS INTEL\n"
-            f"───────────────────────────────\n"
-            f"👤 Usuários Registrados: {total_users}\n"
-            f"🔎 Total de Pesquisas: {searches}\n"
-            f"📄 Relatórios Gerados: {reports}\n"
-            f"💰 Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})"
-        )
-        bot.send_message(message.chat.id, painel)
-
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         user_id = message.from_user.id
@@ -858,15 +950,10 @@ if bot:
         
         texto = message.text.strip()
         
-        # --- PROCESSAMENTO DO MODO ADMIN ---
+        # --- PROCESSAMENTO MODO ADMIN ---
         if user_id == ADMIN_ID and texto.lower().startswith("admin"):
             partes_admin = texto.split(maxsplit=2)
             
-            # Formatos suportados: 
-            # 'admin user <alvo>'
-            # 'admin nome <alvo>'
-            # 'admin email <alvo>'
-            # 'admin <alvo>' (automático)
             if len(partes_admin) >= 3 and partes_admin[1].lower() in ["user", "nome", "email"]:
                 subcomando = partes_admin[1].lower()
                 target = partes_admin[2].replace("@", "").strip()
@@ -914,11 +1001,19 @@ if bot:
             return
 
         target = texto.replace("@", "").strip()
+
+        # SE O USUÁRIO DIGITAR UMA URL DIRETA NO CHAT
+        if e_url(target):
+            bot.reply_to(message, "⚠️ **Comando Inválido!**\nBusca por URLs/links diretos não são aceitas. Digite apenas o username, /nome ou /email.", parse_mode="Markdown")
+            orientar_uso_correto(message.chat.id)
+            return
+
         if len(target) < 2:
             bot.reply_to(message, "⚠️ Termo de busca muito curto.")
             return
 
         is_fullname = e_nome_completo(target)
+        is_email = ("@" in target)
 
         if is_fullname:
             msg_status = bot.reply_to(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{target}'...")
@@ -948,6 +1043,30 @@ if bot:
             bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup)
             return
 
+        if is_email:
+            texto_email = (
+                f"📧 CHECAGEM DE VAZAMENTOS PARA:\n"
+                f"👤 {target}\n"
+                f"───────────────────────────────\n\n"
+                f"Mapeamos as principais bases globais de vazamento de credenciais e senhas:\n"
+                f"• Have I Been Pwned\n"
+                f"• Intelligence X\n"
+                f"• DeHashed Base\n"
+                f"• BreachDirectory\n\n"
+                f"🔥 Liberar Painel Interativo Web com os links diretos de vazamento por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
+            )
+
+            markup = InlineKeyboardMarkup(row_width=1)
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buyemail_{target}")
+            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
+            btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
+            markup.add(btn_sim, btn_canal, btn_nao)
+
+            bot.send_message(message.chat.id, texto_email, reply_markup=markup)
+            return
+
+        # BUSCA PADRÃO DE USERNAME
         msg_status = bot.reply_to(message, f"🔎 Mapeando plataformas para @{target}...")
         resultados = executar_varredura_osint(target, is_fullname=False, is_email=False)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
@@ -1127,7 +1246,6 @@ def webhook():
                         registrar_relatorio()
                         enviar_relatorio_espelho_admin(target, doc_txt, telegram_id, "VENDA PIX APROVADA")
 
-                    # NOTIFICAÇÃO EXCLUSIVA DE VENDAS NO GRUPO FINANCEIRO/LOGS PRIVADO (-5294217144)
                     if bot and GRUPO_LOGS_ID:
                         try:
                             msg_venda_log = (
@@ -1151,7 +1269,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v12.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v14.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
