@@ -1,12 +1,12 @@
 """
-Kronos Intel OSINT Bot v11.0
-- Dashboards HTML Dinâmicos e Exclusivos para cada comando:
-  1. Username: Apenas redes confirmadas + Buscadores (Yandex/Google)
-  2. /nome: Dashboard focado em Processos, Diários Oficiais e Jusbrasil
-  3. /email: Dashboard focado em Vazamentos de Credenciais (HIBP, IntelX, DeHashed, BreachDirectory)
-- Correção no envio do Canal Principal usando ID numérico (-1003802363624)
-- Grupo Financeiro/Logs (-5294217144)
-- Monetização unificada R$ 3,90 no Pix
+Kronos Intel OSINT Bot v12.0
+- Modo Admin Expandido com 3 comandos específicos:
+  1. admin user <username>   -> Mapeamento de Redes Sociais
+  2. admin nome <Nome>       -> Processos Judiciais e Diários Oficiais
+  3. admin email <E-mail>   -> Vazamento de Credenciais
+- Notificação de Prova Social no Canal Principal (-1003802363624) ao dar /start
+- Logs e alertas financeiros no Grupo Privado (-5294217144)
+- Dashboards HTML e Relatórios TXT personalizados por tipo de consulta
 """
 from __future__ import annotations
 
@@ -308,7 +308,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v11.0
+SISTEMA: Kronos Engine v12.0
 ===================================================================
 """
     if is_email:
@@ -666,7 +666,7 @@ if bot:
         
         registrar_acesso(user_id)
 
-        # NOTIFICAÇÃO PÚBLICA NO CANAL VIA ID NUMÉRICO (EVITA ERRO DE USERNAME NOT FOUND)
+        # NOTIFICAÇÃO PÚBLICA NO CANAL VIA ID NUMÉRICO (EXIBIÇÃO DE PROVA SOCIAL)
         if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
             try:
                 msg_canal = (
@@ -680,7 +680,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v11.0**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v12.0**.\n\n"
             f"Sua plataforma avançada para investigação digital, inteligência cibernética e mapeamento de dados públicos.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -857,29 +857,38 @@ if bot:
         registrar_acesso(user_id)
         
         texto = message.text.strip()
-        eh_admin_mode = False
+        
+        # --- PROCESSAMENTO DO MODO ADMIN ---
+        if user_id == ADMIN_ID and texto.lower().startswith("admin"):
+            partes_admin = texto.split(maxsplit=2)
+            
+            # Formatos suportados: 
+            # 'admin user <alvo>'
+            # 'admin nome <alvo>'
+            # 'admin email <alvo>'
+            # 'admin <alvo>' (automático)
+            if len(partes_admin) >= 3 and partes_admin[1].lower() in ["user", "nome", "email"]:
+                subcomando = partes_admin[1].lower()
+                target = partes_admin[2].replace("@", "").strip()
+                
+                is_email = (subcomando == "email")
+                is_fullname = (subcomando == "nome")
+            else:
+                target = texto.lower().replace("admin", "").replace("@", "").strip()
+                is_fullname = e_nome_completo(target)
+                is_email = ("@" in target)
 
-        if "admin" in texto.lower() and user_id == ADMIN_ID:
-            eh_admin_mode = True
-            target = texto.lower().replace("admin", "").replace("@", "").strip()
-        else:
-            target = texto.replace("@", "").strip()
+            if len(target) < 2:
+                bot.reply_to(message, "⚠️ Termo de busca muito curto para modo Admin.")
+                return
 
-        if len(target) < 2:
-            bot.reply_to(message, "⚠️ Termo de busca muito curto.")
-            return
+            qtype = "email" if is_email else ("fullname" if is_fullname else "username")
 
-        is_fullname = e_nome_completo(target)
-        is_email = ("@" in target)
-
-        if eh_admin_mode:
-            msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando {target}...")
+            msg_status = bot.reply_to(message, f"👑 [ADMIN VIP - {qtype.upper()}] Processando {target}...")
             resultados = executar_varredura_osint(target, is_fullname=is_fullname, is_email=is_email)
             results_json = json.dumps(resultados)
             token_relatorio = secrets.token_urlsafe(16)
             pid_admin = f"admin_{int(time.time())}"
-
-            qtype = "email" if is_email else ("fullname" if is_fullname else "username")
 
             db_execute(
                 "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, query_type, results_json, created_at) VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?)",
@@ -889,7 +898,7 @@ if bot:
             registrar_relatorio()
 
             try:
-                bot.edit_message_text(f"✅ Varredura concluída para {target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+                bot.edit_message_text(f"✅ Varredura Módulo {qtype.upper()} concluída para {target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
             except Exception:
                 pass
 
@@ -899,10 +908,17 @@ if bot:
 
             bot.send_message(
                 message.chat.id,
-                f"👑 [MODO ADMIN] Painel Web gerado para {target}:",
+                f"👑 [MODO ADMIN - {qtype.upper()}] Painel Web gerado para {target}:",
                 reply_markup=markup
             )
             return
+
+        target = texto.replace("@", "").strip()
+        if len(target) < 2:
+            bot.reply_to(message, "⚠️ Termo de busca muito curto.")
+            return
+
+        is_fullname = e_nome_completo(target)
 
         if is_fullname:
             msg_status = bot.reply_to(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{target}'...")
@@ -1135,7 +1151,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v11.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v12.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
