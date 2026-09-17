@@ -1,13 +1,11 @@
 """
-Kronos Intel OSINT Bot v14.1
-- Tratamento contra exceção 400 'message to be replied not found' via responder_seguro()
-- Validação Estrita no /user:
-  - Bloqueia e-mails, nomes completos (espaços), URLs/Links
-  - Bloqueia arquivos, PDFs, imagens, fotos, vídeos, áudios e mídias
-- Resposta automática com 'Comando inválido' e Guia Prático de Utilização
-- Mapeamento e Dashboards HTML/TXT isolados para /user, /nome e /email
-- Relatório Financeiro e Métricas (/stats) enviados ao Grupo Privado (-5294217144)
-- Prova social e boas-vindas enviadas ao Canal Principal (-1003802363624)
+Kronos Intel OSINT Bot v14.2
+- Validação isolada e estrita de escopo para cada comando:
+  - /user: Apenas username (sem @, sem espaço, sem e-mail, sem URL)
+  - /email: Apenas e-mail válido (exige @)
+  - /nome: Apenas nome completo (exige nome + sobrenome)
+- Tratamento seguro de envio com responder_seguro()
+- Mídia, arquivos e URLs fora do escopo acionam a orientação de uso correto
 """
 from __future__ import annotations
 
@@ -216,6 +214,10 @@ def e_nome_completo(termo: str) -> bool:
     partes = termo.strip().split()
     return len(partes) >= 2 and all(len(p) >= 2 for p in partes)
 
+def e_email_valido(termo: str) -> bool:
+    padrao = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(padrao, termo.strip()))
+
 def e_url(termo: str) -> bool:
     padrao_url = re.compile(
         r'^(?:http|ftp)s?://'
@@ -225,7 +227,6 @@ def e_url(termo: str) -> bool:
     return bool(padrao_url.search(termo))
 
 def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
-    """Envia resposta com reply_to, mas recorre ao send_message caso a mensagem original tenha sido apagada."""
     try:
         return bot.reply_to(message, texto, parse_mode=parse_mode, reply_markup=reply_markup)
     except Exception:
@@ -238,18 +239,18 @@ def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
 def orientar_uso_correto(chat_id: int):
     msg_guia = (
         "💡 **COMO UTILIZAR O BOT CORRETAMENTE:**\n\n"
-        "1️⃣ **Para buscar por Username/Redes:**\n"
-        "• Use: `/user alvo123` ou digite apenas o username no chat.\n"
-        "*(Importante: Não envie URLs/links, e-mails, fotos, arquivos ou textos com espaço)*\n\n"
-        "2️⃣ **Para buscar por Nome Completo (Processos Judiciais):**\n"
-        "• Use: `/nome João da Silva`\n\n"
-        "3️⃣ **Para buscar por E-mail (Vazamentos):**\n"
-        "• Use: `/email exemplo@dominio.com`"
+        "1️⃣ **Para buscar por Username (Redes Sociais):**\n"
+        "• Use: `/user alvo123`\n"
+        "*(Apenas o nome de usuário. Não envie e-mails, links ou nomes com espaço)*\n\n"
+        "2️⃣ **Para buscar por E-mail (Vazamentos):**\n"
+        "• Use: `/email exemplo@dominio.com`\n\n"
+        "3️⃣ **Para buscar por Nome Completo (Processos):**\n"
+        "• Use: `/nome João da Silva`"
     )
     try:
         bot.send_message(chat_id, msg_guia, parse_mode="Markdown")
     except Exception as e:
-        logger.error("Erro ao enviar orientação de uso para %s: %s", chat_id, str(e))
+        logger.error("Erro ao enviar orientação para %s: %s", chat_id, str(e))
 
 # --- MOTOR OSINT PARALELO ---
 class FastOSINTChecker:
@@ -331,7 +332,6 @@ def obter_links_buscadores(termo: str) -> dict[str, str]:
         "DuckDuckGo (Presença Web)": f"https://duckduckgo.com/?q={encoded_term}"
     }
 
-# --- GERADOR DE RELATÓRIO TXT ---
 def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], is_fullname: bool = False, is_email: bool = False) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -344,7 +344,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v14.1
+SISTEMA: Kronos Engine v14.2
 ===================================================================
 """
     if is_email:
@@ -425,7 +425,6 @@ def enviar_relatorio_espelho_admin(target: str, documento: io.BytesIO, user_id: 
         except Exception as e:
             logger.error("Erro ao enviar cópia ao admin: %s", str(e))
 
-# --- REMARKETING THREAD ---
 def worker_remarketing_pix():
     while True:
         try:
@@ -460,7 +459,6 @@ def worker_remarketing_pix():
 
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
-# --- TEMPLATES HTML DASHBOARD PERSONALIZADOS ---
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -629,7 +627,6 @@ HTML_DASHBOARD_TEMPLATE = """
 </html>
 """
 
-# --- ROTAS FLASK PARA WEB DASHBOARD E DOWNLOAD TXT ---
 @app.route("/relatorio/<token>")
 def ver_relatorio_web(token):
     p = db_execute("SELECT target_username, results_json, query_type, created_at FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
@@ -702,7 +699,6 @@ if bot:
         
         registrar_acesso(user_id)
 
-        # NOTIFICAÇÃO PÚBLICA NO CANAL PRINCIPAL
         if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
             try:
                 msg_canal = (
@@ -716,19 +712,18 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v14.1**.\n\n"
-            f"Sua plataforma avançada para investigação digital, inteligência cibernética e mapeamento de dados públicos.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v14.2**.\n\n"
+            f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
-            f"• Use `/user alvo123` ou digite apenas o username no chat.\n"
-            f"• Identifica perfis ativos em mais de 45 redes.\n"
-            f"• Mapeia presença digital no Google, Yandex e Bing.\n\n"
-            f"2️⃣ **BUSCA POR NOME COMPLETO (JUDICIAL):**\n"
-            f"• Use `/nome João da Silva`\n"
-            f"• Mapeia processos, citações no Jusbrasil e Diários Oficiais.\n\n"
-            f"3️⃣ **BUSCA POR E-MAIL (VAZAMENTOS):**\n"
+            f"• Use `/user alvo123`\n"
+            f"• Identifica perfis ativos em mais de 45 redes.\n\n"
+            f"2️⃣ **BUSCA POR E-MAIL (VAZAMENTOS):**\n"
             f"• Use `/email alvo@gmail.com`\n"
             f"• Mapeia vazamentos de credenciais em bases globais.\n\n"
+            f"3️⃣ **BUSCA POR NOME COMPLETO (JUDICIAL):**\n"
+            f"• Use `/nome João da Silva`\n"
+            f"• Mapeia processos e citações no Jusbrasil e Diários Oficiais.\n\n"
             f"📢 **Canal Oficial:** {CANAL_TAG_PUBLICO}\n"
             f"💬 **Suporte Direto:** @{SUPORTE_USERNAME}"
         )
@@ -740,12 +735,12 @@ if bot:
 
         bot.send_message(message.chat.id, menu_boas_vindas, parse_mode="Markdown", reply_markup=markup)
 
-    # BLOCK DE MÍDIAS, DOCUMENTOS, PDFS E FOTOS FORA DO ESCOPO
     @bot.message_handler(content_types=['document', 'photo', 'audio', 'video', 'voice', 'sticker'])
     def handle_invalid_media(message):
-        responder_seguro(message, "⚠️ **Comando Inválido!**\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos para consultas de username.", parse_mode="Markdown")
+        responder_seguro(message, "⚠️ **Comando Inválido!**\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos.", parse_mode="Markdown")
         orientar_uso_correto(message.chat.id)
 
+    # --- COMANDO /user (EXCLUSIVO PARA USERNAME) ---
     @bot.message_handler(commands=['user'])
     def handle_user_command(message):
         user_id = message.from_user.id
@@ -759,9 +754,9 @@ if bot:
 
         target_user = partes[1].replace("@", "").strip()
 
-        # VALIDAÇÃO ESTRITA DE ESCOPO USERNAME (Sem e-mail, sem espaço/nome completo e sem URLs/links)
+        # BLOQUEIA E-MAILS, ESPAÇOS E URLS NO /user
         if "@" in target_user or " " in target_user or e_url(target_user):
-            responder_seguro(message, "⚠️ **Comando Inválido!**\nO comando `/user` aceita apenas nomes de usuário (sem e-mails, sem URLs/links e sem espaços).", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ **Comando Inválido para Username!**\nO comando `/user` aceita apenas nomes de usuário (sem e-mail, sem URLs e sem espaços).", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -801,6 +796,48 @@ if bot:
                 f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
             )
 
+    # --- COMANDO /email (EXCLUSIVO PARA E-MAIL) ---
+    @bot.message_handler(commands=['email'])
+    def handle_email_command(message):
+        user_id = message.from_user.id
+        registrar_acesso(user_id)
+
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o e-mail após o comando `/email`.\nExemplo: `/email alvo@gmail.com`", parse_mode="Markdown")
+            orientar_uso_correto(message.chat.id)
+            return
+
+        email_alvo = partes[1].strip()
+
+        # VALIDA FORMATO DE E-MAIL
+        if not e_email_valido(email_alvo) or e_url(email_alvo):
+            responder_seguro(message, "⚠️ **Comando Inválido para E-mail!**\nO comando `/email` exige um e-mail válido no formato `usuario@dominio.com`.", parse_mode="Markdown")
+            orientar_uso_correto(message.chat.id)
+            return
+
+        texto_email = (
+            f"📧 CHECAGEM DE VAZAMENTOS PARA:\n"
+            f"👤 {email_alvo}\n"
+            f"───────────────────────────────\n\n"
+            f"Mapeamos as principais bases globais de vazamento de credenciais e senhas:\n"
+            f"• Have I Been Pwned\n"
+            f"• Intelligence X\n"
+            f"• DeHashed Base\n"
+            f"• BreachDirectory\n\n"
+            f"🔥 Liberar Painel Interativo Web com os links diretos de vazamento por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+            f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
+        )
+
+        markup = InlineKeyboardMarkup(row_width=1)
+        btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buyemail_{email_alvo}")
+        btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
+        btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
+        markup.add(btn_sim, btn_canal, btn_nao)
+
+        bot.send_message(message.chat.id, texto_email, reply_markup=markup)
+
+    # --- COMANDO /nome (EXCLUSIVO PARA NOME COMPLETO) ---
     @bot.message_handler(commands=['nome'])
     def handle_nome_command(message):
         user_id = message.from_user.id
@@ -808,13 +845,15 @@ if bot:
 
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
-            responder_seguro(message, "⚠️ Envie o nome completo após o comando.\nExemplo: `/nome João da Silva`", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o nome completo após o comando `/nome`.\nExemplo: `/nome João da Silva`", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
         nome_alvo = partes[1].strip()
-        if not e_nome_completo(nome_alvo) or e_url(nome_alvo):
-            responder_seguro(message, "⚠️ Digite o nome e sobrenome completo (sem links ou e-mails).")
+
+        # VALIDA NOME COMPLETO (Exige espaço / ao menos 2 nomes)
+        if not e_nome_completo(nome_alvo) or "@" in nome_alvo or e_url(nome_alvo):
+            responder_seguro(message, "⚠️ **Comando Inválido para Nome Completo!**\nO comando `/nome` exige nome e sobrenome completo (sem e-mails ou URLs).", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -843,40 +882,6 @@ if bot:
         markup.add(btn_sim, btn_canal, btn_nao)
 
         bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
-
-    @bot.message_handler(commands=['email'])
-    def handle_email_command(message):
-        user_id = message.from_user.id
-        registrar_acesso(user_id)
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2 or "@" not in partes[1] or e_url(partes[1]):
-            responder_seguro(message, "⚠️ Envie um e-mail válido após o comando.\nExemplo: `/email alvo@gmail.com`", parse_mode="Markdown")
-            orientar_uso_correto(message.chat.id)
-            return
-
-        email_alvo = partes[1].strip()
-
-        texto_email = (
-            f"📧 CHECAGEM DE VAZAMENTOS PARA:\n"
-            f"👤 {email_alvo}\n"
-            f"───────────────────────────────\n\n"
-            f"Mapeamos as principais bases globais de vazamento de credenciais e senhas:\n"
-            f"• Have I Been Pwned\n"
-            f"• Intelligence X\n"
-            f"• DeHashed Base\n"
-            f"• BreachDirectory\n\n"
-            f"🔥 Liberar Painel Interativo Web com os links diretos de vazamento por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
-            f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
-        )
-
-        markup = InlineKeyboardMarkup(row_width=1)
-        btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buyemail_{email_alvo}")
-        btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-        btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
-        markup.add(btn_sim, btn_canal, btn_nao)
-
-        bot.send_message(message.chat.id, texto_email, reply_markup=markup)
 
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
@@ -929,7 +934,7 @@ if bot:
             return
 
         is_fullname = e_nome_completo(alvo)
-        is_email = ("@" in alvo)
+        is_email = e_email_valido(alvo)
         qtype = "email" if is_email else ("fullname" if is_fullname else "username")
 
         resultados = executar_varredura_osint(alvo, is_fullname=is_fullname, is_email=is_email)
@@ -960,6 +965,7 @@ if bot:
         except Exception as e:
             responder_seguro(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário {target_user_id}.\nLink do painel: {link_web}")
 
+    # ENTRADA DE TEXTO DIRETO NO CHAT
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         user_id = message.from_user.id
@@ -967,7 +973,7 @@ if bot:
         
         texto = message.text.strip()
         
-        # --- PROCESSAMENTO MODO ADMIN ---
+        # MODO ADMIN
         if user_id == ADMIN_ID and texto.lower().startswith("admin"):
             partes_admin = texto.split(maxsplit=2)
             
@@ -980,7 +986,7 @@ if bot:
             else:
                 target = texto.lower().replace("admin", "").replace("@", "").strip()
                 is_fullname = e_nome_completo(target)
-                is_email = ("@" in target)
+                is_email = e_email_valido(target)
 
             if len(target) < 2:
                 responder_seguro(message, "⚠️ Termo de busca muito curto para modo Admin.")
@@ -1020,9 +1026,9 @@ if bot:
 
         target = texto.replace("@", "").strip()
 
-        # SE O USUÁRIO DIGITAR UMA URL DIRETA NO CHAT
+        # BLOQUEIA URLS
         if e_url(target):
-            responder_seguro(message, "⚠️ **Comando Inválido!**\nBusca por URLs/links diretos não são aceitas. Digite apenas o username, /nome ou /email.", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ **Comando Inválido!**\nBusca por URLs/links não são aceitas. Digite apenas o username, /email ou /nome.", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -1030,10 +1036,31 @@ if bot:
             responder_seguro(message, "⚠️ Termo de busca muito curto.")
             return
 
-        is_fullname = e_nome_completo(target)
-        is_email = ("@" in target)
+        # ROTEAMENTO AUTOMÁTICO SE O USUÁRIO DIGITAR DIRETO NO CHAT
+        if e_email_valido(target):
+            texto_email = (
+                f"📧 CHECAGEM DE VAZAMENTOS PARA:\n"
+                f"👤 {target}\n"
+                f"───────────────────────────────\n\n"
+                f"Mapeamos as principais bases globais de vazamento de credenciais e senhas:\n"
+                f"• Have I Been Pwned\n"
+                f"• Intelligence X\n"
+                f"• DeHashed Base\n"
+                f"• BreachDirectory\n\n"
+                f"🔥 Liberar Painel Interativo Web com os links diretos de vazamento por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
+            )
 
-        if is_fullname:
+            markup = InlineKeyboardMarkup(row_width=1)
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buyemail_{target}")
+            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
+            btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
+            markup.add(btn_sim, btn_canal, btn_nao)
+
+            bot.send_message(message.chat.id, texto_email, reply_markup=markup)
+            return
+
+        if e_nome_completo(target):
             msg_status = responder_seguro(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{target}'...")
             resultados = executar_varredura_osint(target, is_fullname=True)
             
@@ -1062,30 +1089,7 @@ if bot:
             bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup)
             return
 
-        if is_email:
-            texto_email = (
-                f"📧 CHECAGEM DE VAZAMENTOS PARA:\n"
-                f"👤 {target}\n"
-                f"───────────────────────────────\n\n"
-                f"Mapeamos as principais bases globais de vazamento de credenciais e senhas:\n"
-                f"• Have I Been Pwned\n"
-                f"• Intelligence X\n"
-                f"• DeHashed Base\n"
-                f"• BreachDirectory\n\n"
-                f"🔥 Liberar Painel Interativo Web com os links diretos de vazamento por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
-                f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
-            )
-
-            markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buyemail_{target}")
-            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-            btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
-            markup.add(btn_sim, btn_canal, btn_nao)
-
-            bot.send_message(message.chat.id, texto_email, reply_markup=markup)
-            return
-
-        # BUSCA PADRÃO DE USERNAME
+        # SE DIGITOU APENAS UM USERNAME DIRETO NO CHAT
         msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target}...")
         resultados = executar_varredura_osint(target, is_fullname=False, is_email=False)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
@@ -1170,7 +1174,7 @@ if bot:
             bot.edit_message_text(
                 chat_id=call.message.chat.id, 
                 message_id=call.message.message_id, 
-                text=f"👍 Entendido! Digite um username, /nome ou /email para iniciar uma nova busca.\n\n👉 Acompanhe as novidades no canal: {CANAL_TAG_PUBLICO}"
+                text=f"👍 Entendido! Digite um username, /email ou /nome para iniciar uma nova busca.\n\n👉 Acompanhe as novidades no canal: {CANAL_TAG_PUBLICO}"
             )
 
         elif call.data.startswith("getkey_"):
@@ -1185,7 +1189,6 @@ if bot:
             if pix_key:
                 bot.send_message(call.message.chat.id, text=f"`{pix_key}`", parse_mode="Markdown")
 
-# --- ROTA RECEPTORA DO TELEGRAM WEBHOOK ---
 @app.route(f"/telegram/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     if bot:
@@ -1196,7 +1199,6 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- WEBHOOK MERCADO PAGO ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -1289,7 +1291,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v14.1 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v14.2 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
