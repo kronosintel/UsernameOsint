@@ -1,12 +1,13 @@
 """
-Kronos Intel OSINT Bot v7.5
-- Correção do erro de sintaxe (unterminated string literal)
-- Tratamento de mensagens sem parse_mode para evitar falhas no Telegram
+Kronos Intel OSINT Bot v8.0
+- Exibe APENAS plataformas onde o usuário ESTÁ cadastrado
+- Nova seção: Presença Digital e Menções em Buscadores (Google, Yandex, Bing, DuckDuckGo)
+- Correção de erro de sintaxe e parse de mensagens Telegram
 - Notificação ao Admin sobre acessos via /start
 - Comando /conceder <user_id> <alvo> para liberar cortesia
 - Funil de Vendas Duplo (Username R$ 3,90 / Processos R$ 2,90)
 - Exclusivo Download em TXT
-- Dashboard HTML Redesenho Premium
+- Dashboard HTML Redesenho Premium Neon Dark OSINT
 - URL Base: https://usernameosint-1-vcj4.onrender.com
 """
 from __future__ import annotations
@@ -243,9 +244,9 @@ class FastOSINTChecker:
                 else:
                     res = {"exists": True, "url": url}
             else:
-                res = {"exists": None}
+                res = {"exists": False}
         except Exception:
-            res = {"exists": None}
+            res = {"exists": False}
 
         with self._lock:
             self.results[platform] = res
@@ -279,6 +280,16 @@ def executar_varredura_osint(target: str, is_fullname: bool = False) -> dict[str
     else:
         return FastOSINTChecker(target).run()
 
+def obter_links_buscadores(username: str) -> dict[str, str]:
+    encoded_user = urllib.parse.quote(f'"{username}"')
+    return {
+        "Yandex (Citações & Fóruns)": f"https://yandex.com/search/?text={encoded_user}",
+        "Google (Busca Exata)": f"https://www.google.com/search?q={encoded_user}",
+        "Google Noticias & Mídia": f"https://www.google.com/search?q={encoded_user}&tbm=nws",
+        "Bing Search (Menções)": f"https://www.bing.com/search?q={encoded_user}",
+        "DuckDuckGo (Presença Web)": f"https://duckduckgo.com/?q={encoded_user}"
+    }
+
 # --- GERADOR DE RELATÓRIO TXT ---
 def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], is_fullname: bool = False) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
@@ -290,10 +301,10 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {"PROCESSOS JUDICIAIS / NOME COMPLETO" if is_fullname else "USERNAME / REDES SOCIAIS"}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v7.5
+SISTEMA: Kronos Engine v8.0
 ===================================================================
 
-1. FONTES E REGISTROS MAPEADOS
+1. PERFIS E PLATAFORMAS CONFIRMADAS
 -------------------------------------------------------------------
 """
     if encontrados:
@@ -301,14 +312,22 @@ SISTEMA: Kronos Engine v7.5
             url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=target))
             corpo += f"[+] {p.ljust(25)} : {url}\n"
     else:
-        corpo += "[-] Nenhuma ocorrência direta indexada.\n"
+        corpo += "[-] Nenhuma rede social pública confirmada para este usuário.\n"
 
     if not is_fullname:
+        buscadores = obter_links_buscadores(target)
+        corpo += f"""
+2. PRESENÇA DIGITAL E MENÇÕES EM BUSCADORES (YANDEX, GOOGLE, BING)
+-------------------------------------------------------------------
+"""
+        for nome_b, url_b in buscadores.items():
+            corpo += f"[+] {nome_b.ljust(28)} : {url_b}\n"
+
         hibp_link = f"https://haveibeenpwned.com/account/{target}"
         intelx_link = f"https://intelx.io/?s={urllib.parse.quote(target)}"
         dehashed_link = f"https://dehashed.com/search?query={urllib.parse.quote(target)}"
         corpo += f"""
-2. VARREDURA DE VAZAMENTOS E CREDENCIAIS
+3. VARREDURA DE VAZAMENTOS E CREDENCIAIS
 -------------------------------------------------------------------
 [+] Have I Been Pwned      : {hibp_link}
 [+] Intelligence X (IntelX): {intelx_link}
@@ -516,7 +535,7 @@ HTML_DASHBOARD_TEMPLATE = """
             <div class="col-lg-{% if is_fullname %}12{% else %}7{% endif %}">
                 <div class="card-custom">
                     <div class="card-header-custom text-uppercase">
-                        <i class="bi bi-diagram-3-fill me-2"></i>{% if is_fullname %}Mapeamento Judicial e Diários Oficiais{% else %}Perfis e Plataformas Mapeadas{% endif %}
+                        <i class="bi bi-check-circle-fill me-2 text-success"></i>{% if is_fullname %}Mapeamento Judicial e Diários Oficiais{% else %}Perfis Confirmados (Cadastrados){% endif %}
                     </div>
                     <div class="card-body p-4">
                         {% if encontrados %}
@@ -531,7 +550,7 @@ HTML_DASHBOARD_TEMPLATE = """
                             {% endfor %}
                         </div>
                         {% else %}
-                        <p class="text-muted mb-0">Nenhuma ocorrência direta mapeada para este termo.</p>
+                        <p class="text-muted mb-0">Nenhum perfil público ativamente cadastrado nas redes sociais padrão.</p>
                         {% endif %}
                     </div>
                 </div>
@@ -540,11 +559,22 @@ HTML_DASHBOARD_TEMPLATE = """
             {% if not is_fullname %}
             <div class="col-lg-5">
                 <div class="card-custom">
+                    <div class="card-header-custom text-uppercase text-info">
+                        <i class="bi bi-globe me-2"></i>Presença Digital & Menções em Buscadores
+                    </div>
+                    <div class="card-body p-4 d-grid gap-2">
+                        {% for nome_b, url_b in buscadores.items() %}
+                        <a href="{{ url_b }}" target="_blank" class="btn-dork"><i class="bi bi-search me-2"></i>{{ nome_b }}</a>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="card-custom">
                     <div class="card-header-custom text-uppercase text-warning">
                         <i class="bi bi-incognito me-2"></i>Vazamentos de Credenciais
                     </div>
                     <div class="card-body p-4 d-grid gap-2">
-                        <a href="https://haveibeenpwned.com/account/{{ target }}" target="_blank" class="btn-dork"><i class="bi bi-search me-2"></i>Have I Been Pwned</a>
+                        <a href="https://haveibeenpwned.com/account/{{ target }}" target="_blank" class="btn-dork"><i class="bi bi-shield-slash me-2"></i>Have I Been Pwned</a>
                         <a href="https://intelx.io/?s={{ target }}" target="_blank" class="btn-dork"><i class="bi bi-cpu me-2"></i>Intelligence X (IntelX)</a>
                         <a href="https://dehashed.com/search?query={{ target }}" target="_blank" class="btn-dork"><i class="bi bi-database-check me-2"></i>DeHashed Base</a>
                     </div>
@@ -574,6 +604,7 @@ def ver_relatorio_web(token):
             url = results_json[plat].get("url", PLATFORM_URLS.get(plat, "").format(username=target))
             encontrados.append({"nome": plat, "url": url})
 
+    buscadores = obter_links_buscadores(target) if not is_fullname else {}
     data_formatada = datetime.fromisoformat(created_at).strftime("%d/%m/%Y %H:%M:%S")
 
     return render_template_string(
@@ -581,6 +612,7 @@ def ver_relatorio_web(token):
         target=target,
         token=token,
         encontrados=encontrados,
+        buscadores=buscadores,
         query_type="BUSCA DE PROCESSOS" if is_fullname else "REDES SOCIAIS & USERNAME",
         is_fullname=is_fullname,
         data_atual=data_formatada
@@ -629,8 +661,8 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v7.5\n\n"
-            f"Envie o nome de usuário (username) desejado para mapear contas ativas e vazamentos na internet.\n"
+            f"👋 Kronos Intel — OSINT Bot v8.0\n\n"
+            f"Envie o nome de usuário (username) desejado para mapear contas ativas, presença digital e vazamentos.\n"
             f"Exemplo: alvo123\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}"
         )
@@ -807,7 +839,7 @@ if bot:
                 f"───────────────────────────────\n\n"
                 f"{lista_plataformas}\n\n"
                 f"⚠️ Identificamos {len(encontrados)} contas ativas indexadas para este perfil.\n\n"
-                f"Deseja obter o Painel Interativo Web com os links clicáveis de cada perfil e relatório TXT?\n\n"
+                f"Deseja obter o Painel Interativo Web com os links clicáveis de cada perfil, presença digital (Yandex/Google) e relatório TXT?\n\n"
                 f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3,90 no Pix!"
             )
 
@@ -835,9 +867,10 @@ if bot:
                     f"🔒 PACOTE KRONOS INTEL VIP — @{target}\n"
                     f"───────────────────────────────\n"
                     f"Você está liberando:\n"
-                    f"1. Painel Interativo Web com links diretos das redes\n"
-                    f"2. Relatório Executivo para Download (.TXT)\n"
-                    f"3. Checagem em Bases de Vazamentos (HIBP / IntelX)\n\n"
+                    f"1. Painel Interativo Web com links das redes sociais ativas\n"
+                    f"2. Mapeamento de Presença Digital (Yandex, Google, Bing)\n"
+                    f"3. Relatório Executivo para Download (.TXT)\n"
+                    f"4. Checagem em Bases de Vazamentos (HIBP / IntelX)\n\n"
                     f"💰 Valor: De R$ 19,90 por R$ 3,90 no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
@@ -996,7 +1029,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v7.5 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v8.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
