@@ -1,9 +1,10 @@
 """
-Kronos Intel OSINT Bot v6.0
-- Módulo Duplo de Busca: Username OU Nome Completo
-- Pesquisa de Processos Judiciais, Diários Oficiais e Transparência
-- Exclusivamente Download em TXT (Módulo PDF Removido)
-- Dashboard HTML Interativo Redesenhado
+Kronos Intel OSINT Bot v7.0
+- Funil de Vendas com Upsell Condicional (Somente pós-pagamento)
+- Etapa 1: Relatório de Username / Redes Sociais / Leaks (R$ 3,90)
+- Etapa 2 (Upsell): Consulta por Nome Completo / Processos / Jusbrasil (R$ 2,90)
+- Painéis Web Separados para Username e Nome Completo
+- Exclusivo Download em TXT
 - URL Base: https://usernameosint-1-vcj4.onrender.com
 """
 from __future__ import annotations
@@ -44,7 +45,8 @@ app.config.update(
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 DEFAULT_TIMEOUT = 3.0
 PORT = int(os.getenv("PORT", "5000"))
-PRECO_VIP = 3.90
+PRECO_VIP_USERNAME = 3.90
+PRECO_VIP_PROCESSO = 2.90
 DB_FILE = "kronos_osint.db"
 db_lock = Lock()
 
@@ -196,6 +198,10 @@ def e_nome_completo(termo: str) -> bool:
     partes = termo.strip().split()
     return len(partes) >= 2 and all(len(p) >= 2 for p in partes)
 
+def usuario_ja_pagou_relatorio_anterior(user_id: int) -> bool:
+    p = db_execute("SELECT COUNT(*) FROM payments WHERE user_id = ? AND status = 'approved'", (user_id,), fetchone=True)
+    return bool(p and p[0] > 0)
+
 # --- MOTOR OSINT PARALELO ---
 class FastOSINTChecker:
     def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
@@ -242,9 +248,8 @@ class FastOSINTChecker:
                     pass
         return self.results
 
-def executar_varredura_osint(target: str) -> dict[str, dict[str, Any]]:
-    if e_nome_completo(target):
-        # Mapeamento direcionado para NOME COMPLETO
+def executar_varredura_osint(target: str, is_fullname: bool = False) -> dict[str, dict[str, Any]]:
+    if is_fullname:
         encoded_name = urllib.parse.quote(f'"{target}"')
         return {
             "Jusbrasil (Processos)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
@@ -252,34 +257,28 @@ def executar_varredura_osint(target: str) -> dict[str, dict[str, Any]]:
             "Jusfy / Diários": {"exists": True, "url": f"https://www.google.com/search?q=site:jusbrasil.com.br+OR+site:escavador.com+{encoded_name}"},
             "Portal Transparência": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target)}"},
             "Diário Oficial União": {"exists": True, "url": f"https://www.google.com/search?q=site:in.gov.br+{encoded_name}"},
-            "Google Acadêmico": {"exists": True, "url": f"https://scholar.google.com.br/scholar?q={encoded_name}"},
             "Certidões e Registros": {"exists": True, "url": f"https://www.google.com/search?q=%22certidao%22+{encoded_name}"},
+            "Google Acadêmico": {"exists": True, "url": f"https://scholar.google.com.br/scholar?q={encoded_name}"},
             "Notícias / Citações": {"exists": True, "url": f"https://www.google.com/search?q={encoded_name}&tbm=nws"},
         }
     else:
         return FastOSINTChecker(target).run()
 
 # --- GERADOR DE RELATÓRIO TXT ---
-def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
-    is_name = e_nome_completo(target)
+def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], is_fullname: bool = False) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
-    hibp_link = f"https://haveibeenpwned.com/account/{target}"
-    intelx_link = f"https://intelx.io/?s={urllib.parse.quote(target)}"
-    dehashed_link = f"https://dehashed.com/search?query={urllib.parse.quote(target)}"
-    google_exact = f"https://www.google.com/search?q=%22{urllib.parse.quote(target)}%22"
 
     corpo = f"""===================================================================
                    KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT
 ===================================================================
 ALVO ANALISADO: {target}
-TIPO DE CONSULTA: {"NOME COMPLETO (JUDICIAL / PROCESSO)" if is_name else "USERNAME / ALIAS"}
+TIPO DE CONSULTA: {"PRORESSOS JUDICIAIS / NOME COMPLETO" if is_fullname else "USERNAME / REDES SOCIAIS"}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v6.0
+SISTEMA: Kronos Engine v7.0
 ===================================================================
 
-1. MAPEAMENTO E FONTES LOCALIZADAS
+1. FONTES E REGISTROS MAPEADOS
 -------------------------------------------------------------------
 """
     if encontrados:
@@ -289,14 +288,19 @@ SISTEMA: Kronos Engine v6.0
     else:
         corpo += "[-] Nenhuma ocorrência direta indexada.\n"
 
-    corpo += f"""
-2. VARREDURA DE VAZAMENTOS, DEEP WEB E DORKS
+    if not is_fullname:
+        hibp_link = f"https://haveibeenpwned.com/account/{target}"
+        intelx_link = f"https://intelx.io/?s={urllib.parse.quote(target)}"
+        dehashed_link = f"https://dehashed.com/search?query={urllib.parse.quote(target)}"
+        corpo += f"""
+2. VARREDURA DE VAZAMENTOS E CREDENCIAIS
 -------------------------------------------------------------------
 [+] Have I Been Pwned      : {hibp_link}
 [+] Intelligence X (IntelX): {intelx_link}
 [+] DeHashed Database      : {dehashed_link}
-[+] Google Exact Match     : {google_exact}
+"""
 
+    corpo += f"""
 ===================================================================
 Documento confidencial gerado por Kronos Intel OSINT Service.
 ===================================================================
@@ -305,17 +309,16 @@ Documento confidencial gerado por Kronos Intel OSINT Service.
     buf.name = f"Relatorio_OSINT_{target.replace(' ', '_')}.txt"
     return buf
 
-def gerar_pix_mercadopago(user_id: int, target: str, valor: float = PRECO_VIP) -> tuple[str | None, bytes | None, str | None]:
+def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: str = "username") -> tuple[str | None, bytes | None, str | None]:
     if not sdk:
         return None, None, None
     token_relatorio = secrets.token_urlsafe(16)
-    qtype = "fullname" if e_nome_completo(target) else "username"
     payment_data = {
         "transaction_amount": float(valor),
-        "description": f"Relatorio OSINT - {target}",
+        "description": f"Relatorio OSINT ({query_type.upper()}) - {target}",
         "payment_method_id": "pix",
         "payer": {"email": f"user_{user_id}@telegram.com", "first_name": "Usuario", "last_name": str(user_id)},
-        "metadata": {"telegram_user_id": user_id, "target_username": target, "token": token_relatorio}
+        "metadata": {"telegram_user_id": user_id, "target_username": target, "token": token_relatorio, "query_type": query_type}
     }
     try:
         res = sdk.payment().create(payment_data).get("response", {})
@@ -326,7 +329,7 @@ def gerar_pix_mercadopago(user_id: int, target: str, valor: float = PRECO_VIP) -
         
         pid = str(res.get("id"))
         db_execute("INSERT INTO payments (payment_id, user_id, target_username, amount, status, reminded, token, query_type, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)",
-                   (pid, user_id, target, valor, token_relatorio, qtype, datetime.now().isoformat()), commit=True)
+                   (pid, user_id, target, valor, token_relatorio, query_type, datetime.now().isoformat()), commit=True)
         return qr_code, img_bytes, token_relatorio
     except Exception as e:
         logger.error("Erro ao gerar Pix: %s", str(e))
@@ -348,7 +351,7 @@ def worker_remarketing_pix():
         try:
             time.sleep(60)
             pendentes = db_execute(
-                "SELECT payment_id, user_id, target_username, created_at FROM payments WHERE status = 'pending' AND reminded = 0",
+                "SELECT payment_id, user_id, target_username, created_at, query_type FROM payments WHERE status = 'pending' AND reminded = 0",
                 fetchall=True
             )
             if not pendentes:
@@ -356,20 +359,19 @@ def worker_remarketing_pix():
 
             now = datetime.now()
             for p in pendentes:
-                pid, uid, target, created_str = p[0], p[1], p[2], p[3]
+                pid, uid, target, created_str, qtype = p[0], p[1], p[2], p[3], p[4]
                 try:
                     created_time = datetime.fromisoformat(created_str)
                     if (now - created_time).total_seconds() / 60 >= 10:
                         db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
                         if bot:
+                            preco = PRECO_VIP_PROCESSO if qtype == "fullname" else PRECO_VIP_USERNAME
                             msg_lembrete = (
-                                f"⏳ SUA CHAVE PIX PARA {target} ESTÁ QUASE EXPIRANDO!\n\n"
-                                f"Aproveite a oferta de R$ 19,90 por apenas R$ 3,90 para liberar a investigação completa.\n"
-                                f"Clique no botão abaixo para concluir:"
+                                f"⏳ SUA CHAVE PIX PARA {target.upper()} ESTÁ EXPIRANDO!\n\n"
+                                f"Conclua a liberação do seu relatório por apenas R$ {preco:.2f} no Pix antes que o link expire."
                             )
                             markup = InlineKeyboardMarkup(row_width=1)
-                            markup.add(InlineKeyboardButton(f"⚡ 🔓 DESBLOQUEAR RELATÓRIO DE {target} (R$ 3,90) 🔓 ⚡", callback_data=f"buy_{target}"))
-                            markup.add(InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{SUPORTE_USERNAME}"))
+                            markup.add(InlineKeyboardButton(f"⚡ 🔓 CONCLUIR AGORA (R$ {preco:.2f}) 🔓 ⚡", callback_data=f"buy_{target}" if qtype=="username" else f"buynome_{target}"))
                             bot.send_message(uid, msg_lembrete)
                 except Exception as ex:
                     logger.error("Erro no remarketing: %s", str(ex))
@@ -386,7 +388,7 @@ HTML_DASHBOARD_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kronos Intel — Painel Executivo OSINT</title>
+    <title>Kronos Intel — Painel OSINT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <style>
@@ -488,17 +490,17 @@ HTML_DASHBOARD_TEMPLATE = """
     <div class="container pb-5">
         <div class="card-custom">
             <div class="card-body p-4">
-                <span class="text-uppercase text-muted small code-tag">[ ALVO SELECIONADO ]</span>
+                <span class="text-uppercase text-muted small code-tag">[ ALVO ANALISADO ]</span>
                 <h2 class="text-white mb-1 font-monospace"><i class="bi bi-terminal me-2"></i>{{ target }}</h2>
                 <p class="text-muted mb-0 small"><i class="bi bi-clock me-1"></i> Auditado em: {{ data_atual }} | Módulo: {{ query_type }}</p>
             </div>
         </div>
 
         <div class="row">
-            <div class="col-lg-7">
+            <div class="col-lg-{% if is_fullname %}12{% else %}7{% endif %}">
                 <div class="card-custom">
                     <div class="card-header-custom text-uppercase">
-                        <i class="bi bi-diagram-3 me-2 text-primary"></i>Fontes e Mapeamento
+                        <i class="bi bi-diagram-3 me-2 text-primary"></i>{% if is_fullname %}Bases de Processos e Diários Oficiais{% else %}Perfis e Plataformas Mapeadas{% endif %}
                     </div>
                     <div class="card-body p-4">
                         {% if encontrados %}
@@ -519,10 +521,11 @@ HTML_DASHBOARD_TEMPLATE = """
                 </div>
             </div>
 
+            {% if not is_fullname %}
             <div class="col-lg-5">
                 <div class="card-custom">
                     <div class="card-header-custom text-uppercase text-warning">
-                        <i class="bi bi-incognito me-2"></i>Vazamentos & Deep Search
+                        <i class="bi bi-incognito me-2"></i>Vazamentos de Credenciais
                     </div>
                     <div class="card-body p-4 d-grid gap-2">
                         <a href="https://haveibeenpwned.com/account/{{ target }}" target="_blank" class="btn-dork"><i class="bi bi-search me-2"></i>Have I Been Pwned</a>
@@ -531,6 +534,7 @@ HTML_DASHBOARD_TEMPLATE = """
                     </div>
                 </div>
             </div>
+            {% endif %}
         </div>
     </div>
 </body>
@@ -547,6 +551,7 @@ def ver_relatorio_web(token):
     target, results_json_str, query_type, created_at = p[0], p[1], p[2], p[3]
     results_json = json.loads(results_json_str)
     
+    is_fullname = (query_type == "fullname")
     encontrados = []
     for plat in results_json:
         if results_json[plat].get("exists") is True:
@@ -560,20 +565,21 @@ def ver_relatorio_web(token):
         target=target,
         token=token,
         encontrados=encontrados,
-        query_type=query_type.upper(),
+        query_type="BUSCA DE PROCESSOS" if is_fullname else "REDES SOCIAIS & USERNAME",
+        is_fullname=is_fullname,
         data_atual=data_formatada
     )
 
 @app.route("/download/txt/<token>")
 def download_txt(token):
-    p = db_execute("SELECT target_username, results_json FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
+    p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
     if not p:
         return "Relatório não encontrado.", 404
 
-    target, results_json_str = p[0], p[1]
+    target, results_json_str, query_type = p[0], p[1], p[2]
     results_json = json.loads(results_json_str)
     
-    txt_buf = construir_relatorio_osint(target, results_json)
+    txt_buf = construir_relatorio_osint(target, results_json, is_fullname=(query_type == "fullname"))
     txt_buf.seek(0)
 
     return send_file(
@@ -592,8 +598,9 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v6.0\n\n"
-            f"Envie um **username** (ex: `alvo123`) para buscar redes sociais OU um **Nome Completo** (ex: `João da Silva`) para mapear processos judiciais, Jusbrasil e diários oficiais.\n\n"
+            f"👋 Kronos Intel — OSINT Bot v7.0\n\n"
+            f"Envie o **nome de usuário (username)** desejado para mapear contas ativas e vazamentos na internet.\n"
+            f"Exemplo: `alvo123`\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}",
             parse_mode="Markdown"
         )
@@ -641,10 +648,21 @@ if bot:
 
         is_fullname = e_nome_completo(target)
 
+        # SE O USUÁRIO ENVIAR NOME COMPLETO SEM TER PAGO O RELATÓRIO ANTERIOR
+        if is_fullname and not usuario_ja_pagou_relatorio_anterior(user_id) and user_id != ADMIN_ID:
+            bot.reply_to(
+                message,
+                "⚠️ **Acesso Restrito ao Módulo Judicial.**\n\n"
+                "A pesquisa por Nome Completo e Busca de Processos está disponível exclusivamente para clientes VIP.\n"
+                "Envie primeiro um **username** para realizar uma varredura de redes sociais.",
+                parse_mode="Markdown"
+            )
+            return
+
         # FLUXO ADMIN
         if eh_admin_mode:
             msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando {target}...")
-            resultados = executar_varredura_osint(target)
+            resultados = executar_varredura_osint(target, is_fullname=is_fullname)
             results_json = json.dumps(resultados)
             token_relatorio = secrets.token_urlsafe(16)
             pid_admin = f"admin_{int(time.time())}"
@@ -672,49 +690,63 @@ if bot:
             )
             return
 
-        # FLUXO PRINCIPAL
-        tipo_msg = "Mapeando processos e diários oficiais" if is_fullname else "Mapeando redes sociais e perfis"
-        msg_status = bot.reply_to(message, f"🔎 {tipo_msg} para '{target}'...")
-        resultados = executar_varredura_osint(target)
+        # FLUXO SEGUNDA ETAPA: USUÁRIO JÁ VIP DIGITOU UM NOME COMPLETO (UPSELL PROCESSOS)
+        if is_fullname and usuario_ja_pagou_relatorio_anterior(user_id):
+            msg_status = bot.reply_to(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{target}'...")
+            resultados = executar_varredura_osint(target, is_fullname=True)
+            
+            try:
+                bot.edit_message_text(f"✅ Análise de registros judiciais concluída para '{target}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
+
+            texto_upsell_oferta = (
+                f"🔍 **REGISTROS JUDICIAIS LOCALIZADOS PARA:**\n"
+                f"👤 **{target.upper()}**\n"
+                f"───────────────────────────────\n\n"
+                f"Identificamos apontamentos no Jusbrasil, Escavador e Diários Oficiais estaduais.\n\n"
+                f"🔥 **OFERTA VIP EXCLUSIVA:**\n"
+                f"Por **apenas R$ 2,90** adicionais no Pix, liberamos o seu Painel Web focado com os links diretos para cada tribunal e diário oficial onde o nome foi citado."
+            )
+
+            markup = InlineKeyboardMarkup(row_width=1)
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA JUDICIAL DE {target.upper()} (R$ 2,90) 🔓 ⚡", callback_data=f"buynome_{target}")
+            btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
+            markup.add(btn_sim, btn_nao)
+
+            bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup, parse_mode="Markdown")
+            return
+
+        # FLUXO PRIMEIRA ETAPA: USERNAME (R$ 3,90)
+        msg_status = bot.reply_to(message, f"🔎 Mapeando plataformas para @{target}...")
+        resultados = executar_varredura_osint(target, is_fullname=False)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
         try:
-            bot.edit_message_text(f"✅ Varredura concluída para '{target}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
+            bot.edit_message_text(f"✅ Mapeamento concluído para @{target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
         except Exception:
             pass
 
         if encontrados:
-            if is_fullname:
-                texto_resultado = (
-                    f"⚖️ REGISTROS JUDICIAIS E OFICIAIS IDENTIFICADOS PARA:\n"
-                    f"👉 **{target}**\n"
-                    f"───────────────────────────────\n\n"
-                    f"• Jusbrasil / Diários de Justiça\n"
-                    f"• Escavador / Processos Públicos\n"
-                    f"• Portal da Transparência / Sanções\n"
-                    f"• Diário Oficial da União (DOU)\n\n"
-                    f"Deseja liberar o Painel Interativo Web com os links diretos de consulta para cada tribunal e baixar o relatório completo?\n\n"
-                    f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3,90 no Pix!"
-                )
-            else:
-                lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
-                texto_resultado = (
-                    f"🎯 PLATAFORMAS ENCONTRADAS PARA @{target}\n"
-                    f"───────────────────────────────\n\n"
-                    f"{lista_plataformas}\n\n"
-                    f"Deseja liberar o Painel Interativo Web com os links clicáveis e o relatório TXT?\n\n"
-                    f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3,90 no Pix!"
-                )
+            lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+            texto_resultado = (
+                f"🎯 PLATAFORMAS ENCONTRADAS PARA @{target}\n"
+                f"───────────────────────────────\n\n"
+                f"{lista_plataformas}\n\n"
+                f"⚠️ Identificamos {len(encontrados)} contas ativas indexadas para este perfil.\n\n"
+                f"Deseja obter o Painel Interativo Web com os links clicáveis de cada perfil e relatório TXT?\n\n"
+                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3,90 no Pix!"
+            )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton("⚡ 🔓 LIBERAR RELATÓRIO COMPLETO (R$ 3,90) 🔓 ⚡", callback_data=f"buy_{target}")
+            btn_sim = InlineKeyboardButton("⚡ 🔓 SIM, QUERO O RELATÓRIO COMPLETO (R$ 3,90) 🔓 ⚡", callback_data=f"buy_{target}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="final_cancel")
             btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
             markup.add(btn_sim, btn_nao, btn_suporte)
 
-            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
         else:
-            bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhuma ocorrência direta localizada para '{target}'.")
+            bot.send_message(message.chat.id, f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{target}.")
 
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
@@ -723,21 +755,20 @@ if bot:
             user_id = call.from_user.id
             
             bot.answer_callback_query(call.id, "Gerando Chave Pix de R$ 3,90...")
-            qr_pix, qr_img_bytes, token = gerar_pix_mercadopago(user_id, target, valor=PRECO_VIP)
+            qr_pix, qr_img_bytes, token = gerar_pix_mercadopago(user_id, target, valor=PRECO_VIP_USERNAME, query_type="username")
 
             if qr_pix:
                 texto_oferta = (
-                    f"🔒 PACOTE KRONOS INTEL VIP — {target}\n"
+                    f"🔒 PACOTE KRONOS INTEL VIP — @{target}\n"
                     f"───────────────────────────────\n"
                     f"Você está liberando:\n"
-                    f"1. Painel Interativo Web (HTML) com links diretos\n"
-                    f"2. Opção de Download do Relatório Executivo (.TXT)\n"
-                    f"3. Dorks Judiciais e Bases de Processos\n"
-                    f"4. Checagem em Bases de Vazamentos\n\n"
+                    f"1. Painel Interativo Web com links diretos das redes\n"
+                    f"2. Relatório Executivo para Download (.TXT)\n"
+                    f"3. Checagem em Bases de Vazamentos (HIBP / IntelX)\n\n"
                     f"💰 Valor: De R$ 19,90 por R$ 3,90 no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
-                    f"⚡ O painel interativo será liberado automaticamente assim que o pagamento for confirmado."
+                    f"⚡ O painel interativo será liberado automaticamente após a confirmação do pagamento."
                 )
 
                 markup = InlineKeyboardMarkup(row_width=1)
@@ -749,12 +780,40 @@ if bot:
                     bot.send_photo(call.message.chat.id, photo=qr_img_bytes, caption=texto_oferta, reply_markup=markup)
                 else:
                     bot.send_message(call.message.chat.id, text=texto_oferta, reply_markup=markup)
-            else:
-                bot.send_message(call.message.chat.id, "⚠️ Erro ao gerar chave Pix. Tente novamente em instantes.")
+
+        elif call.data.startswith("buynome_"):
+            target = call.data.split("buynome_")[1]
+            user_id = call.from_user.id
+            
+            bot.answer_callback_query(call.id, "Gerando Chave Pix de R$ 2,90...")
+            qr_pix, qr_img_bytes, token = gerar_pix_mercadopago(user_id, target, valor=PRECO_VIP_PROCESSO, query_type="fullname")
+
+            if qr_pix:
+                texto_oferta = (
+                    f"⚖️ MÓDULO JUDICIAL VIP — {target.upper()}\n"
+                    f"───────────────────────────────\n"
+                    f"Você está liberando:\n"
+                    f"1. Painel Web exclusivo de Processos e Diários\n"
+                    f"2. Links diretos do Jusbrasil e Escavador\n"
+                    f"3. Relatório em TXT das ocorrências\n\n"
+                    f"💰 Valor Promocional: R$ 2,90 no Pix\n\n"
+                    f"Copie a chave Pix abaixo:\n\n"
+                    f"{qr_pix}\n\n"
+                    f"⚡ O painel será liberado automaticamente assim que pago."
+                )
+
+                markup = InlineKeyboardMarkup(row_width=1)
+                btn_copiar = InlineKeyboardButton("📋 Copiar Chave Pix (Texto)", callback_data=f"getkey_{user_id}")
+                markup.add(btn_copiar)
+
+                if qr_img_bytes:
+                    bot.send_photo(call.message.chat.id, photo=qr_img_bytes, caption=texto_oferta, reply_markup=markup)
+                else:
+                    bot.send_message(call.message.chat.id, text=texto_oferta, reply_markup=markup)
 
         elif call.data == "final_cancel":
             bot.answer_callback_query(call.id, "Consulta finalizada.")
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="👍 Entendido! Envie outro nome ou username quando quiser realizar uma nova pesquisa.")
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="👍 Entendido! Digite um username para iniciar uma nova busca.")
 
         elif call.data.startswith("getkey_"):
             bot.answer_callback_query(call.id, "Enviando chave...")
@@ -762,7 +821,7 @@ if bot:
             lines = msg_texto.split("\n\n") if msg_texto else []
             pix_key = None
             for l in lines:
-                if len(l) > 50 and not l.startswith("🔒") and not l.startswith("⚡"):
+                if len(l) > 50 and not l.startswith("🔒") and not l.startswith("⚡") and not l.startswith("⚖️"):
                     pix_key = l.strip()
                     break
             if pix_key:
@@ -802,7 +861,7 @@ def webhook():
 
         pid_str = str(payment_id)
         
-        p_check = db_execute("SELECT status, token FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
+        p_check = db_execute("SELECT status, token, query_type FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
         if p_check and p_check[0] == "approved":
             return jsonify({"status": "ok"}), 200
 
@@ -814,12 +873,14 @@ def webhook():
                     telegram_id = metadata.get("telegram_user_id")
                     target = metadata.get("target_username", "alvo")
                     token_relatorio = metadata.get("token") or secrets.token_urlsafe(16)
+                    query_type = metadata.get("query_type", "username")
 
-                    resultados = executar_varredura_osint(target)
+                    is_fullname = (query_type == "fullname")
+                    resultados = executar_varredura_osint(target, is_fullname=is_fullname)
                     results_json = json.dumps(resultados)
 
-                    db_execute("UPDATE payments SET status = 'approved', token = ?, results_json = ? WHERE payment_id = ?",
-                               (token_relatorio, results_json, pid_str), commit=True)
+                    db_execute("UPDATE payments SET status = 'approved', token = ?, results_json = ?, query_type = ? WHERE payment_id = ?",
+                               (token_relatorio, results_json, query_type, pid_str), commit=True)
 
                     if telegram_id and bot:
                         link_web = f"{WEB_BASE_URL.rstrip('/')}/relatorio/{token_relatorio}"
@@ -829,19 +890,30 @@ def webhook():
 
                         bot.send_message(
                             telegram_id,
-                            f"⚡ PAGAMENTO CONFIRMADO — PACOTE KRONOS INTEL VIP\n\n"
-                            f"Seu relatório executivo para **{target}** foi gerado com sucesso!\n\n"
-                            f"🔗 Clique no botão abaixo para acessar o painel no navegador:",
+                            f"⚡ PAGAMENTO CONFIRMADO — KRONOS INTEL VIP\n\n"
+                            f"Seu painel para **{target}** está liberado!\n\n"
+                            f"🔗 Clique no botão abaixo para acessar:",
                             reply_markup=markup,
                             parse_mode="Markdown"
                         )
 
-                        doc_txt = construir_relatorio_osint(target, resultados)
+                        doc_txt = construir_relatorio_osint(target, resultados, is_fullname=is_fullname)
                         registrar_relatorio()
                         enviar_relatorio_espelho_admin(target, doc_txt, telegram_id, "VENDA PIX APROVADA")
 
+                        # --- GATILHO DE UPSELL AUTOMÁTICO (ENVIADO APÓS PAGAR O RELATÓRIO DE USERNAME) ---
+                        if not is_fullname:
+                            time.sleep(2)
+                            msg_upsell = (
+                                f"💡 **DESEJA SABER SE ESTE ALVO TEM PROCESSOS JUDICIAIS?**\n\n"
+                                f"Geralmente quem utiliza o username **{target}** possui nome completo citado no Jusbrasil, Escavador ou Diários Oficiais.\n\n"
+                                f"⚖️ Para realizar a **Varredura Judicial Completa**, digite abaixo o **Nome Completo** da pessoa.\n\n"
+                                f"🔥 *Como você já é cliente VIP, liberamos este módulo adicional por apenas R$ 2,90 no Pix!*"
+                            )
+                            bot.send_message(telegram_id, msg_upsell, parse_mode="Markdown")
+
                     if bot and ADMIN_ID:
-                        bot.send_message(ADMIN_ID, f"💰 NOVA VENDA APROVADA!\n• Valor: R$ 3,90 (Pix)\n• Alvo: {target}\n• Comprador: {telegram_id}")
+                        bot.send_message(ADMIN_ID, f"💰 NOVA VENDA APROVADA!\n• Valor: R$ {payment_info.get('transaction_amount', 0.0):.2f}\n• Tipo: {query_type}\n• Alvo: {target}\n• Comprador: {telegram_id}")
 
             except Exception as e:
                 logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
@@ -853,7 +925,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v6.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v7.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
