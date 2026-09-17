@@ -1,5 +1,6 @@
 """
-Kronos Intel OSINT Bot v14.0
+Kronos Intel OSINT Bot v14.1
+- Tratamento contra exceção 400 'message to be replied not found' via responder_seguro()
 - Validação Estrita no /user:
   - Bloqueia e-mails, nomes completos (espaços), URLs/Links
   - Bloqueia arquivos, PDFs, imagens, fotos, vídeos, áudios e mídias
@@ -217,11 +218,22 @@ def e_nome_completo(termo: str) -> bool:
 
 def e_url(termo: str) -> bool:
     padrao_url = re.compile(
-        r'^(?:http|ftp)s?://'  # http:// ou https://
-        r'|(?:www\.)'          # www.
-        r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)' # domínios
+        r'^(?:http|ftp)s?://'
+        r'|(?:www\.)'
+        r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)'
     , re.IGNORECASE)
     return bool(padrao_url.search(termo))
+
+def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
+    """Envia resposta com reply_to, mas recorre ao send_message caso a mensagem original tenha sido apagada."""
+    try:
+        return bot.reply_to(message, texto, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception:
+        try:
+            return bot.send_message(message.chat.id, texto, parse_mode=parse_mode, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error("Erro ao enviar mensagem para chat %s: %s", message.chat.id, str(e))
+            return None
 
 def orientar_uso_correto(chat_id: int):
     msg_guia = (
@@ -234,7 +246,10 @@ def orientar_uso_correto(chat_id: int):
         "3️⃣ **Para buscar por E-mail (Vazamentos):**\n"
         "• Use: `/email exemplo@dominio.com`"
     )
-    bot.send_message(chat_id, msg_guia, parse_mode="Markdown")
+    try:
+        bot.send_message(chat_id, msg_guia, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("Erro ao enviar orientação de uso para %s: %s", chat_id, str(e))
 
 # --- MOTOR OSINT PARALELO ---
 class FastOSINTChecker:
@@ -329,7 +344,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v14.0
+SISTEMA: Kronos Engine v14.1
 ===================================================================
 """
     if is_email:
@@ -701,7 +716,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v14.0**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v14.1**.\n\n"
             f"Sua plataforma avançada para investigação digital, inteligência cibernética e mapeamento de dados públicos.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -728,7 +743,7 @@ if bot:
     # BLOCK DE MÍDIAS, DOCUMENTOS, PDFS E FOTOS FORA DO ESCOPO
     @bot.message_handler(content_types=['document', 'photo', 'audio', 'video', 'voice', 'sticker'])
     def handle_invalid_media(message):
-        bot.reply_to(message, "⚠️ **Comando Inválido!**\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos para consultas de username.", parse_mode="Markdown")
+        responder_seguro(message, "⚠️ **Comando Inválido!**\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos para consultas de username.", parse_mode="Markdown")
         orientar_uso_correto(message.chat.id)
 
     @bot.message_handler(commands=['user'])
@@ -738,7 +753,7 @@ if bot:
 
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
-            bot.reply_to(message, "⚠️ **Comando Incompleto!**\nEnvie o username após o comando `/user`.\nExemplo: `/user alvo123`", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o username após o comando `/user`.\nExemplo: `/user alvo123`", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -746,18 +761,19 @@ if bot:
 
         # VALIDAÇÃO ESTRITA DE ESCOPO USERNAME (Sem e-mail, sem espaço/nome completo e sem URLs/links)
         if "@" in target_user or " " in target_user or e_url(target_user):
-            bot.reply_to(message, "⚠️ **Comando Inválido!**\nO comando `/user` aceita apenas nomes de usuário (sem e-mails, sem URLs/links e sem espaços).", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ **Comando Inválido!**\nO comando `/user` aceita apenas nomes de usuário (sem e-mails, sem URLs/links e sem espaços).", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
-        msg_status = bot.reply_to(message, f"🔎 Mapeando plataformas para @{target_user}...")
+        msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target_user}...")
         resultados = executar_varredura_osint(target_user, is_fullname=False, is_email=False)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
-        try:
-            bot.edit_message_text(f"✅ Mapeamento concluído para @{target_user}!", chat_id=message.chat.id, message_id=msg_status.message_id)
-        except Exception:
-            pass
+        if msg_status:
+            try:
+                bot.edit_message_text(f"✅ Mapeamento concluído para @{target_user}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
 
         if encontrados:
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
@@ -792,23 +808,24 @@ if bot:
 
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
-            bot.reply_to(message, "⚠️ Envie o nome completo após o comando.\nExemplo: `/nome João da Silva`", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Envie o nome completo após o comando.\nExemplo: `/nome João da Silva`", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
         nome_alvo = partes[1].strip()
         if not e_nome_completo(nome_alvo) or e_url(nome_alvo):
-            bot.reply_to(message, "⚠️ Digite o nome e sobrenome completo (sem links ou e-mails).")
+            responder_seguro(message, "⚠️ Digite o nome e sobrenome completo (sem links ou e-mails).")
             orientar_uso_correto(message.chat.id)
             return
 
-        msg_status = bot.reply_to(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{nome_alvo}'...")
+        msg_status = responder_seguro(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{nome_alvo}'...")
         resultados = executar_varredura_osint(nome_alvo, is_fullname=True)
         
-        try:
-            bot.edit_message_text(f"✅ Análise de registros judiciais concluída para '{nome_alvo}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
-        except Exception:
-            pass
+        if msg_status:
+            try:
+                bot.edit_message_text(f"✅ Análise de registros judiciais concluída para '{nome_alvo}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
 
         texto_oferta = (
             f"🔍 REGISTROS JUDICIAIS LOCALIZADOS PARA:\n"
@@ -834,7 +851,7 @@ if bot:
 
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2 or "@" not in partes[1] or e_url(partes[1]):
-            bot.reply_to(message, "⚠️ Envie um e-mail válido após o comando.\nExemplo: `/email alvo@gmail.com`", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Envie um e-mail válido após o comando.\nExemplo: `/email alvo@gmail.com`", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -901,14 +918,14 @@ if bot:
 
         partes = message.text.strip().split(maxsplit=2)
         if len(partes) < 3:
-            bot.reply_to(message, "⚠️ Uso incorreto!\nFormato correto: /conceder <user_id> <termo_alvo>")
+            responder_seguro(message, "⚠️ Uso incorreto!\nFormato correto: /conceder <user_id> <termo_alvo>")
             return
 
         try:
             target_user_id = int(partes[1])
             alvo = partes[2].strip()
         except ValueError:
-            bot.reply_to(message, "⚠️ ID de usuário inválido.")
+            responder_seguro(message, "⚠️ ID de usuário inválido.")
             return
 
         is_fullname = e_nome_completo(alvo)
@@ -939,9 +956,9 @@ if bot:
                 f"🔗 Clique no botão abaixo para acessar o painel:",
                 reply_markup=markup
             )
-            bot.reply_to(message, f"✅ Acesso cortesia concedido com sucesso!\n• Usuário: {target_user_id}\n• Alvo: {alvo}")
+            responder_seguro(message, f"✅ Acesso cortesia concedido com sucesso!\n• Usuário: {target_user_id}\n• Alvo: {alvo}")
         except Exception as e:
-            bot.reply_to(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário {target_user_id}.\nLink do painel: {link_web}")
+            responder_seguro(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário {target_user_id}.\nLink do painel: {link_web}")
 
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
@@ -966,12 +983,12 @@ if bot:
                 is_email = ("@" in target)
 
             if len(target) < 2:
-                bot.reply_to(message, "⚠️ Termo de busca muito curto para modo Admin.")
+                responder_seguro(message, "⚠️ Termo de busca muito curto para modo Admin.")
                 return
 
             qtype = "email" if is_email else ("fullname" if is_fullname else "username")
 
-            msg_status = bot.reply_to(message, f"👑 [ADMIN VIP - {qtype.upper()}] Processando {target}...")
+            msg_status = responder_seguro(message, f"👑 [ADMIN VIP - {qtype.upper()}] Processando {target}...")
             resultados = executar_varredura_osint(target, is_fullname=is_fullname, is_email=is_email)
             results_json = json.dumps(resultados)
             token_relatorio = secrets.token_urlsafe(16)
@@ -984,10 +1001,11 @@ if bot:
             )
             registrar_relatorio()
 
-            try:
-                bot.edit_message_text(f"✅ Varredura Módulo {qtype.upper()} concluída para {target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
+            if msg_status:
+                try:
+                    bot.edit_message_text(f"✅ Varredura Módulo {qtype.upper()} concluída para {target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+                except Exception:
+                    pass
 
             link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
             markup = InlineKeyboardMarkup(row_width=1)
@@ -1004,25 +1022,26 @@ if bot:
 
         # SE O USUÁRIO DIGITAR UMA URL DIRETA NO CHAT
         if e_url(target):
-            bot.reply_to(message, "⚠️ **Comando Inválido!**\nBusca por URLs/links diretos não são aceitas. Digite apenas o username, /nome ou /email.", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ **Comando Inválido!**\nBusca por URLs/links diretos não são aceitas. Digite apenas o username, /nome ou /email.", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
         if len(target) < 2:
-            bot.reply_to(message, "⚠️ Termo de busca muito curto.")
+            responder_seguro(message, "⚠️ Termo de busca muito curto.")
             return
 
         is_fullname = e_nome_completo(target)
         is_email = ("@" in target)
 
         if is_fullname:
-            msg_status = bot.reply_to(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{target}'...")
+            msg_status = responder_seguro(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{target}'...")
             resultados = executar_varredura_osint(target, is_fullname=True)
             
-            try:
-                bot.edit_message_text(f"✅ Análise de registros judiciais concluída para '{target}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
+            if msg_status:
+                try:
+                    bot.edit_message_text(f"✅ Análise de registros judiciais concluída para '{target}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
+                except Exception:
+                    pass
 
             texto_upsell_oferta = (
                 f"🔍 REGISTROS JUDICIAIS LOCALIZADOS PARA:\n"
@@ -1067,14 +1086,15 @@ if bot:
             return
 
         # BUSCA PADRÃO DE USERNAME
-        msg_status = bot.reply_to(message, f"🔎 Mapeando plataformas para @{target}...")
+        msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target}...")
         resultados = executar_varredura_osint(target, is_fullname=False, is_email=False)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
-        try:
-            bot.edit_message_text(f"✅ Mapeamento concluído para @{target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
-        except Exception:
-            pass
+        if msg_status:
+            try:
+                bot.edit_message_text(f"✅ Mapeamento concluído para @{target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
+            except Exception:
+                pass
 
         if encontrados:
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
@@ -1269,7 +1289,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v14.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v14.1 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
