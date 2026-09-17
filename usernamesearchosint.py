@@ -1,9 +1,8 @@
 """
-Kronos Intel OSINT Bot v7.0
-- Funil de Vendas com Upsell Condicional (Somente pós-pagamento)
-- Etapa 1: Relatório de Username / Redes Sociais / Leaks (R$ 3,90)
-- Etapa 2 (Upsell): Consulta por Nome Completo / Processos / Jusbrasil (R$ 2,90)
-- Painéis Web Separados para Username e Nome Completo
+Kronos Intel OSINT Bot v7.1
+- Suporte a Modo ADMIN para Módulo Judicial (Nome Completo)
+- Dashboard HTML Redesenho Premium Neon Dark OSINT
+- Funil de Vendas com Upsell Condicional (Username R$ 3,90 / Processos R$ 2,90)
 - Exclusivo Download em TXT
 - URL Base: https://usernameosint-1-vcj4.onrender.com
 """
@@ -28,7 +27,7 @@ import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
-from flask import Flask, jsonify, request, render_template_string, Response, send_file
+from flask import Flask, jsonify, request, render_template_string, send_file
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -254,7 +253,7 @@ def executar_varredura_osint(target: str, is_fullname: bool = False) -> dict[str
         return {
             "Jusbrasil (Processos)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
             "Escavador (Diários)": {"exists": True, "url": f"https://www.escavador.com/busca?q={encoded_name}"},
-            "Jusfy / Diários": {"exists": True, "url": f"https://www.google.com/search?q=site:jusbrasil.com.br+OR+site:escavador.com+{encoded_name}"},
+            "Jusfy / Diários Judiciais": {"exists": True, "url": f"https://www.google.com/search?q=site:jusbrasil.com.br+OR+site:escavador.com+{encoded_name}"},
             "Portal Transparência": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target)}"},
             "Diário Oficial União": {"exists": True, "url": f"https://www.google.com/search?q=site:in.gov.br+{encoded_name}"},
             "Certidões e Registros": {"exists": True, "url": f"https://www.google.com/search?q=%22certidao%22+{encoded_name}"},
@@ -273,9 +272,9 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
                    KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT
 ===================================================================
 ALVO ANALISADO: {target}
-TIPO DE CONSULTA: {"PRORESSOS JUDICIAIS / NOME COMPLETO" if is_fullname else "USERNAME / REDES SOCIAIS"}
+TIPO DE CONSULTA: {"PROCESSOS JUDICIAIS / NOME COMPLETO" if is_fullname else "USERNAME / REDES SOCIAIS"}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v7.0
+SISTEMA: Kronos Engine v7.1
 ===================================================================
 
 1. FONTES E REGISTROS MAPEADOS
@@ -381,44 +380,46 @@ def worker_remarketing_pix():
 
 Thread(target=worker_remarketing_pix, daemon=True).start()
 
-# --- TEMPLATE HTML DASHBOARD ---
+# --- TEMPLATE HTML DASHBOARD PREMIUM ---
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kronos Intel — Painel OSINT</title>
+    <title>Kronos Intel — Painel Executivo OSINT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <style>
         :root {
-            --bg-color: #0b0f19;
-            --card-bg: rgba(22, 27, 34, 0.85);
-            --border-color: #30363d;
-            --accent-blue: #00f0ff;
-            --accent-green: #00ff87;
-            --text-main: #e6edf3;
+            --bg-color: #080c14;
+            --card-bg: rgba(15, 23, 42, 0.85);
+            --border-color: #1e293b;
+            --accent-cyan: #06b6d4;
+            --accent-green: #10b981;
+            --text-main: #f8fafc;
+            --text-muted: #64748b;
         }
 
         body {
             background-color: var(--bg-color);
-            background-image: radial-gradient(circle at 50% 0%, rgba(0, 240, 255, 0.08), transparent 70%);
+            background-image: radial-gradient(circle at 50% 0%, rgba(6, 182, 212, 0.12), transparent 75%);
             color: var(--text-main);
-            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             min-height: 100vh;
         }
 
         .navbar {
-            background-color: rgba(13, 17, 23, 0.9);
-            backdrop-filter: blur(10px);
+            background-color: rgba(8, 12, 20, 0.9);
+            backdrop-filter: blur(12px);
             border-bottom: 1px solid var(--border-color);
         }
 
         .navbar-brand {
             font-family: monospace;
             font-weight: 700;
-            color: var(--accent-blue) !important;
+            letter-spacing: 1px;
+            color: var(--accent-cyan) !important;
         }
 
         .card-custom {
@@ -426,22 +427,24 @@ HTML_DASHBOARD_TEMPLATE = """
             backdrop-filter: blur(12px);
             border: 1px solid var(--border-color);
             border-radius: 16px;
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
             margin-bottom: 24px;
         }
 
         .card-header-custom {
-            background: rgba(255, 255, 255, 0.03);
+            background: rgba(255, 255, 255, 0.02);
             border-bottom: 1px solid var(--border-color);
             padding: 16px 20px;
             font-family: monospace;
             font-weight: 600;
+            color: var(--accent-cyan);
         }
 
         .btn-platform {
-            background: rgba(255, 255, 255, 0.03);
+            background: rgba(255, 255, 255, 0.02);
             border: 1px solid var(--border-color);
             color: var(--text-main);
-            padding: 12px 16px;
+            padding: 14px 18px;
             border-radius: 12px;
             text-decoration: none;
             display: flex;
@@ -451,16 +454,17 @@ HTML_DASHBOARD_TEMPLATE = """
         }
 
         .btn-platform:hover {
-            background: rgba(0, 255, 135, 0.1);
+            background: rgba(16, 185, 129, 0.1);
             border-color: var(--accent-green);
             color: var(--accent-green);
+            transform: translateY(-2px);
         }
 
         .btn-dork {
-            background: rgba(0, 240, 255, 0.05);
-            border: 1px solid rgba(0, 240, 255, 0.2);
-            color: var(--accent-blue);
-            padding: 10px 16px;
+            background: rgba(6, 182, 212, 0.05);
+            border: 1px solid rgba(6, 182, 212, 0.2);
+            color: var(--accent-cyan);
+            padding: 12px 18px;
             border-radius: 10px;
             text-decoration: none;
             display: flex;
@@ -469,20 +473,21 @@ HTML_DASHBOARD_TEMPLATE = """
         }
 
         .btn-dork:hover {
-            background: rgba(0, 240, 255, 0.2);
+            background: rgba(6, 182, 212, 0.2);
             color: #fff;
+            transform: translateX(4px);
         }
 
         .code-tag {
             font-family: monospace;
-            color: var(--accent-blue);
+            color: var(--accent-cyan);
         }
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-dark sticky-top mb-4">
+    <nav class="navbar navbar-dark sticky-top mb-4 py-3">
         <div class="container">
-            <span class="navbar-brand h1 mb-0"><i class="bi bi-shield-shaded me-2"></i>KRONOS_INTEL // OSINT</span>
+            <span class="navbar-brand h1 mb-0"><i class="bi bi-shield-lock-fill me-2"></i>KRONOS_INTEL // OSINT</span>
             <a href="/download/txt/{{ token }}" class="btn btn-outline-info btn-sm rounded-3"><i class="bi bi-file-earmark-text me-1"></i> BAIXAR RELATÓRIO (.TXT)</a>
         </div>
     </nav>
@@ -490,8 +495,8 @@ HTML_DASHBOARD_TEMPLATE = """
     <div class="container pb-5">
         <div class="card-custom">
             <div class="card-body p-4">
-                <span class="text-uppercase text-muted small code-tag">[ ALVO ANALISADO ]</span>
-                <h2 class="text-white mb-1 font-monospace"><i class="bi bi-terminal me-2"></i>{{ target }}</h2>
+                <span class="text-uppercase text-muted small code-tag">[ ALVO SELECIONADO ]</span>
+                <h2 class="text-white mb-1 font-monospace"><i class="bi bi-terminal-fill me-2 text-cyan"></i>{{ target }}</h2>
                 <p class="text-muted mb-0 small"><i class="bi bi-clock me-1"></i> Auditado em: {{ data_atual }} | Módulo: {{ query_type }}</p>
             </div>
         </div>
@@ -500,7 +505,7 @@ HTML_DASHBOARD_TEMPLATE = """
             <div class="col-lg-{% if is_fullname %}12{% else %}7{% endif %}">
                 <div class="card-custom">
                     <div class="card-header-custom text-uppercase">
-                        <i class="bi bi-diagram-3 me-2 text-primary"></i>{% if is_fullname %}Bases de Processos e Diários Oficiais{% else %}Perfis e Plataformas Mapeadas{% endif %}
+                        <i class="bi bi-diagram-3-fill me-2"></i>{% if is_fullname %}Mapeamento Judicial e Diários Oficiais{% else %}Perfis e Plataformas Mapeadas{% endif %}
                     </div>
                     <div class="card-body p-4">
                         {% if encontrados %}
@@ -508,8 +513,8 @@ HTML_DASHBOARD_TEMPLATE = """
                             {% for p in encontrados %}
                             <div class="col-md-6">
                                 <a href="{{ p.url }}" target="_blank" class="btn-platform">
-                                    <span><i class="bi bi-link-45deg me-2 code-tag"></i>{{ p.nome }}</span>
-                                    <i class="bi bi-box-arrow-up-right small"></i>
+                                    <span><i class="bi bi-box-arrow-up-right me-2 code-tag"></i>{{ p.nome }}</span>
+                                    <i class="bi bi-chevron-right small"></i>
                                 </a>
                             </div>
                             {% endfor %}
@@ -598,7 +603,7 @@ if bot:
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v7.0\n\n"
+            f"👋 Kronos Intel — OSINT Bot v7.1\n\n"
             f"Envie o **nome de usuário (username)** desejado para mapear contas ativas e vazamentos na internet.\n"
             f"Exemplo: `alvo123`\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}",
@@ -648,18 +653,7 @@ if bot:
 
         is_fullname = e_nome_completo(target)
 
-        # SE O USUÁRIO ENVIAR NOME COMPLETO SEM TER PAGO O RELATÓRIO ANTERIOR
-        if is_fullname and not usuario_ja_pagou_relatorio_anterior(user_id) and user_id != ADMIN_ID:
-            bot.reply_to(
-                message,
-                "⚠️ **Acesso Restrito ao Módulo Judicial.**\n\n"
-                "A pesquisa por Nome Completo e Busca de Processos está disponível exclusivamente para clientes VIP.\n"
-                "Envie primeiro um **username** para realizar uma varredura de redes sociais.",
-                parse_mode="Markdown"
-            )
-            return
-
-        # FLUXO ADMIN
+        # FLUXO ADMIN (SUPORTA TANTO USERNAME QUANTO NOME COMPLETO SEM BLOQUEIO)
         if eh_admin_mode:
             msg_status = bot.reply_to(message, f"👑 [ADMIN VIP] Processando {target}...")
             resultados = executar_varredura_osint(target, is_fullname=is_fullname)
@@ -685,8 +679,19 @@ if bot:
 
             bot.send_message(
                 message.chat.id,
-                f"👑 [MODO ADMIN] Painel Interativo Web gerado para {target}:",
+                f"👑 [MODO ADMIN - {"PROCESSOS" if is_fullname else "USERNAME"}] Painel Web gerado para {target}:",
                 reply_markup=markup
+            )
+            return
+
+        # SE O USUÁRIO COMUM ENVIAR NOME COMPLETO SEM TER PAGO O RELATÓRIO ANTERIOR
+        if is_fullname and not usuario_ja_pagou_relatorio_anterior(user_id):
+            bot.reply_to(
+                message,
+                "⚠️ **Acesso Restrito ao Módulo Judicial.**\n\n"
+                "A pesquisa por Nome Completo e Busca de Processos está disponível exclusivamente para clientes VIP.\n"
+                "Envie primeiro um **username** para realizar uma varredura de redes sociais.",
+                parse_mode="Markdown"
             )
             return
 
@@ -925,7 +930,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v7.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v7.1 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
