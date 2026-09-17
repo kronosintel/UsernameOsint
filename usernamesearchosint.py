@@ -1,9 +1,11 @@
 """
-Kronos Intel OSINT Bot v7.1
-- Suporte a Modo ADMIN para Módulo Judicial (Nome Completo)
-- Dashboard HTML Redesenho Premium Neon Dark OSINT
+Kronos Intel OSINT Bot v7.2
+- Notificação ao Admin quando alguém dá /start
+- Função /conceder <user_id> <alvo> para liberar acesso cortesia
+- Correção na inicialização do /start
 - Funil de Vendas com Upsell Condicional (Username R$ 3,90 / Processos R$ 2,90)
 - Exclusivo Download em TXT
+- Dashboard HTML Redesenho Premium Neon Dark OSINT
 - URL Base: https://usernameosint-1-vcj4.onrender.com
 """
 from __future__ import annotations
@@ -274,7 +276,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {"PROCESSOS JUDICIAIS / NOME COMPLETO" if is_fullname else "USERNAME / REDES SOCIAIS"}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v7.1
+SISTEMA: Kronos Engine v7.2
 ===================================================================
 
 1. FONTES E REGISTROS MAPEADOS
@@ -599,16 +601,83 @@ if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
         user_id = message.from_user.id
+        user_name = message.from_user.first_name or "Usuário"
+        username_tag = f"@{message.from_user.username}" if message.from_user.username else "Sem username"
+        
         registrar_acesso(user_id)
+
+        # NOTIFICAÇÃO AO ADMIN SOBRE NOVO START
+        if bot and ADMIN_ID and user_id != ADMIN_ID:
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🔔 **NOVO ACESSO NO BOT!**\n\n"
+                    f"👤 **Nome:** {user_name}\n"
+                    f"🏷 **User:** {username_tag}\n"
+                    f"🆔 **ID:** `{user_id}`",
+                    parse_mode="Markdown"
+                )
+            except Exception as ex:
+                logger.error("Erro ao notificar start ao admin: %s", str(ex))
 
         bot.reply_to(
             message,
-            f"👋 Kronos Intel — OSINT Bot v7.1\n\n"
+            f"👋 Kronos Intel — OSINT Bot v7.2\n\n"
             f"Envie o **nome de usuário (username)** desejado para mapear contas ativas e vazamentos na internet.\n"
             f"Exemplo: `alvo123`\n\n"
             f"🛠 Suporte: @{SUPORTE_USERNAME}",
             parse_mode="Markdown"
         )
+
+    @bot.message_handler(commands=['conceder'])
+    def handle_conceder_command(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+
+        partes = message.text.strip().split(maxsplit=2)
+        if len(partes) < 3:
+            bot.reply_to(message, "⚠️ **Uso incorreto!**\nFormato correto: `/conceder <user_id> <termo_alvo>`", parse_mode="Markdown")
+            return
+
+        try:
+            target_user_id = int(partes[1])
+            alvo = partes[2].strip()
+        except ValueError:
+            bot.reply_to(message, "⚠️ ID de usuário inválido.")
+            return
+
+        is_fullname = e_nome_completo(alvo)
+        qtype = "fullname" if is_fullname else "username"
+
+        resultados = executar_varredura_osint(alvo, is_fullname=is_fullname)
+        results_json = json.dumps(resultados)
+        token_relatorio = secrets.token_urlsafe(16)
+        pid_cortesia = f"cortesia_{int(time.time())}"
+
+        db_execute(
+            "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, query_type, results_json, created_at) VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?)",
+            (pid_cortesia, target_user_id, alvo, token_relatorio, qtype, results_json, datetime.now().isoformat()),
+            commit=True
+        )
+        registrar_relatorio()
+
+        link_web = f"{WEB_BASE_URL.rstrip('/')}/relatorio/{token_relatorio}"
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Seu Painel VIP Concedido", url=link_web))
+
+        # TENTA ENVIAR A MENSAGEM PARA O USUÁRIO BENEFICIADO
+        try:
+            bot.send_message(
+                target_user_id,
+                f"🎁 **VOCÊ RECEBEU UM ACESSO CORTESIA VIP!**\n\n"
+                f"A sua consulta para **{alvo}** foi liberada gratuitamente pelo administrador.\n\n"
+                f"🔗 Clique no botão abaixo para acessar o painel:",
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            bot.reply_to(message, f"✅ **Acesso cortesia concedido com sucesso!**\n• Usuário: `{target_user_id}`\n• Alvo: {alvo}", parse_mode="Markdown")
+        except Exception as e:
+            bot.reply_to(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário `{target_user_id}` (ele pode ter bloqueado o bot).\nLink do painel: {link_web}", parse_mode="Markdown")
 
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
@@ -679,7 +748,7 @@ if bot:
 
             bot.send_message(
                 message.chat.id,
-                f"👑 [MODO ADMIN - {"PROCESSOS" if is_fullname else "USERNAME"}] Painel Web gerado para {target}:",
+                f"👑 [MODO ADMIN - {'PROCESSOS' if is_fullname else 'USERNAME'}] Painel Web gerado para {target}:",
                 reply_markup=markup
             )
             return
@@ -930,7 +999,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v7.1 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v7.2 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
