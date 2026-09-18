@@ -1,8 +1,9 @@
 """
-Kronos Intel OSINT Bot v16.4
-- ID fixo do Grupo de Logs & Financeiro atualizado para -1003986408630
-- Correção de fuso horário para Brasília (America/Sao_Paulo / UTC-3)
-- Relatório TXT para /user com filtro estrito de perfis encontrados
+Kronos Intel OSINT Bot v16.5
+- Comando /stats envia o relatório financeiro/métricas EXCLUSIVAMENTE para o grupo de logs/financeiro
+- ID fixo do Grupo de Logs & Financeiro: -1003986408630
+- Fuso horário ajustado para Brasília (America/Sao_Paulo / UTC-3)
+- Relatório TXT para /user com filtro estrito de perfis confirmados
 - Dashboard Web VIP modernizado
 """
 from __future__ import annotations
@@ -367,7 +368,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v16.4
+SISTEMA: Kronos Engine v16.5
 ===================================================================
 """
     if is_email:
@@ -759,7 +760,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.4**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.5**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -936,7 +937,7 @@ if bot:
 
         bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
 
-    # --- COMANDO /stats COM HORÁRIO DE BRASÍLIA ---
+    # --- COMANDO /stats (ENVIO EXCLUSIVO PARA O GRUPO DE LOGS) ---
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -967,16 +968,20 @@ if bot:
             f"📅 **Solicitado em:** {data_hora_solicitacao}"
         )
 
-        # Envia no Chat do Administrador
-        bot.send_message(message.chat.id, relatorio_financeiro, parse_mode="Markdown")
-
         grupo_target = obter_grupo_logs_id()
-        if message.chat.id != grupo_target:
-            try:
-                bot.send_message(grupo_target, relatorio_financeiro, parse_mode="Markdown")
-                logger.info("Relatório de estatísticas enviado para o grupo: %s", grupo_target)
-            except Exception as e:
-                logger.error("Falha ao enviar relatório para o grupo (%s): %s", grupo_target, str(e))
+        
+        try:
+            bot.send_message(grupo_target, relatorio_financeiro, parse_mode="Markdown")
+            logger.info("Relatório de estatísticas enviado com sucesso para o grupo: %s", grupo_target)
+            if message.chat.type == 'private':
+                bot.reply_to(message, "✅ Relatório de estatísticas enviado diretamente para o grupo de logs/financeiro.")
+        except Exception as e:
+            logger.error("Falha ao enviar relatório para o grupo (%s): %s", grupo_target, str(e))
+            bot.reply_to(
+                message,
+                f"⚠️ **Erro ao enviar para o grupo ({grupo_target}):** Verifique se o bot é administrador do grupo.",
+                parse_mode="Markdown"
+            )
 
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_command(message):
@@ -1357,7 +1362,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v16.4 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v16.5 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
