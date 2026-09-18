@@ -1,9 +1,9 @@
 """
-Kronos Intel OSINT Bot v16.2
-- Correção de envio ao Grupo de Logs/Financeiro (-1005294217144)
-- Diagnóstico com fallback automatizado para ID de Supergrupo Telegram
-- Relatório TXT para /user com filtro estrito de redes ativas
-- Dashboard Web modernizado
+Kronos Intel OSINT Bot v16.3
+- Captura e salvamento dinâmico do ID do Grupo de Logs/Financeiro via banco SQLite
+- Adicionado comando /setgrupo para vinculo instantâneo no grupo correto
+- Relatório TXT para /user com filtro exclusivo de perfis encontrados
+- Dashboard Web VIP modernizado
 """
 from __future__ import annotations
 
@@ -46,10 +46,8 @@ PRECO_PADRAO = 3.90
 DB_FILE = "kronos_osint.db"
 db_lock = Lock()
 
-# --- CONFIGURAÇÃO DE CANAL E GRUPO DE LOGS (IDs FORMATO SUPERGRUPO) ---
+# --- CONFIGURAÇÃO DE CANAL E GRUPO DE LOGS ---
 CANAL_PRINCIPAL_ID = int(os.getenv("CANAL_PRINCIPAL_ID", "-1003802363624"))
-GRUPO_LOGS_ID_RAW = os.getenv("GRUPO_LOGS_ID", "-1005294217144")
-GRUPO_LOGS_ID = int(GRUPO_LOGS_ID_RAW) if GRUPO_LOGS_ID_RAW.startswith("-100") else int(f"-100{GRUPO_LOGS_ID_RAW.lstrip('-')}")
 CANAL_TAG_PUBLICO = "@kronosintel_oficial"
 
 # --- BANCO DE DADOS SQLITE ---
@@ -83,6 +81,12 @@ def init_db():
                 value INTEGER DEFAULT 0
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS config (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
         conn.commit()
@@ -104,6 +108,22 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
             conn.commit()
         conn.close()
         return res
+
+def obter_grupo_logs_id() -> int:
+    cfg = db_execute("SELECT value FROM config WHERE key = 'grupo_logs_id'", fetchone=True)
+    if cfg and cfg[0]:
+        try:
+            return int(cfg[0])
+        except ValueError:
+            pass
+    env_id = os.getenv("GRUPO_LOGS_ID", "-5294217144")
+    try:
+        return int(env_id)
+    except ValueError:
+        return -5294217144
+
+def salvar_grupo_logs_id(chat_id: int):
+    db_execute("INSERT INTO config (key, value) VALUES ('grupo_logs_id', ?) ON CONFLICT(key) DO UPDATE SET value = ?", (str(chat_id), str(chat_id)), commit=True)
 
 # --- CONFIGURAÇÃO BOT & MERCADO PAGO ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
@@ -348,7 +368,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v16.2
+SISTEMA: Kronos Engine v16.3
 ===================================================================
 """
     if is_email:
@@ -708,6 +728,12 @@ def download_txt(token):
 
 # --- HANDLERS TELEGRAM ---
 if bot:
+    @bot.message_handler(commands=['setgrupo'])
+    def handle_set_grupo(message):
+        if message.chat.type in ['group', 'supergroup']:
+            salvar_grupo_logs_id(message.chat.id)
+            bot.reply_to(message, f"✅ **GRUPO REGISTRADO COM SUCESSO!**\n\nEste grupo (ID `{message.chat.id}`) foi configurado como o **Grupo Oficial de Logs & Financeiro** do bot.", parse_mode="Markdown")
+
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
         user_id = message.from_user.id
@@ -728,7 +754,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.2**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.3**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -753,6 +779,9 @@ if bot:
 
     @bot.message_handler(content_types=['document', 'photo', 'audio', 'video', 'voice', 'sticker'])
     def handle_invalid_media(message):
+        if message.chat.type in ['group', 'supergroup']:
+            salvar_grupo_logs_id(message.chat.id)
+            return
         responder_seguro(message, "⚠️ **Comando Inválido!**\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos.", parse_mode="Markdown")
         orientar_uso_correto(message.chat.id)
 
@@ -908,6 +937,9 @@ if bot:
         if message.from_user.id != ADMIN_ID:
             return
 
+        if message.chat.type in ['group', 'supergroup']:
+            salvar_grupo_logs_id(message.chat.id)
+
         total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
         searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)[0]
         reports = db_execute("SELECT value FROM metrics WHERE key = 'total_reports'", fetchone=True)[0]
@@ -930,28 +962,21 @@ if bot:
             f"📅 **Solicitado em:** {data_hora_solicitacao}"
         )
 
-        # Envia no Chat do Administrador
+        # Envia no Chat Atual
         bot.send_message(message.chat.id, relatorio_financeiro, parse_mode="Markdown")
 
-        # Tenta envio no ID Formatado (-100...) e no ID Simples (-...) como Fallback
-        target_groups = [GRUPO_LOGS_ID, int(f"-{str(GRUPO_LOGS_ID).replace('-100', '')}")]
-        enviado = False
-        
-        for g_id in target_groups:
+        grupo_target = obter_grupo_logs_id()
+        if message.chat.id != grupo_target:
             try:
-                bot.send_message(g_id, relatorio_financeiro, parse_mode="Markdown")
-                logger.info("Relatório de estatísticas enviado com sucesso para o grupo de logs: %s", g_id)
-                enviado = True
-                break
+                bot.send_message(grupo_target, relatorio_financeiro, parse_mode="Markdown")
+                logger.info("Relatório de estatísticas enviado com sucesso para o grupo registrado: %s", grupo_target)
             except Exception as e:
-                logger.error("Falha ao enviar relatório para o ID %s: %s", g_id, str(e))
-
-        if not enviado:
-            bot.send_message(
-                message.chat.id,
-                "⚠️ **Atenção:** Não foi possível enviar a mensagem para o Grupo de Logs. Verifique se o **@KronosSearchbot** possui permissão de Administrador para enviar mensagens no grupo.",
-                parse_mode="Markdown"
-            )
+                logger.error("Falha ao enviar relatório para o grupo registrado (%s): %s", grupo_target, str(e))
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ **Dica de Vinculação:** Envie o comando `/setgrupo` dentro do grupo de logs para gravar o ID correto no banco de dados.",
+                    parse_mode="Markdown"
+                )
 
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_command(message):
@@ -1007,6 +1032,10 @@ if bot:
     def handle_search(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+
+        if message.chat.type in ['group', 'supergroup']:
+            salvar_grupo_logs_id(message.chat.id)
+            return
         
         texto = message.text.replace("\n", " ").strip()
         
@@ -1304,7 +1333,8 @@ def webhook():
                         registrar_relatorio()
                         enviar_relatorio_espelho_admin(target, doc_txt, telegram_id, "VENDA PIX APROVADA")
 
-                    if bot and GRUPO_LOGS_ID:
+                    grupo_logs_id = obter_grupo_logs_id()
+                    if bot and grupo_logs_id:
                         try:
                             msg_venda_log = (
                                 f"💰 NOVA VENDA APROVADA!\n\n"
@@ -1313,7 +1343,7 @@ def webhook():
                                 f"• Alvo: {target}\n"
                                 f"• Comprador ID: {telegram_id}"
                             )
-                            bot.send_message(GRUPO_LOGS_ID, msg_venda_log)
+                            bot.send_message(grupo_logs_id, msg_venda_log)
                         except Exception as log_err:
                             logger.error("Erro ao enviar log no grupo financeiro: %s", str(log_err))
 
@@ -1327,7 +1357,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v16.2 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v16.3 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
