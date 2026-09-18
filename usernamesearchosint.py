@@ -1,5 +1,6 @@
 """
-Kronos Intel OSINT Bot v16.5
+Kronos Intel OSINT Bot v16.6
+- Padronização do gatilho '🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3.90 no Pix!' nos módulos /email e /nome
 - Comando /stats envia o relatório financeiro/métricas EXCLUSIVAMENTE para o grupo de logs/financeiro
 - ID fixo do Grupo de Logs & Financeiro: -1003986408630
 - Fuso horário ajustado para Brasília (America/Sao_Paulo / UTC-3)
@@ -368,7 +369,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v16.5
+SISTEMA: Kronos Engine v16.6
 ===================================================================
 """
     if is_email:
@@ -760,7 +761,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.5**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.6**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -879,7 +880,8 @@ if bot:
             f"• Leak-Lookup Engine\n"
             f"• Scylla.sh Leak Index\n"
             f"• Hudson Rock Cybercrime\n\n"
-            f"🔥 Liberar Painel Interativo Web com os links diretos de verificação por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+            f"Deseja liberar o Painel Interativo Web com os links diretos de verificação e relatório TXT?\n\n"
+            f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
             f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
         )
 
@@ -925,7 +927,8 @@ if bot:
             f"👤 {nome_alvo.upper()}\n"
             f"───────────────────────────────\n\n"
             f"Identificamos apontamentos no Jusbrasil, Escavador e Diários Oficiais estaduais.\n\n"
-            f"🔥 Liberar o Painel Interativo Web + Relatório TXT completo por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+            f"Deseja obter o Painel Interativo Web focado com os links diretos para cada tribunal e relatório TXT?\n\n"
+            f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
             f"👉 Participe também da nossa comunidade oficial: {CANAL_TAG_PUBLICO}"
         )
 
@@ -1118,7 +1121,8 @@ if bot:
                 f"• Leak-Lookup Engine\n"
                 f"• Scylla.sh Leak Index\n"
                 f"• Hudson Rock Cybercrime\n\n"
-                f"🔥 Liberar Painel Interativo Web com os links diretos de verificação por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"Deseja liberar o Painel Interativo Web com os links diretos de verificação e relatório TXT?\n\n"
+                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
                 f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
             )
 
@@ -1146,8 +1150,8 @@ if bot:
                 f"👤 {target.upper()}\n"
                 f"───────────────────────────────\n\n"
                 f"Identificamos apontamentos no Jusbrasil, Escavador e Diários Oficiais estaduais.\n\n"
-                f"🔥 OFERTA VIP EXCLUSIVA:\n"
-                f"Por apenas R$ {PRECO_PADRAO:.2f} no Pix, liberamos o seu Painel Web focado com os links diretos para cada tribunal e diário oficial onde o nome foi citado.\n\n"
+                f"Deseja obter o Painel Interativo Web focado com os links diretos para cada tribunal e relatório TXT?\n\n"
+                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
                 f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
@@ -1362,7 +1366,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v16.5 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v16.6 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
