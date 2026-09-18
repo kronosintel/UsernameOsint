@@ -1,9 +1,9 @@
 """
-Kronos Intel OSINT Bot v16.0
-- Correção /stats: Envio duplo (Admin + Grupo Financeiro/Logs) com faturamento e timestamp exato
-- Relatório TXT para /user: Inclui estritamente as redes encontradas (descarta não encontradas)
-- Interface Web Dashboard: Design escuro futurista aprimorado
-- Trata e-mails e usernames de forma isolada e estrita
+Kronos Intel OSINT Bot v16.2
+- Correção de envio ao Grupo de Logs/Financeiro (-1005294217144)
+- Diagnóstico com fallback automatizado para ID de Supergrupo Telegram
+- Relatório TXT para /user com filtro estrito de redes ativas
+- Dashboard Web modernizado
 """
 from __future__ import annotations
 
@@ -46,9 +46,10 @@ PRECO_PADRAO = 3.90
 DB_FILE = "kronos_osint.db"
 db_lock = Lock()
 
-# --- CONFIGURAÇÃO DE CANAL E GRUPO DE LOGS ---
+# --- CONFIGURAÇÃO DE CANAL E GRUPO DE LOGS (IDs FORMATO SUPERGRUPO) ---
 CANAL_PRINCIPAL_ID = int(os.getenv("CANAL_PRINCIPAL_ID", "-1003802363624"))
-GRUPO_LOGS_ID = int(os.getenv("GRUPO_LOGS_ID", "-5294217144"))
+GRUPO_LOGS_ID_RAW = os.getenv("GRUPO_LOGS_ID", "-1005294217144")
+GRUPO_LOGS_ID = int(GRUPO_LOGS_ID_RAW) if GRUPO_LOGS_ID_RAW.startswith("-100") else int(f"-100{GRUPO_LOGS_ID_RAW.lstrip('-')}")
 CANAL_TAG_PUBLICO = "@kronosintel_oficial"
 
 # --- BANCO DE DADOS SQLITE ---
@@ -347,7 +348,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v16.0
+SISTEMA: Kronos Engine v16.2
 ===================================================================
 """
     if is_email:
@@ -361,7 +362,6 @@ SISTEMA: Kronos Engine v16.0
         corpo += f"""1. PERFIS E PLATAFORMAS CONFIRMADAS (APENAS ENCONTRADOS)
 -------------------------------------------------------------------
 """
-        # FILTRO ESTRITO: EXIBE SOMENTE O QUE RETORNOU VERDADEIRO
         if encontrados:
             for p in encontrados:
                 url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=target))
@@ -728,7 +728,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.0**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.2**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -902,7 +902,7 @@ if bot:
 
         bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
 
-    # --- COMANDO /stats MELHORADO ---
+    # --- COMANDO /stats COM ENVIO REFORÇADO AO GRUPO ---
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -930,15 +930,28 @@ if bot:
             f"📅 **Solicitado em:** {data_hora_solicitacao}"
         )
 
-        # Resposta ao Administrador no Chat Privado
+        # Envia no Chat do Administrador
         bot.send_message(message.chat.id, relatorio_financeiro, parse_mode="Markdown")
 
-        # Envio Automático ao Grupo de Logs/Financeiro
-        if GRUPO_LOGS_ID:
+        # Tenta envio no ID Formatado (-100...) e no ID Simples (-...) como Fallback
+        target_groups = [GRUPO_LOGS_ID, int(f"-{str(GRUPO_LOGS_ID).replace('-100', '')}")]
+        enviado = False
+        
+        for g_id in target_groups:
             try:
-                bot.send_message(GRUPO_LOGS_ID, relatorio_financeiro, parse_mode="Markdown")
+                bot.send_message(g_id, relatorio_financeiro, parse_mode="Markdown")
+                logger.info("Relatório de estatísticas enviado com sucesso para o grupo de logs: %s", g_id)
+                enviado = True
+                break
             except Exception as e:
-                logger.error("Erro ao enviar relatório de stats para o grupo de logs: %s", str(e))
+                logger.error("Falha ao enviar relatório para o ID %s: %s", g_id, str(e))
+
+        if not enviado:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ **Atenção:** Não foi possível enviar a mensagem para o Grupo de Logs. Verifique se o **@KronosSearchbot** possui permissão de Administrador para enviar mensagens no grupo.",
+                parse_mode="Markdown"
+            )
 
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_command(message):
@@ -997,7 +1010,6 @@ if bot:
         
         texto = message.text.replace("\n", " ").strip()
         
-        # MODO ADMIN
         if user_id == ADMIN_ID and texto.lower().startswith("admin"):
             partes_admin = texto.split(maxsplit=2)
             
@@ -1315,7 +1327,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v16.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v16.2 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
