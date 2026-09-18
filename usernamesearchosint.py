@@ -1,9 +1,9 @@
 """
-Kronos Intel OSINT Bot v15.2
-- Correção da validação de e-mail: aceita quebras de linha e trata domínios (.com) sem falso-positivo de URL
-- Redirecionamento exclusivo de /email e admin email para as 7 bases globais de vazamento
-- Validações estritas e independentes para /user, /email e /nome
-- Username do bot alinhado para @KronosSearchbot
+Kronos Intel OSINT Bot v16.0
+- Correção /stats: Envio duplo (Admin + Grupo Financeiro/Logs) com faturamento e timestamp exato
+- Relatório TXT para /user: Inclui estritamente as redes encontradas (descarta não encontradas)
+- Interface Web Dashboard: Design escuro futurista aprimorado
+- Trata e-mails e usernames de forma isolada e estrita
 """
 from __future__ import annotations
 
@@ -347,7 +347,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v15.2
+SISTEMA: Kronos Engine v16.0
 ===================================================================
 """
     if is_email:
@@ -358,9 +358,10 @@ SISTEMA: Kronos Engine v15.2
             corpo += f"[+] {p.ljust(25)} : {resultados[p].get('url')}\n"
 
     elif not is_fullname:
-        corpo += f"""1. PERFIS E PLATAFORMAS CONFIRMADAS
+        corpo += f"""1. PERFIS E PLATAFORMAS CONFIRMADAS (APENAS ENCONTRADOS)
 -------------------------------------------------------------------
 """
+        # FILTRO ESTRITO: EXIBE SOMENTE O QUE RETORNOU VERDADEIRO
         if encontrados:
             for p in encontrados:
                 url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=target))
@@ -468,30 +469,30 @@ HTML_DASHBOARD_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kronos Intel — Painel OSINT</title>
+    <title>Kronos Intel — Painel OSINT VIP</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <style>
         :root {
-            --bg-color: #080c14;
-            --card-bg: rgba(15, 23, 42, 0.85);
-            --border-color: #1e293b;
-            --accent-cyan: #06b6d4;
-            --accent-green: #10b981;
-            --accent-red: #ef4444;
-            --text-main: #f8fafc;
+            --bg-color: #030712;
+            --card-bg: rgba(17, 24, 39, 0.85);
+            --border-color: #1f2937;
+            --accent-cyan: #38bdf8;
+            --accent-green: #34d399;
+            --accent-red: #f87171;
+            --text-main: #f9fafb;
         }
 
         body {
             background-color: var(--bg-color);
-            background-image: radial-gradient(circle at 50% 0%, rgba(6, 182, 212, 0.12), transparent 75%);
+            background-image: radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.15), transparent 80%);
             color: var(--text-main);
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             min-height: 100vh;
         }
 
         .navbar {
-            background-color: rgba(8, 12, 20, 0.9);
+            background-color: rgba(3, 7, 18, 0.95);
             backdrop-filter: blur(12px);
             border-bottom: 1px solid var(--border-color);
         }
@@ -500,6 +501,7 @@ HTML_DASHBOARD_TEMPLATE = """
             font-family: monospace;
             font-weight: 700;
             color: var(--accent-cyan) !important;
+            letter-spacing: 1px;
         }
 
         .card-custom {
@@ -508,10 +510,11 @@ HTML_DASHBOARD_TEMPLATE = """
             border: 1px solid var(--border-color);
             border-radius: 16px;
             margin-bottom: 24px;
+            box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
         }
 
         .card-header-custom {
-            background: rgba(255, 255, 255, 0.02);
+            background: rgba(255, 255, 255, 0.03);
             border-bottom: 1px solid var(--border-color);
             padding: 16px 20px;
             font-family: monospace;
@@ -529,18 +532,19 @@ HTML_DASHBOARD_TEMPLATE = """
             display: flex;
             align-items: center;
             justify-content: space-between;
-            transition: all 0.2s ease;
+            transition: all 0.25s ease;
         }
 
         .btn-platform:hover {
-            background: rgba(16, 185, 129, 0.1);
+            background: rgba(52, 211, 153, 0.12);
             border-color: var(--accent-green);
             color: var(--accent-green);
+            transform: translateY(-2px);
         }
 
         .btn-dork {
-            background: rgba(6, 182, 212, 0.05);
-            border: 1px solid rgba(6, 182, 212, 0.2);
+            background: rgba(56, 189, 248, 0.06);
+            border: 1px solid rgba(56, 189, 248, 0.2);
             color: var(--accent-cyan);
             padding: 12px 18px;
             border-radius: 10px;
@@ -551,7 +555,7 @@ HTML_DASHBOARD_TEMPLATE = """
         }
 
         .btn-dork:hover {
-            background: rgba(6, 182, 212, 0.2);
+            background: rgba(56, 189, 248, 0.25);
             color: #fff;
         }
 
@@ -559,12 +563,18 @@ HTML_DASHBOARD_TEMPLATE = """
             font-family: monospace;
             color: var(--accent-cyan);
         }
+
+        .badge-found {
+            background-color: rgba(52, 211, 153, 0.2);
+            color: var(--accent-green);
+            border: 1px solid var(--accent-green);
+        }
     </style>
 </head>
 <body>
     <nav class="navbar navbar-dark sticky-top mb-4 py-3">
         <div class="container">
-            <span class="navbar-brand h1 mb-0"><i class="bi bi-shield-lock-fill me-2"></i>KRONOS_INTEL // OSINT</span>
+            <span class="navbar-brand h1 mb-0"><i class="bi bi-shield-lock-fill me-2"></i>KRONOS_INTEL // OSINT VIP</span>
             <a href="/download/txt/{{ token }}" class="btn btn-outline-info btn-sm rounded-3"><i class="bi bi-file-earmark-text me-1"></i> BAIXAR RELATÓRIO (.TXT)</a>
         </div>
     </nav>
@@ -572,7 +582,10 @@ HTML_DASHBOARD_TEMPLATE = """
     <div class="container pb-5">
         <div class="card-custom">
             <div class="card-body p-4">
-                <span class="text-uppercase text-muted small code-tag">[ ALVO ANALISADO ]</span>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-uppercase small code-tag">[ ALVO ANALISADO ]</span>
+                    <span class="badge badge-found px-3 py-2 rounded-pill small"><i class="bi bi-check2-circle me-1"></i> Mapeamento Concluído</span>
+                </div>
                 <h2 class="text-white mb-1 font-monospace"><i class="bi bi-terminal-fill me-2 text-cyan"></i>{{ target }}</h2>
                 <p class="text-muted mb-0 small"><i class="bi bi-clock me-1"></i> Auditado em: {{ data_atual }} | Módulo: {{ modulo_titulo }}</p>
             </div>
@@ -588,7 +601,7 @@ HTML_DASHBOARD_TEMPLATE = """
                         {% elif is_fullname %}
                             Mapeamento Judicial, Processos e Diários Oficiais
                         {% else %}
-                            Perfis e Redes Sociais Confirmadas (Cadastrados)
+                            Perfis e Redes Sociais Confirmadas
                         {% endif %}
                     </div>
                     <div class="card-body p-4">
@@ -614,7 +627,7 @@ HTML_DASHBOARD_TEMPLATE = """
             <div class="col-lg-5">
                 <div class="card-custom">
                     <div class="card-header-custom text-uppercase text-info">
-                        <i class="bi bi-globe me-2"></i>Presença Digital & Menções em Buscadores
+                        <i class="bi bi-globe me-2"></i>Presença Digital & Menções
                     </div>
                     <div class="card-body p-4 d-grid gap-2">
                         {% for nome_b, url_b in buscadores.items() %}
@@ -715,7 +728,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v15.2**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.0**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -723,7 +736,7 @@ if bot:
             f"• Identifica perfis ativos em mais de 45 redes.\n\n"
             f"2️⃣ **BUSCA POR E-MAIL (VAZAMENTOS):**\n"
             f"• Use `/email alvo@gmail.com`\n"
-            f"• Mapeia vazamentos de credenciais em 7 bases globais (Have I Been Pwned, DeHashed, IntelX, etc).\n\n"
+            f"• Mapeia vazamentos de credenciais em 7 bases globais.\n\n"
             f"3️⃣ **BUSCA POR NOME COMPLETO (JUDICIAL):**\n"
             f"• Use `/nome João da Silva`\n"
             f"• Mapeia processos e citações no Jusbrasil e Diários Oficiais.\n\n"
@@ -749,7 +762,8 @@ if bot:
         user_id = message.from_user.id
         registrar_acesso(user_id)
 
-        partes = message.text.strip().split(maxsplit=1)
+        texto_limpo = message.text.replace("\n", " ").strip()
+        partes = texto_limpo.split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o username após o comando `/user`.\nExemplo: `/user alvo123`", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
@@ -888,6 +902,7 @@ if bot:
 
         bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
 
+    # --- COMANDO /stats MELHORADO ---
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -901,8 +916,10 @@ if bot:
         qtd_vendas = vendas[0] if vendas else 0
         faturamento = vendas[1] if vendas and vendas[1] else 0.0
 
+        data_hora_solicitacao = datetime.now().strftime('%d/%m/%Y às %H:%M:%S')
+
         relatorio_financeiro = (
-            f"📊 **RELATÓRIO FINANCEIRO E METRICAS DE USO**\n"
+            f"📊 **RELATÓRIO FINANCEIRO E MÉTRICAS DE USO**\n"
             f"───────────────────────────────\n"
             f"👤 **Usuários Totais Registrados:** {total_users}\n"
             f"🔎 **Total de Buscas Executadas:** {searches}\n"
@@ -910,16 +927,18 @@ if bot:
             f"💰 **Vendas Aprovadas (Pix):** {qtd_vendas}\n"
             f"💵 **Faturamento Total Adquirido:** R$ {faturamento:.2f}\n"
             f"───────────────────────────────\n"
-            f"📅 Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+            f"📅 **Solicitado em:** {data_hora_solicitacao}"
         )
 
+        # Resposta ao Administrador no Chat Privado
         bot.send_message(message.chat.id, relatorio_financeiro, parse_mode="Markdown")
 
+        # Envio Automático ao Grupo de Logs/Financeiro
         if GRUPO_LOGS_ID:
             try:
                 bot.send_message(GRUPO_LOGS_ID, relatorio_financeiro, parse_mode="Markdown")
             except Exception as e:
-                logger.error("Erro ao enviar relatório de stats para grupo de logs: %s", str(e))
+                logger.error("Erro ao enviar relatório de stats para o grupo de logs: %s", str(e))
 
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_command(message):
@@ -1296,7 +1315,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v15.2 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v16.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
