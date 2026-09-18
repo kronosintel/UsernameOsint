@@ -1,9 +1,9 @@
 """
-Kronos Intel OSINT Bot v15.1
-- Correção no Modo Admin (admin email <email>): força o processamento via módulo de vazamentos de e-mail
-- Redirecionamento correto de /email e admin email para as 7 bases globais de vazamento
+Kronos Intel OSINT Bot v15.2
+- Correção da validação de e-mail: aceita quebras de linha e trata domínios (.com) sem falso-positivo de URL
+- Redirecionamento exclusivo de /email e admin email para as 7 bases globais de vazamento
 - Validações estritas e independentes para /user, /email e /nome
-- Username padronizado para @KronosSearchbot
+- Username do bot alinhado para @KronosSearchbot
 """
 from __future__ import annotations
 
@@ -217,6 +217,8 @@ def e_email_valido(termo: str) -> bool:
     return bool(re.match(padrao, termo.strip()))
 
 def e_url(termo: str) -> bool:
+    if e_email_valido(termo):
+        return False
     padrao_url = re.compile(
         r'^(?:http|ftp)s?://'
         r'|(?:www\.)'
@@ -345,7 +347,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v15.1
+SISTEMA: Kronos Engine v15.2
 ===================================================================
 """
     if is_email:
@@ -713,7 +715,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v15.1**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v15.2**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -802,7 +804,8 @@ if bot:
         user_id = message.from_user.id
         registrar_acesso(user_id)
 
-        partes = message.text.strip().split(maxsplit=1)
+        texto_limpo = message.text.replace("\n", " ").strip()
+        partes = texto_limpo.split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o e-mail após o comando `/email`.\nExemplo: `/email alvo@gmail.com`", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
@@ -810,7 +813,7 @@ if bot:
 
         email_alvo = partes[1].strip()
 
-        if not e_email_valido(email_alvo) or e_url(email_alvo):
+        if not e_email_valido(email_alvo):
             responder_seguro(message, "⚠️ **Comando Inválido para E-mail!**\nO comando `/email` exige um e-mail válido no formato `usuario@dominio.com`.", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
@@ -845,7 +848,8 @@ if bot:
         user_id = message.from_user.id
         registrar_acesso(user_id)
 
-        partes = message.text.strip().split(maxsplit=1)
+        texto_limpo = message.text.replace("\n", " ").strip()
+        partes = texto_limpo.split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o nome completo após o comando `/nome`.\nExemplo: `/nome João da Silva`", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
@@ -972,9 +976,9 @@ if bot:
         user_id = message.from_user.id
         registrar_acesso(user_id)
         
-        texto = message.text.strip()
+        texto = message.text.replace("\n", " ").strip()
         
-        # MODO ADMIN CORRIGIDO
+        # MODO ADMIN
         if user_id == ADMIN_ID and texto.lower().startswith("admin"):
             partes_admin = texto.split(maxsplit=2)
             
@@ -1292,7 +1296,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v15.1 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v15.2 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
