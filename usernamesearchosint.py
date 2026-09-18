@@ -1,8 +1,8 @@
 """
-Kronos Intel OSINT Bot v16.3
-- Captura e salvamento dinâmico do ID do Grupo de Logs/Financeiro via banco SQLite
-- Adicionado comando /setgrupo para vinculo instantâneo no grupo correto
-- Relatório TXT para /user com filtro exclusivo de perfis encontrados
+Kronos Intel OSINT Bot v16.4
+- ID fixo do Grupo de Logs & Financeiro atualizado para -1003986408630
+- Correção de fuso horário para Brasília (America/Sao_Paulo / UTC-3)
+- Relatório TXT para /user com filtro estrito de perfis encontrados
 - Dashboard Web VIP modernizado
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from threading import Lock, Thread
 from typing import Any
 
@@ -45,6 +46,7 @@ PORT = int(os.getenv("PORT", "5000"))
 PRECO_PADRAO = 3.90
 DB_FILE = "kronos_osint.db"
 db_lock = Lock()
+TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 
 # --- CONFIGURAÇÃO DE CANAL E GRUPO DE LOGS ---
 CANAL_PRINCIPAL_ID = int(os.getenv("CANAL_PRINCIPAL_ID", "-1003802363624"))
@@ -89,6 +91,7 @@ def init_db():
         """)
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
+        cursor.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('grupo_logs_id', '-1003986408630')")
         conn.commit()
         conn.close()
 
@@ -116,11 +119,7 @@ def obter_grupo_logs_id() -> int:
             return int(cfg[0])
         except ValueError:
             pass
-    env_id = os.getenv("GRUPO_LOGS_ID", "-5294217144")
-    try:
-        return int(env_id)
-    except ValueError:
-        return -5294217144
+    return -1003986408630
 
 def salvar_grupo_logs_id(chat_id: int):
     db_execute("INSERT INTO config (key, value) VALUES ('grupo_logs_id', ?) ON CONFLICT(key) DO UPDATE SET value = ?", (str(chat_id), str(chat_id)), commit=True)
@@ -219,7 +218,7 @@ NOT_FOUND_MARKERS = {
 }
 
 def registrar_acesso(user_id: int):
-    now_str = datetime.now().isoformat()
+    now_str = datetime.now(TIMEZONE_BR).isoformat()
     db_execute(
         "INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
         (user_id, now_str), commit=True
@@ -358,7 +357,7 @@ def obter_links_buscadores(termo: str) -> dict[str, str]:
 
 def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], is_fullname: bool = False, is_email: bool = False) -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
-    data_atual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
     tipo_txt = "VAZAMENTO DE E-MAIL" if is_email else ("PROCESSOS JUDICIAIS" if is_fullname else "USERNAME / REDES SOCIAIS")
 
@@ -368,7 +367,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v16.3
+SISTEMA: Kronos Engine v16.4
 ===================================================================
 """
     if is_email:
@@ -433,7 +432,7 @@ def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: s
         
         pid = str(res.get("id"))
         db_execute("INSERT INTO payments (payment_id, user_id, target_username, amount, status, reminded, token, query_type, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)",
-                   (pid, user_id, target, valor, token_relatorio, query_type, datetime.now().isoformat()), commit=True)
+                   (pid, user_id, target, valor, token_relatorio, query_type, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
         return qr_code, img_bytes, token_relatorio
     except Exception as e:
         logger.error("Erro ao gerar Pix: %s", str(e))
@@ -460,11 +459,13 @@ def worker_remarketing_pix():
             if not pendentes:
                 continue
 
-            now = datetime.now()
+            now = datetime.now(TIMEZONE_BR)
             for p in pendentes:
                 pid, uid, target, created_str, qtype = p[0], p[1], p[2], p[3], p[4]
                 try:
                     created_time = datetime.fromisoformat(created_str)
+                    if created_time.tzinfo is None:
+                        created_time = created_time.replace(tzinfo=TIMEZONE_BR)
                     if (now - created_time).total_seconds() / 60 >= 10:
                         db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
                         if bot:
@@ -686,7 +687,11 @@ def ver_relatorio_web(token):
                 encontrados.append({"nome": plat, "url": url})
 
     buscadores = obter_links_buscadores(target) if (not is_fullname and not is_email) else {}
-    data_formatada = datetime.fromisoformat(created_at).strftime("%d/%m/%Y %H:%M:%S")
+    
+    dt_obj = datetime.fromisoformat(created_at)
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=TIMEZONE_BR)
+    data_formatada = dt_obj.astimezone(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
     modulo_titulo = "VAZAMENTO DE E-MAIL" if is_email else ("REGISTROS JUDICIAIS" if is_fullname else "REDES SOCIAIS & USERNAME")
 
@@ -754,7 +759,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.3**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.4**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -931,7 +936,7 @@ if bot:
 
         bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
 
-    # --- COMANDO /stats COM ENVIO REFORÇADO AO GRUPO ---
+    # --- COMANDO /stats COM HORÁRIO DE BRASÍLIA ---
     @bot.message_handler(commands=['stats'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
@@ -948,7 +953,7 @@ if bot:
         qtd_vendas = vendas[0] if vendas else 0
         faturamento = vendas[1] if vendas and vendas[1] else 0.0
 
-        data_hora_solicitacao = datetime.now().strftime('%d/%m/%Y às %H:%M:%S')
+        data_hora_solicitacao = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
 
         relatorio_financeiro = (
             f"📊 **RELATÓRIO FINANCEIRO E MÉTRICAS DE USO**\n"
@@ -962,21 +967,16 @@ if bot:
             f"📅 **Solicitado em:** {data_hora_solicitacao}"
         )
 
-        # Envia no Chat Atual
+        # Envia no Chat do Administrador
         bot.send_message(message.chat.id, relatorio_financeiro, parse_mode="Markdown")
 
         grupo_target = obter_grupo_logs_id()
         if message.chat.id != grupo_target:
             try:
                 bot.send_message(grupo_target, relatorio_financeiro, parse_mode="Markdown")
-                logger.info("Relatório de estatísticas enviado com sucesso para o grupo registrado: %s", grupo_target)
+                logger.info("Relatório de estatísticas enviado para o grupo: %s", grupo_target)
             except Exception as e:
-                logger.error("Falha ao enviar relatório para o grupo registrado (%s): %s", grupo_target, str(e))
-                bot.send_message(
-                    message.chat.id,
-                    "⚠️ **Dica de Vinculação:** Envie o comando `/setgrupo` dentro do grupo de logs para gravar o ID correto no banco de dados.",
-                    parse_mode="Markdown"
-                )
+                logger.error("Falha ao enviar relatório para o grupo (%s): %s", grupo_target, str(e))
 
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_command(message):
@@ -1006,7 +1006,7 @@ if bot:
 
         db_execute(
             "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, query_type, results_json, created_at) VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?)",
-            (pid_cortesia, target_user_id, alvo, token_relatorio, qtype, results_json, datetime.now().isoformat()),
+            (pid_cortesia, target_user_id, alvo, token_relatorio, qtype, results_json, datetime.now(TIMEZONE_BR).isoformat()),
             commit=True
         )
         registrar_relatorio()
@@ -1067,7 +1067,7 @@ if bot:
 
             db_execute(
                 "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, query_type, results_json, created_at) VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?)",
-                (pid_admin, user_id, target, token_relatorio, qtype, results_json, datetime.now().isoformat()),
+                (pid_admin, user_id, target, token_relatorio, qtype, results_json, datetime.now(TIMEZONE_BR).isoformat()),
                 commit=True
             )
             registrar_relatorio()
@@ -1357,7 +1357,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v16.3 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v16.4 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
