@@ -1,10 +1,9 @@
 """
-Kronos Intel OSINT Bot v15.0
-- Correção no módulo /email para busca exclusiva em bases globais de vazamento:
-  - Have I Been Pwned, DeHashed, Intelligence X, BreachDirectory, Leak-Lookup, Scylla.sh, Hudson Rock
-- Atualização do username do bot para @KronosSearchbot nas mensagens e canal
-- Mapeamento e validações estritas e independentes para /user, /email e /nome
-- Relatório Financeiro e Métricas (/stats) vinculados ao Grupo Privado (-5294217144)
+Kronos Intel OSINT Bot v15.1
+- Correção no Modo Admin (admin email <email>): força o processamento via módulo de vazamentos de e-mail
+- Redirecionamento correto de /email e admin email para as 7 bases globais de vazamento
+- Validações estritas e independentes para /user, /email e /nome
+- Username padronizado para @KronosSearchbot
 """
 from __future__ import annotations
 
@@ -346,7 +345,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v15.0
+SISTEMA: Kronos Engine v15.1
 ===================================================================
 """
     if is_email:
@@ -701,7 +700,6 @@ if bot:
         
         registrar_acesso(user_id)
 
-        # NOTIFICAÇÃO COM USERNAME CORRETO @KronosSearchbot
         if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
             try:
                 msg_canal = (
@@ -715,7 +713,7 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v15.0**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v15.1**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -968,6 +966,7 @@ if bot:
         except Exception as e:
             responder_seguro(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário {target_user_id}.\nLink do painel: {link_web}")
 
+    # ENTRADA DE TEXTO DIRETO NO CHAT E MODO ADMIN
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         user_id = message.from_user.id
@@ -975,6 +974,7 @@ if bot:
         
         texto = message.text.strip()
         
+        # MODO ADMIN CORRIGIDO
         if user_id == ADMIN_ID and texto.lower().startswith("admin"):
             partes_admin = texto.split(maxsplit=2)
             
@@ -986,8 +986,8 @@ if bot:
                 is_fullname = (subcomando == "nome")
             else:
                 target = texto.lower().replace("admin", "").replace("@", "").strip()
-                is_fullname = e_nome_completo(target)
                 is_email = e_email_valido(target)
+                is_fullname = e_nome_completo(target) if not is_email else False
 
             if len(target) < 2:
                 responder_seguro(message, "⚠️ Termo de busca muito curto para modo Admin.")
@@ -1292,7 +1292,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v15.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v15.1 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
