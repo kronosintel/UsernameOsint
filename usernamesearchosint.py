@@ -1,11 +1,10 @@
 """
-Kronos Intel OSINT Bot v14.2
-- Validação isolada e estrita de escopo para cada comando:
-  - /user: Apenas username (sem @, sem espaço, sem e-mail, sem URL)
-  - /email: Apenas e-mail válido (exige @)
-  - /nome: Apenas nome completo (exige nome + sobrenome)
-- Tratamento seguro de envio com responder_seguro()
-- Mídia, arquivos e URLs fora do escopo acionam a orientação de uso correto
+Kronos Intel OSINT Bot v15.0
+- Correção no módulo /email para busca exclusiva em bases globais de vazamento:
+  - Have I Been Pwned, DeHashed, Intelligence X, BreachDirectory, Leak-Lookup, Scylla.sh, Hudson Rock
+- Atualização do username do bot para @KronosSearchbot nas mensagens e canal
+- Mapeamento e validações estritas e independentes para /user, /email e /nome
+- Relatório Financeiro e Métricas (/stats) vinculados ao Grupo Privado (-5294217144)
 """
 from __future__ import annotations
 
@@ -109,7 +108,7 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
 # --- CONFIGURAÇÃO BOT & MERCADO PAGO ---
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
 SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosIntelBot")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosSearchbot")
 WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
@@ -303,9 +302,12 @@ def executar_varredura_osint(target: str, is_fullname: bool = False, is_email: b
         encoded_email = urllib.parse.quote(target)
         return {
             "Have I Been Pwned": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
-            "Intelligence X (IntelX)": {"exists": True, "url": f"https://intelx.io/?s={encoded_email}"},
             "DeHashed Base": {"exists": True, "url": f"https://dehashed.com/search?query={encoded_email}"},
-            "BreachDirectory": {"exists": True, "url": f"https://breachdirectory.org/search?query={encoded_email}"}
+            "Intelligence X (IntelX)": {"exists": True, "url": f"https://intelx.io/?s={encoded_email}"},
+            "BreachDirectory": {"exists": True, "url": f"https://breachdirectory.org/search?query={encoded_email}"},
+            "Leak-Lookup Engine": {"exists": True, "url": f"https://leak-lookup.com/search?type=email&query={encoded_email}"},
+            "Scylla.sh Data Leak": {"exists": True, "url": f"https://scylla.sh/search?q=email:{encoded_email}"},
+            "Hudson Rock Cybercrime": {"exists": True, "url": f"https://cavalier.hudsonrock.com/api/v1/osint-tools/search-by-email?email={encoded_email}"}
         }
     elif is_fullname:
         encoded_name = urllib.parse.quote(f'"{target}"')
@@ -344,7 +346,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v14.2
+SISTEMA: Kronos Engine v15.0
 ===================================================================
 """
     if is_email:
@@ -699,20 +701,21 @@ if bot:
         
         registrar_acesso(user_id)
 
+        # NOTIFICAÇÃO COM USERNAME CORRETO @KronosSearchbot
         if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
             try:
                 msg_canal = (
                     f"⚡ NOVO USUÁRIO INICIOU O BOT!\n\n"
                     f"👤 Usuário: {user_name}\n"
                     f"🎯 O Kronos OSINT Bot está pronto para realizar varreduras.\n\n"
-                    f"👉 Faça sua busca agora: @{BOT_USERNAME}"
+                    f"👉 Faça sua busca agora: @KronosSearchbot"
                 )
                 bot.send_message(CANAL_PRINCIPAL_ID, msg_canal)
             except Exception as ex:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v14.2**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v15.0**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -720,7 +723,7 @@ if bot:
             f"• Identifica perfis ativos em mais de 45 redes.\n\n"
             f"2️⃣ **BUSCA POR E-MAIL (VAZAMENTOS):**\n"
             f"• Use `/email alvo@gmail.com`\n"
-            f"• Mapeia vazamentos de credenciais em bases globais.\n\n"
+            f"• Mapeia vazamentos de credenciais em 7 bases globais (Have I Been Pwned, DeHashed, IntelX, etc).\n\n"
             f"3️⃣ **BUSCA POR NOME COMPLETO (JUDICIAL):**\n"
             f"• Use `/nome João da Silva`\n"
             f"• Mapeia processos e citações no Jusbrasil e Diários Oficiais.\n\n"
@@ -754,7 +757,6 @@ if bot:
 
         target_user = partes[1].replace("@", "").strip()
 
-        # BLOQUEIA E-MAILS, ESPAÇOS E URLS NO /user
         if "@" in target_user or " " in target_user or e_url(target_user):
             responder_seguro(message, "⚠️ **Comando Inválido para Username!**\nO comando `/user` aceita apenas nomes de usuário (sem e-mail, sem URLs e sem espaços).", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
@@ -796,7 +798,7 @@ if bot:
                 f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
             )
 
-    # --- COMANDO /email (EXCLUSIVO PARA E-MAIL) ---
+    # --- COMANDO /email (EXCLUSIVO PARA VAZAMENTOS DE E-MAIL) ---
     @bot.message_handler(commands=['email'])
     def handle_email_command(message):
         user_id = message.from_user.id
@@ -810,22 +812,24 @@ if bot:
 
         email_alvo = partes[1].strip()
 
-        # VALIDA FORMATO DE E-MAIL
         if not e_email_valido(email_alvo) or e_url(email_alvo):
             responder_seguro(message, "⚠️ **Comando Inválido para E-mail!**\nO comando `/email` exige um e-mail válido no formato `usuario@dominio.com`.", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
             return
 
         texto_email = (
-            f"📧 CHECAGEM DE VAZAMENTOS PARA:\n"
+            f"📧 CHECAGEM DE VAZAMENTOS E CREDENCIAIS PARA:\n"
             f"👤 {email_alvo}\n"
             f"───────────────────────────────\n\n"
-            f"Mapeamos as principais bases globais de vazamento de credenciais e senhas:\n"
+            f"Mapeamos as principais bases globais de vazamento de dados e senhas:\n"
             f"• Have I Been Pwned\n"
-            f"• Intelligence X\n"
             f"• DeHashed Base\n"
-            f"• BreachDirectory\n\n"
-            f"🔥 Liberar Painel Interativo Web com os links diretos de vazamento por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+            f"• Intelligence X (IntelX)\n"
+            f"• BreachDirectory\n"
+            f"• Leak-Lookup Engine\n"
+            f"• Scylla.sh Leak Index\n"
+            f"• Hudson Rock Cybercrime\n\n"
+            f"🔥 Liberar Painel Interativo Web com os links diretos de verificação por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
             f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
         )
 
@@ -851,7 +855,6 @@ if bot:
 
         nome_alvo = partes[1].strip()
 
-        # VALIDA NOME COMPLETO (Exige espaço / ao menos 2 nomes)
         if not e_nome_completo(nome_alvo) or "@" in nome_alvo or e_url(nome_alvo):
             responder_seguro(message, "⚠️ **Comando Inválido para Nome Completo!**\nO comando `/nome` exige nome e sobrenome completo (sem e-mails ou URLs).", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
@@ -965,7 +968,6 @@ if bot:
         except Exception as e:
             responder_seguro(message, f"⚠️ Acesso gravado no banco, mas o bot não conseguiu enviar mensagem direta ao usuário {target_user_id}.\nLink do painel: {link_web}")
 
-    # ENTRADA DE TEXTO DIRETO NO CHAT
     @bot.message_handler(func=lambda message: True)
     def handle_search(message):
         user_id = message.from_user.id
@@ -973,7 +975,6 @@ if bot:
         
         texto = message.text.strip()
         
-        # MODO ADMIN
         if user_id == ADMIN_ID and texto.lower().startswith("admin"):
             partes_admin = texto.split(maxsplit=2)
             
@@ -1026,7 +1027,6 @@ if bot:
 
         target = texto.replace("@", "").strip()
 
-        # BLOQUEIA URLS
         if e_url(target):
             responder_seguro(message, "⚠️ **Comando Inválido!**\nBusca por URLs/links não são aceitas. Digite apenas o username, /email ou /nome.", parse_mode="Markdown")
             orientar_uso_correto(message.chat.id)
@@ -1036,18 +1036,20 @@ if bot:
             responder_seguro(message, "⚠️ Termo de busca muito curto.")
             return
 
-        # ROTEAMENTO AUTOMÁTICO SE O USUÁRIO DIGITAR DIRETO NO CHAT
         if e_email_valido(target):
             texto_email = (
-                f"📧 CHECAGEM DE VAZAMENTOS PARA:\n"
+                f"📧 CHECAGEM DE VAZAMENTOS E CREDENCIAIS PARA:\n"
                 f"👤 {target}\n"
                 f"───────────────────────────────\n\n"
-                f"Mapeamos as principais bases globais de vazamento de credenciais e senhas:\n"
+                f"Mapeamos as principais bases globais de vazamento de dados e senhas:\n"
                 f"• Have I Been Pwned\n"
-                f"• Intelligence X\n"
                 f"• DeHashed Base\n"
-                f"• BreachDirectory\n\n"
-                f"🔥 Liberar Painel Interativo Web com os links diretos de vazamento por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"• Intelligence X (IntelX)\n"
+                f"• BreachDirectory\n"
+                f"• Leak-Lookup Engine\n"
+                f"• Scylla.sh Leak Index\n"
+                f"• Hudson Rock Cybercrime\n\n"
+                f"🔥 Liberar Painel Interativo Web com os links diretos de verificação por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
                 f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
             )
 
@@ -1089,7 +1091,6 @@ if bot:
             bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup)
             return
 
-        # SE DIGITOU APENAS UM USERNAME DIRETO NO CHAT
         msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target}...")
         resultados = executar_varredura_osint(target, is_fullname=False, is_email=False)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
@@ -1291,7 +1292,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v14.2 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v15.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
