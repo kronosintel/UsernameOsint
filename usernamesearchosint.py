@@ -1,15 +1,15 @@
 """
-Kronos Intel OSINT Bot v16.6
-- Padronização do gatilho '🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ 3.90 no Pix!' nos módulos /email e /nome
-- Comando /stats envia o relatório financeiro/métricas EXCLUSIVAMENTE para o grupo de logs/financeiro
-- ID fixo do Grupo de Logs & Financeiro: -1003986408630
-- Fuso horário ajustado para Brasília (America/Sao_Paulo / UTC-3)
-- Relatório TXT para /user com filtro estrito de perfis confirmados
-- Dashboard Web VIP modernizado
+Kronos Intel OSINT Bot v17.0
+- Correção de Segurança no Callback Data do Telegram (Limite de 64 bytes via MD5 Hashes)
+- Inclusão do reply_markup na mensagem de remarketing do Pix
+- Ajuste ético nas mensagens do funil de vendas (sem gatilhos falsos)
+- Relatório financeiro /stats enviado exclusivamente ao Grupo de Logs
+- Suporte para PostgreSQL / SQLite unificado
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -91,6 +91,14 @@ def init_db():
                 value TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS target_hashes (
+                hash_id TEXT PRIMARY KEY,
+                target_value TEXT,
+                query_type TEXT,
+                created_at TEXT
+            )
+        """)
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
         cursor.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('grupo_logs_id', '-1003986408630')")
@@ -113,6 +121,23 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
             conn.commit()
         conn.close()
         return res
+
+# --- GESTÃO DE HASHES DE CALLBACK PARA EVITAR ERRO DE 64 BYTES NO TELEGRAM ---
+def registrar_hash_alvo(alvo: str, query_type: str) -> str:
+    hash_curto = hashlib.md5(f"{alvo}_{query_type}".encode('utf-8')).hexdigest()[:10]
+    db_execute(
+        "INSERT INTO target_hashes (hash_id, target_value, query_type, created_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(hash_id) DO UPDATE SET target_value = EXCLUDED.target_value",
+        (hash_curto, alvo, query_type, datetime.now(TIMEZONE_BR).isoformat()),
+        commit=True
+    )
+    return hash_curto
+
+def obter_alvo_por_hash(hash_curto: str) -> tuple[str | None, str | None]:
+    res = db_execute("SELECT target_value, query_type FROM target_hashes WHERE hash_id = ?", (hash_curto,), fetchone=True)
+    if res:
+        return res[0], res[1]
+    return None, None
 
 def obter_grupo_logs_id() -> int:
     cfg = db_execute("SELECT value FROM config WHERE key = 'grupo_logs_id'", fetchone=True)
@@ -163,9 +188,6 @@ PLATFORM_URLS = {
     "Replit": "https://replit.com/@{username}",
     "CodePen": "https://codepen.io/{username}",
     "StackOverflow": "https://stackoverflow.com/users/{username}",
-    "Instagram": "https://www.instagram.com/{username}/",
-    "X (Twitter)": "https://x.com/{username}",
-    "LinkedIn": "https://www.linkedin.com/in/{username}/",
     "Reddit": "https://www.reddit.com/user/{username}/",
     "TikTok": "https://www.tiktok.com/@{username}",
     "Pinterest": "https://www.pinterest.com/{username}/",
@@ -206,7 +228,6 @@ NOT_FOUND_MARKERS = {
     "codeberg": ("page not found",),
     "pypi": ("404 not found",),
     "keybase": ("user not found",),
-    "instagram": ("page isn't available", "sorry, this page isn't available"),
     "reddit": ("this page is empty", "page not found"),
     "tiktok": ("couldn't find this account",),
     "telegram": ("if you have telegram",),
@@ -264,9 +285,9 @@ def orientar_uso_correto(chat_id: int):
         "1️⃣ **Para buscar por Username (Redes Sociais):**\n"
         "• Use: `/user alvo123`\n"
         "*(Apenas o nome de usuário. Não envie e-mails, links ou nomes com espaço)*\n\n"
-        "2️⃣ **Para buscar por E-mail (Vazamentos):**\n"
+        "2️⃣ **Para buscar por E-mail (Pesquisa de Fontes):**\n"
         "• Use: `/email exemplo@dominio.com`\n\n"
-        "3️⃣ **Para buscar por Nome Completo (Processos):**\n"
+        "3️⃣ **Para buscar por Nome Completo (Atalhos Judiciais):**\n"
         "• Use: `/nome João da Silva`"
     )
     try:
@@ -369,11 +390,11 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v16.6
+SISTEMA: Kronos Engine v17.0
 ===================================================================
 """
     if is_email:
-        corpo += f"""1. BASES DE VAZAMENTO DE E-MAIL E CREDENCIAIS
+        corpo += f"""1. BASES DE CONSULTA DE E-MAIL E FONTES
 -------------------------------------------------------------------
 """
         for p in resultados:
@@ -399,7 +420,7 @@ SISTEMA: Kronos Engine v16.6
             corpo += f"[+] {nome_b.ljust(28)} : {url_b}\n"
 
     else:
-        corpo += f"""1. REGISTROS JUDICIAIS E DIÁRIOS OFICIAIS
+        corpo += f"""1. ATALHOS DE BUSCA JUDICIAL E DIÁRIOS OFICIAIS
 -------------------------------------------------------------------
 """
         for p in resultados:
@@ -407,7 +428,7 @@ SISTEMA: Kronos Engine v16.6
 
     corpo += """
 ===================================================================
-Documento confidencial gerado por Kronos Intel OSINT Service.
+Documento de compilação gerado por Kronos Intel OSINT Service.
 ===================================================================
 """
     buf = io.BytesIO(corpo.encode('utf-8'))
@@ -450,6 +471,7 @@ def enviar_relatorio_espelho_admin(target: str, documento: io.BytesIO, user_id: 
         except Exception as e:
             logger.error("Erro ao enviar cópia ao admin: %s", str(e))
 
+# --- WORKER DE REMARKETING DO PIX COM O FIX DO REPLY_MARKUP ---
 def worker_remarketing_pix():
     while True:
         try:
@@ -471,13 +493,14 @@ def worker_remarketing_pix():
                     if (now - created_time).total_seconds() / 60 >= 10:
                         db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
                         if bot:
+                            hash_alvo = registrar_hash_alvo(target, qtype)
                             msg_lembrete = (
-                                f"⏳ SUA CHAVE PIX PARA {target.upper()} ESTÁ EXPIRANDO!\n\n"
-                                f"Conclua a liberação do seu relatório por apenas R$ {PRECO_PADRAO:.2f} no Pix antes que o link expire."
+                                f"⏳ O seu código Pix para a consulta de **{target.upper()}** está prestes a expirar.\n\n"
+                                f"Conclua a liberação do seu relatório interativo por R$ {PRECO_PADRAO:.2f} no Pix."
                             )
                             markup = InlineKeyboardMarkup(row_width=1)
-                            markup.add(InlineKeyboardButton(f"⚡ 🔓 CONCLUIR AGORA (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buy_{target}"))
-                            bot.send_message(uid, msg_lembrete)
+                            markup.add(InlineKeyboardButton(f"⚡ 🔓 GERAR NOVO PIX (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}"))
+                            bot.send_message(uid, msg_lembrete, parse_mode="Markdown", reply_markup=markup)
                 except Exception as ex:
                     logger.error("Erro no remarketing: %s", str(ex))
 
@@ -620,9 +643,9 @@ HTML_DASHBOARD_TEMPLATE = """
                     <div class="card-header-custom text-uppercase">
                         <i class="bi bi-check-circle-fill me-2 text-success"></i>
                         {% if is_email %}
-                            Bases de Vazamento de Credenciais Mapeadas
+                            Bases e Fontes de Consulta de E-mail Mapeadas
                         {% elif is_fullname %}
-                            Mapeamento Judicial, Processos e Diários Oficiais
+                            Atalhos Mapeados para Tribunais e Diários Oficiais
                         {% else %}
                             Perfis e Redes Sociais Confirmadas
                         {% endif %}
@@ -695,7 +718,7 @@ def ver_relatorio_web(token):
         dt_obj = dt_obj.replace(tzinfo=TIMEZONE_BR)
     data_formatada = dt_obj.astimezone(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
-    modulo_titulo = "VAZAMENTO DE E-MAIL" if is_email else ("REGISTROS JUDICIAIS" if is_fullname else "REDES SOCIAIS & USERNAME")
+    modulo_titulo = "CONSULTA DE E-MAIL" if is_email else ("BUSCA JUDICIAL" if is_fullname else "REDES SOCIAIS & USERNAME")
 
     return render_template_string(
         HTML_DASHBOARD_TEMPLATE,
@@ -761,18 +784,18 @@ if bot:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v16.6**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v17.0**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
             f"• Use `/user alvo123`\n"
-            f"• Identifica perfis ativos em mais de 45 redes.\n\n"
-            f"2️⃣ **BUSCA POR E-MAIL (VAZAMENTOS):**\n"
+            f"• Identifica perfis ativos em mais de 40 plataformas.\n\n"
+            f"2️⃣ **BUSCA POR E-MAIL (FONTES DE VERIFICAÇÃO):**\n"
             f"• Use `/email alvo@gmail.com`\n"
-            f"• Mapeia vazamentos de credenciais em 7 bases globais.\n\n"
-            f"3️⃣ **BUSCA POR NOME COMPLETO (JUDICIAL):**\n"
+            f"• Gera painel de busca em bases globais.\n\n"
+            f"3️⃣ **BUSCA POR NOME COMPLETO (ATALHOS JUDICIAIS):**\n"
             f"• Use `/nome João da Silva`\n"
-            f"• Mapeia processos e citações no Jusbrasil e Diários Oficiais.\n\n"
+            f"• Conecta aos motores do Jusbrasil, Escavador e Diários Oficiais.\n\n"
             f"📢 **Canal Oficial:** {CANAL_TAG_PUBLICO}\n"
             f"💬 **Suporte Direto:** @{SUPORTE_USERNAME}"
         )
@@ -823,19 +846,20 @@ if bot:
                 pass
 
         if encontrados:
+            hash_alvo = registrar_hash_alvo(target_user, "username")
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
             texto_resultado = (
-                f"🎯 PLATAFORMAS ENCONTRADAS PARA @{target_user}\n"
+                f"🎯 PLATAFORMAS LOCALIZADAS PARA @{target_user}\n"
                 f"───────────────────────────────\n\n"
                 f"{lista_plataformas}\n\n"
-                f"⚠️ Identificamos {len(encontrados)} contas ativas indexadas para este perfil.\n\n"
+                f"⚠️ Identificamos {len(encontrados)} contas públicas ativas indexadas para este perfil.\n\n"
                 f"Deseja obter o Painel Interativo Web com os links clicáveis de cada perfil, presença digital (Yandex/Google) e relatório TXT?\n\n"
-                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 SIM, QUERO O RELATÓRIO COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buy_{target_user}")
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 OBTER RELATÓRIO COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
             btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="final_cancel")
             markup.add(btn_sim, btn_canal, btn_nao)
@@ -848,7 +872,7 @@ if bot:
                 f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
             )
 
-    # --- COMANDO /email (EXCLUSIVO PARA VAZAMENTOS DE E-MAIL) ---
+    # --- COMANDO /email (EXCLUSIVO PARA BUSCA DE E-MAIL) ---
     @bot.message_handler(commands=['email'])
     def handle_email_command(message):
         user_id = message.from_user.id
@@ -868,25 +892,24 @@ if bot:
             orientar_uso_correto(message.chat.id)
             return
 
+        hash_alvo = registrar_hash_alvo(email_alvo, "email")
+
         texto_email = (
-            f"📧 CHECAGEM DE VAZAMENTOS E CREDENCIAIS PARA:\n"
+            f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
             f"👤 {email_alvo}\n"
             f"───────────────────────────────\n\n"
-            f"Mapeamos as principais bases globais de vazamento de dados e senhas:\n"
+            f"Gere o Painel Web Interativo com os atalhos organizados para as principais plataformas de verificação:\n"
             f"• Have I Been Pwned\n"
-            f"• DeHashed Base\n"
+            f"• DeHashed\n"
             f"• Intelligence X (IntelX)\n"
             f"• BreachDirectory\n"
-            f"• Leak-Lookup Engine\n"
-            f"• Scylla.sh Leak Index\n"
-            f"• Hudson Rock Cybercrime\n\n"
-            f"Deseja liberar o Painel Interativo Web com os links diretos de verificação e relatório TXT?\n\n"
-            f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
-            f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
+            f"• Leak-Lookup & Scylla\n\n"
+            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+            f"👉 Acompanhe alertas no canal: {CANAL_TAG_PUBLICO}"
         )
 
         markup = InlineKeyboardMarkup(row_width=1)
-        btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buyemail_{email_alvo}")
+        btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
         btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
         btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
         markup.add(btn_sim, btn_canal, btn_nao)
@@ -913,27 +936,22 @@ if bot:
             orientar_uso_correto(message.chat.id)
             return
 
-        msg_status = responder_seguro(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{nome_alvo}'...")
-        resultados = executar_varredura_osint(nome_alvo, is_fullname=True)
-        
-        if msg_status:
-            try:
-                bot.edit_message_text(f"✅ Análise de registros judiciais concluída para '{nome_alvo}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
+        hash_alvo = registrar_hash_alvo(nome_alvo, "fullname")
 
         texto_oferta = (
-            f"🔍 REGISTROS JUDICIAIS LOCALIZADOS PARA:\n"
+            f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
             f"👤 {nome_alvo.upper()}\n"
             f"───────────────────────────────\n\n"
-            f"Identificamos apontamentos no Jusbrasil, Escavador e Diários Oficiais estaduais.\n\n"
-            f"Deseja obter o Painel Interativo Web focado com os links diretos para cada tribunal e relatório TXT?\n\n"
-            f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
-            f"👉 Participe também da nossa comunidade oficial: {CANAL_TAG_PUBLICO}"
+            f"Gere o Painel Web Interativo com consultas configuradas para os principais portais públicos:\n"
+            f"• Jusbrasil e Escavador\n"
+            f"• Diários Oficiais Estaduais e União\n"
+            f"• Portal da Transparência\n\n"
+            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+            f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
         )
 
         markup = InlineKeyboardMarkup(row_width=1)
-        btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR PAINEL JUDICIAL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buynome_{nome_alvo}")
+        btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL JUDICIAL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
         btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
         btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
         markup.add(btn_sim, btn_canal, btn_nao)
@@ -1109,25 +1127,23 @@ if bot:
             return
 
         if e_email_valido(target):
+            hash_alvo = registrar_hash_alvo(target, "email")
             texto_email = (
-                f"📧 CHECAGEM DE VAZAMENTOS E CREDENCIAIS PARA:\n"
+                f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
                 f"👤 {target}\n"
                 f"───────────────────────────────\n\n"
-                f"Mapeamos as principais bases globais de vazamento de dados e senhas:\n"
+                f"Gere o Painel Web Interativo com os atalhos organizados para as principais plataformas de verificação:\n"
                 f"• Have I Been Pwned\n"
-                f"• DeHashed Base\n"
+                f"• DeHashed\n"
                 f"• Intelligence X (IntelX)\n"
                 f"• BreachDirectory\n"
-                f"• Leak-Lookup Engine\n"
-                f"• Scylla.sh Leak Index\n"
-                f"• Hudson Rock Cybercrime\n\n"
-                f"Deseja liberar o Painel Interativo Web com os links diretos de verificação e relatório TXT?\n\n"
-                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
-                f"👉 Acompanhe alertas de segurança no canal: {CANAL_TAG_PUBLICO}"
+                f"• Leak-Lookup & Scylla\n\n"
+                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+                f"👉 Acompanhe alertas no canal: {CANAL_TAG_PUBLICO}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buyemail_{target}")
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
             btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
             btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
             markup.add(btn_sim, btn_canal, btn_nao)
@@ -1136,27 +1152,21 @@ if bot:
             return
 
         if e_nome_completo(target):
-            msg_status = responder_seguro(message, f"🔎 Mapeando tribunais, diários oficiais e Jusbrasil para '{target}'...")
-            resultados = executar_varredura_osint(target, is_fullname=True)
-            
-            if msg_status:
-                try:
-                    bot.edit_message_text(f"✅ Análise de registros judiciais concluída para '{target}'!", chat_id=message.chat.id, message_id=msg_status.message_id)
-                except Exception:
-                    pass
-
+            hash_alvo = registrar_hash_alvo(target, "fullname")
             texto_upsell_oferta = (
-                f"🔍 REGISTROS JUDICIAIS LOCALIZADOS PARA:\n"
+                f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
                 f"👤 {target.upper()}\n"
                 f"───────────────────────────────\n\n"
-                f"Identificamos apontamentos no Jusbrasil, Escavador e Diários Oficiais estaduais.\n\n"
-                f"Deseja obter o Painel Interativo Web focado com os links diretos para cada tribunal e relatório TXT?\n\n"
-                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"Gere o Painel Web Interativo com consultas configuradas para os principais portais públicos:\n"
+                f"• Jusbrasil e Escavador\n"
+                f"• Diários Oficiais Estaduais e União\n"
+                f"• Portal da Transparência\n\n"
+                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 LIBERAR BUSCA JUDICIAL DE {target.upper()} (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buynome_{target}")
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL JUDICIAL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
             btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
             btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
             markup.add(btn_sim, btn_canal, btn_nao)
@@ -1175,19 +1185,20 @@ if bot:
                 pass
 
         if encontrados:
+            hash_alvo = registrar_hash_alvo(target, "username")
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
             texto_resultado = (
-                f"🎯 PLATAFORMAS ENCONTRADAS PARA @{target}\n"
+                f"🎯 PLATAFORMAS LOCALIZADAS PARA @{target}\n"
                 f"───────────────────────────────\n\n"
                 f"{lista_plataformas}\n\n"
-                f"⚠️ Identificamos {len(encontrados)} contas ativas indexadas para este perfil.\n\n"
+                f"⚠️ Identificamos {len(encontrados)} contas públicas ativas indexadas para este perfil.\n\n"
                 f"Deseja obter o Painel Interativo Web com os links clicáveis de cada perfil, presença digital (Yandex/Google) e relatório TXT?\n\n"
-                f"🔥 OFERTA LIMITADA: De R$ 19,90 por apenas R$ {PRECO_PADRAO:.2f} no Pix!\n\n"
+                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 SIM, QUERO O RELATÓRIO COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"buy_{target}")
+            btn_sim = InlineKeyboardButton(f"⚡ 🔓 OBTER RELATÓRIO COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
             btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
             btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="final_cancel")
             markup.add(btn_sim, btn_canal, btn_nao)
@@ -1200,18 +1211,16 @@ if bot:
                 f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
             )
 
+    # --- CALLBACK LISTENER COM TRATAMENTO DE HASH CURTO ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
-        if call.data.startswith("buy_") or call.data.startswith("buynome_") or call.data.startswith("buyemail_"):
-            if call.data.startswith("buynome_"):
-                target = call.data.split("buynome_")[1]
-                qtype = "fullname"
-            elif call.data.startswith("buyemail_"):
-                target = call.data.split("buyemail_")[1]
-                qtype = "email"
-            else:
-                target = call.data.split("buy_")[1]
-                qtype = "username"
+        if call.data.startswith("b_"):
+            hash_curto = call.data.split("b_")[1]
+            target, qtype = obter_alvo_por_hash(hash_curto)
+
+            if not target:
+                bot.answer_callback_query(call.id, "Sessão expirada. Por favor, envie a busca novamente.")
+                return
 
             user_id = call.from_user.id
             bot.answer_callback_query(call.id, f"Gerando Chave Pix de R$ {PRECO_PADRAO:.2f}...")
@@ -1220,13 +1229,13 @@ if bot:
 
             if qr_pix:
                 texto_oferta = (
-                    f"🔒 PACOTE KRONOS INTEL VIP — {target.upper()}\n"
+                    f"🔒 CONSULTA KRONOS INTEL — {target.upper()}\n"
                     f"───────────────────────────────\n"
                     f"Você está liberando:\n"
                     f"1. Painel Interativo Web Exclusivo ({qtype.upper()})\n"
                     f"2. Mapeamento Direto de Fontes e Dados\n"
                     f"3. Relatório Executivo para Download (.TXT)\n\n"
-                    f"💰 Valor: De R$ 19,90 por R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+                    f"💰 Valor: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
                     f"⚡ O painel interativo será liberado automaticamente após a confirmação do pagamento.\n\n"
@@ -1366,7 +1375,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v16.6 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v17.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
