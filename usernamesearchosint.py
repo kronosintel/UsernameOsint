@@ -1,11 +1,12 @@
 """
-Kronos Intel OSINT Bot v18.0
-- Suporte a Disco Persistente no Render e Upsert de Pagamentos no Webhook MP
-- Proteção estrita de entrada de Usernames (Regex e Try/Except na rota Telegram)
-- Grupo de Logs travado via Variável de Ambiente (LOG_GROUP_ID)
-- Expiração real de Pix em 30 minutos no Mercado Pago
-- Conformidade LGPD: Logs financeiros e pagamentos anonimizados (sem expor alvos)
-- Suporte atualizado para @kronos_intel
+Kronos Intel OSINT Bot v19.0
+- Reivindicação atômica de pagamento no Webhook via RETURNING (Zero duplicidade de requisições)
+- Proteção de privacidade nos logs do servidor (Token oculto em setup_webhook)
+- Limite de taxa (Rate Limiting) de 6 buscas por hora por usuário
+- Expiração periódica de dados pessoais e hashes conforme LGPD (+ comando /apagar)
+- Suporte a coluna 'pix_code' para cópia direta da chave sem parsing de texto
+- Marcador de ausência de conta corrigido para Steam
+- Suporte Oficial: @kronos_intel
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config.update(
     SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
-    MAX_CONTENT_LENGTH=16 * 1024,
+    MAX_CONTENT_LENGTH=1024 * 1024,  # 1 MB
 )
 
 DEFAULT_TIMEOUT = 3.0
@@ -67,7 +68,22 @@ sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
 
-# --- BANCO DE DADOS SQLITE ---
+# --- HISTÓRICO DE RATE LIMITING EN-MEMÓRIA ---
+_hist_rate_limit: dict[int, list[float]] = {}
+_rate_limit_lock = Lock()
+
+def limite_busca_ok(user_id: int, maximo: int = 6, janela_segundos: int = 3600) -> bool:
+    agora = time.time()
+    with _rate_limit_lock:
+        historico = [t for t in _hist_rate_limit.get(user_id, []) if agora - t < janela_segundos]
+        if len(historico) >= maximo:
+            _hist_rate_limit[user_id] = historico
+            return False
+        historico.append(agora)
+        _hist_rate_limit[user_id] = historico
+        return True
+
+# --- BANCO DE DADOS SQLITE / POSTGRES ---
 def init_db():
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
@@ -88,6 +104,7 @@ def init_db():
                 reminded INTEGER DEFAULT 0,
                 token TEXT,
                 results_json TEXT,
+                pix_code TEXT,
                 query_type TEXT DEFAULT 'username',
                 created_at TEXT
             )
@@ -106,6 +123,13 @@ def init_db():
                 created_at TEXT
             )
         """)
+        
+        # Garante a existência da coluna pix_code em bancos de dados existentes
+        try:
+            cursor.execute("ALTER TABLE payments ADD COLUMN pix_code TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
         conn.commit()
@@ -155,7 +179,7 @@ def setup_webhook():
             bot.remove_webhook()
             time.sleep(1)
             success = bot.set_webhook(url=webhook_url)
-            logger.info("Configuração do Webhook Telegram (%s): %s", webhook_url, success)
+            logger.info("Webhook Telegram configurado: %s", success)
         except Exception as e:
             logger.error("Erro ao configurar Webhook Telegram: %s", str(e))
 
@@ -219,6 +243,7 @@ NOT_FOUND_MARKERS = {
     "behance": ("oops! we can't find that page",),
     "dribbble": ("404", "page not found"),
     "replit": ("404", "not found"),
+    "steam": ("the specified profile could not be found", "could not be found", "error"),
 }
 
 def registrar_acesso(user_id: int):
@@ -243,12 +268,14 @@ def e_email_valido(termo: str) -> bool:
 def e_url(termo: str) -> bool:
     if e_email_valido(termo):
         return False
-    padrao_url = re.compile(
-        r'^(?:http|ftp)s?://'
-        r'|(?:www\.)'
-        r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)'
-    , re.IGNORECASE)
-    return bool(padrao_url.search(termo))
+    if "/" in termo or "http://" in termo or "https://" in termo:
+        padrao_url = re.compile(
+            r'^(?:http|ftp)s?://'
+            r'|(?:www\.)'
+            r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)'
+        , re.IGNORECASE)
+        return bool(padrao_url.search(termo))
+    return False
 
 def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
     try:
@@ -372,7 +399,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v18.0
+SISTEMA: Kronos Engine v19.0
 ===================================================================
 """
     if is_email:
@@ -443,10 +470,10 @@ def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: s
         pid = str(res.get("id"))
         
         db_execute(
-            "INSERT INTO payments (payment_id, user_id, target_username, amount, status, reminded, token, query_type, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?) "
-            "ON CONFLICT(payment_id) DO UPDATE SET target_username=excluded.target_username, token=excluded.token, query_type=excluded.query_type",
-            (pid, user_id, target, valor, token_relatorio, query_type, datetime.now(TIMEZONE_BR).isoformat()),
+            "INSERT INTO payments (payment_id, user_id, target_username, amount, status, reminded, token, pix_code, query_type, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?) "
+            "ON CONFLICT(payment_id) DO UPDATE SET target_username=excluded.target_username, token=excluded.token, pix_code=excluded.pix_code, query_type=excluded.query_type",
+            (pid, user_id, target, valor, token_relatorio, qr_code, query_type, datetime.now(TIMEZONE_BR).isoformat()),
             commit=True
         )
         return qr_code, img_bytes, token_relatorio
@@ -454,42 +481,54 @@ def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: s
         logger.error("Erro ao gerar Pix: %s", str(e))
         return None, None, None
 
-def worker_remarketing_pix():
+# --- WORKER: REMARKETING E RETENÇÃO DE DADOS (LGPD) ---
+def worker_background():
     while True:
         try:
             time.sleep(60)
+            now = datetime.now(TIMEZONE_BR)
+
+            # 1. REMARKETING
             pendentes = db_execute(
                 "SELECT payment_id, user_id, target_username, created_at, query_type FROM payments WHERE status = 'pending' AND reminded = 0",
                 fetchall=True
             )
-            if not pendentes:
-                continue
+            if pendentes:
+                for p in pendentes:
+                    pid, uid, target, created_str, qtype = p[0], p[1], p[2], p[3], p[4]
+                    try:
+                        created_time = datetime.fromisoformat(created_str)
+                        if created_time.tzinfo is None:
+                            created_time = created_time.replace(tzinfo=TIMEZONE_BR)
+                        minutos_decorridos = (now - created_time).total_seconds() / 60
+                        
+                        if 10 <= minutos_decorridos < 30:
+                            db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
+                            if bot:
+                                hash_alvo = registrar_hash_alvo(target, qtype)
+                                msg_lembrete = (
+                                    f"⏳ O seu código Pix de consulta expira em breve.\n\n"
+                                    f"Conclua a liberação do seu relatório interativo por R$ {PRECO_PADRAO:.2f} no Pix."
+                                )
+                                markup = InlineKeyboardMarkup(row_width=1)
+                                markup.add(InlineKeyboardButton(f"⚡ 🔓 CONCLUIR AGORA (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}"))
+                                bot.send_message(uid, msg_lembrete, parse_mode="Markdown", reply_markup=markup)
+                        elif minutos_decorridos >= 30:
+                            db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
+                    except Exception as ex:
+                        logger.error("Erro no remarketing: %s", str(ex))
 
-            now = datetime.now(TIMEZONE_BR)
-            for p in pendentes:
-                pid, uid, target, created_str, qtype = p[0], p[1], p[2], p[3], p[4]
-                try:
-                    created_time = datetime.fromisoformat(created_str)
-                    if created_time.tzinfo is None:
-                        created_time = created_time.replace(tzinfo=TIMEZONE_BR)
-                    if (now - created_time).total_seconds() / 60 >= 10:
-                        db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
-                        if bot:
-                            hash_alvo = registrar_hash_alvo(target, qtype)
-                            msg_lembrete = (
-                                f"⏳ O seu código Pix de consulta expira em 20 minutos.\n\n"
-                                f"Conclua a liberação do seu relatório interativo por R$ {PRECO_PADRAO:.2f} no Pix."
-                            )
-                            markup = InlineKeyboardMarkup(row_width=1)
-                            markup.add(InlineKeyboardButton(f"⚡ 🔓 CONCLUIR AGORA (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}"))
-                            bot.send_message(uid, msg_lembrete, parse_mode="Markdown", reply_markup=markup)
-                except Exception as ex:
-                    logger.error("Erro no remarketing: %s", str(ex))
+            # 2. RETENÇÃO E APAGAMENTO DE DADOS (LGPD)
+            lim_hashes = (now - timedelta(days=1)).isoformat()
+            db_execute("DELETE FROM target_hashes WHERE created_at < ?", (lim_hashes,), commit=True)
+            
+            lim_payments = (now - timedelta(days=30)).isoformat()
+            db_execute("UPDATE payments SET results_json=NULL, target_username='(expirado)' WHERE created_at < ?", (lim_payments,), commit=True)
 
         except Exception as e:
-            logger.error("Erro no worker de remarketing: %s", str(e))
+            logger.error("Erro no worker background: %s", str(e))
 
-Thread(target=worker_remarketing_pix, daemon=True).start()
+Thread(target=worker_background, daemon=True).start()
 
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
@@ -672,9 +711,9 @@ HTML_DASHBOARD_TEMPLATE = """
 
 @app.route("/relatorio/<token>")
 def ver_relatorio_web(token):
-    p = db_execute("SELECT target_username, results_json, query_type, created_at FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
+    p = db_execute("SELECT target_username, results_json, query_type, created_at FROM payments WHERE token = ? AND status = 'approved' AND results_json IS NOT NULL", (token,), fetchone=True)
     if not p:
-        return "Relatório não encontrado ou acesso pendente.", 404
+        return "Relatório não encontrado, expirado ou acesso pendente.", 404
 
     target, results_json_str, query_type, created_at = p[0], p[1], p[2], p[3]
     results_json = json.loads(results_json_str)
@@ -715,9 +754,9 @@ def ver_relatorio_web(token):
 
 @app.route("/download/txt/<token>")
 def download_txt(token):
-    p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ? AND status = 'approved'", (token,), fetchone=True)
+    p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ? AND status = 'approved' AND results_json IS NOT NULL", (token,), fetchone=True)
     if not p:
-        return "Relatório não encontrado.", 404
+        return "Relatório não encontrado ou expirado.", 404
 
     target, results_json_str, query_type = p[0], p[1], p[2]
     results_json = json.loads(results_json_str)
@@ -748,18 +787,13 @@ if bot:
 
         if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
             try:
-                msg_canal = (
-                    f"⚡ NOVO USUÁRIO INICIOU O BOT!\n\n"
-                    f"👤 Usuário: {user_name}\n"
-                    f"🎯 O Kronos OSINT Bot está pronto para realizar varreduras.\n\n"
-                    f"👉 Faça sua busca agora: {BOT_USERNAME}"
-                )
+                msg_canal = "⚡ Novo usuário iniciou o bot de consultas OSINT!"
                 bot.send_message(CANAL_PRINCIPAL_ID, msg_canal)
             except Exception as ex:
                 logger.error("Erro ao notificar no canal principal: %s", str(ex))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v18.0**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v19.0**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -771,6 +805,8 @@ if bot:
             f"3️⃣ **BUSCA POR NOME COMPLETO (ATALHOS JUDICIAIS):**\n"
             f"• Use `/nome João da Silva`\n"
             f"• Conecta aos motores do Jusbrasil, Escavador e Diários Oficiais.\n\n"
+            f"⚙️ **PRIVACIDADE (LGPD):**\n"
+            f"• Use `/apagar` para excluir instantaneamente todos os seus registros.\n\n"
             f"📢 **Canal Oficial:** {CANAL_TAG_PUBLICO}\n"
             f"💬 **Suporte Direto:** @{SUPORTE_USERNAME}"
         )
@@ -781,6 +817,13 @@ if bot:
         markup.add(btn_canal, btn_suporte)
 
         bot.send_message(message.chat.id, menu_boas_vindas, parse_mode="Markdown", reply_markup=markup)
+
+    @bot.message_handler(commands=['apagar'])
+    def handle_apagar_dados(message):
+        user_id = message.from_user.id
+        db_execute("DELETE FROM users WHERE user_id = ?", (user_id,), commit=True)
+        db_execute("UPDATE payments SET target_username='(apagado)', results_json=NULL, pix_code=NULL WHERE user_id = ?", (user_id,), commit=True)
+        bot.reply_to(message, "🗑️ **Solicitação de Privacidade LGPD Concluída:** Seus dados de acesso e pesquisas associados foram apagados permanentemente do sistema.", parse_mode="Markdown")
 
     @bot.message_handler(content_types=['document', 'photo', 'audio', 'video', 'voice', 'sticker'])
     def handle_invalid_media(message):
@@ -794,6 +837,10 @@ if bot:
     def handle_user_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ **Limite de buscas atingido!**\nVocê atingiu o limite de 6 consultas por hora. Aguarde um momento para realizar novas varreduras.")
+            return
 
         texto_limpo = message.text.replace("\n", " ").strip()
         partes = texto_limpo.split(maxsplit=1)
@@ -852,6 +899,10 @@ if bot:
         user_id = message.from_user.id
         registrar_acesso(user_id)
 
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ **Limite de buscas atingido!**\nVocê atingiu o limite de 6 consultas por hora.")
+            return
+
         texto_limpo = message.text.replace("\n", " ").strip()
         partes = texto_limpo.split(maxsplit=1)
         if len(partes) < 2:
@@ -895,6 +946,10 @@ if bot:
     def handle_nome_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ **Limite de buscas atingido!**\nVocê atingiu o limite de 6 consultas por hora.")
+            return
 
         texto_limpo = message.text.replace("\n", " ").strip()
         partes = texto_limpo.split(maxsplit=1)
@@ -1002,7 +1057,7 @@ if bot:
         pid_cortesia = f"cortesia_{int(time.time())}"
 
         db_execute(
-            "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, query_type, results_json, created_at) "
+            "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
             "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?) "
             "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token, results_json=excluded.results_json",
             (pid_cortesia, target_user_id, alvo, token_relatorio, qtype, results_json, datetime.now(TIMEZONE_BR).isoformat()),
@@ -1033,6 +1088,10 @@ if bot:
         registrar_acesso(user_id)
 
         if message.chat.type in ['group', 'supergroup']:
+            return
+
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ **Limite de buscas atingido!**\nVocê atingiu o limite de 6 consultas por hora.")
             return
         
         texto = message.text.replace("\n", " ").strip()
@@ -1190,7 +1249,7 @@ if bot:
                 f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
             )
 
-    # --- CALLBACK LISTENER COM TRATAMENTO DE HASH CURTO ---
+    # --- CALLBACK LISTENER COM EXTRAÇÃO DE PIX_CODE DO BANCO ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
         if call.data.startswith("b_"):
@@ -1240,16 +1299,17 @@ if bot:
             )
 
         elif call.data.startswith("getkey_"):
-            bot.answer_callback_query(call.id, "Enviando chave...")
-            msg_texto = call.message.caption or call.message.text
-            lines = msg_texto.split("\n\n") if msg_texto else []
-            pix_key = None
-            for l in lines:
-                if len(l) > 50 and not l.startswith("🔒") and not l.startswith("⚡") and not l.startswith("⚖️"):
-                    pix_key = l.strip()
-                    break
-            if pix_key:
-                bot.send_message(call.message.chat.id, text=f"`{pix_key}`", parse_mode="Markdown")
+            try:
+                uid = int(call.data.split("getkey_")[1])
+                row = db_execute("SELECT pix_code FROM payments WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1", (uid,), fetchone=True)
+                if row and row[0]:
+                    bot.answer_callback_query(call.id, "Enviando chave...")
+                    bot.send_message(call.message.chat.id, text=f"`{row[0]}`", parse_mode="Markdown")
+                else:
+                    bot.answer_callback_query(call.id, "Chave Pix não encontrada ou já expirada.")
+            except Exception as e:
+                logger.error("Erro ao buscar pix_code no banco: %s", str(e))
+                bot.answer_callback_query(call.id, "Erro ao recuperar chave Pix.")
 
 @app.route(f"/telegram/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
@@ -1265,7 +1325,7 @@ def telegram_webhook():
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
 
-# --- WEBHOOK DO MERCADO PAGO COM UPSERT NO BANCO E DADOS ANONIMIZADOS NOS LOGS ---
+# --- WEBHOOK MP COM REIVINDICAÇÃO ATÔMICA E ZERO DUPLICIDADE ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
@@ -1288,6 +1348,7 @@ def webhook():
 
         pid_str = str(payment_id)
         
+        # Pre-check básico antes de bater na API do Mercado Pago
         p_check = db_execute("SELECT status FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
         if p_check and p_check[0] == "approved":
             return jsonify({"status": "ok"}), 200
@@ -1307,16 +1368,20 @@ def webhook():
                     resultados = executar_varredura_osint(target, is_fullname=is_fullname, is_email=is_email)
                     results_json = json.dumps(resultados)
 
-                    # UPSERT NO BANCO DE DADOS
-                    db_execute(
+                    # REIVINDICAÇÃO ATÔMICA
+                    claimed = db_execute(
                         "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
                         "VALUES (?, ?, ?, ?, 'approved', ?, ?, ?, ?) "
                         "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token, "
-                        "results_json=excluded.results_json, query_type=excluded.query_type",
+                        "results_json=excluded.results_json, query_type=excluded.query_type "
+                        "WHERE payments.status <> 'approved' RETURNING payment_id",
                         (pid_str, telegram_id, target, payment_info.get("transaction_amount", PRECO_PADRAO),
                          token_relatorio, results_json, query_type, datetime.now(TIMEZONE_BR).isoformat()),
-                        commit=True
+                        fetchone=True, commit=True
                     )
+
+                    if not claimed:
+                        return jsonify({"status": "ok"}), 200
 
                     if telegram_id and bot:
                         link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
@@ -1336,7 +1401,6 @@ def webhook():
 
                         registrar_relatorio()
 
-                    # LOGS NO GRUPO SEM EXPOR O ALVO (LGPD)
                     grupo_logs_id = obter_grupo_logs_id()
                     if bot and grupo_logs_id:
                         try:
@@ -1360,7 +1424,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v18.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v19.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
