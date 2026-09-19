@@ -1,8 +1,10 @@
 """
-Kronos Intel OSINT Bot v22.1
-- Correção crítica do NameError na calibração de falsos positivos no startup
-- Supressão de lembrete de remarketing para dados apagados (/apagar)
-- Inclusão de notification_url explícita na criação da cobrança Pix via Mercado Pago
+Kronos Intel OSINT Bot v23.0
+- Notificação completa de novos acessos (/start) enviada ao grupo de logs/controle (ID, Nome, Username e Link direto)
+- Notificação de entrada enviada também ao canal principal
+- Correção do NameError na calibração de falsos positivos
+- Supressão de lembretes para dados apagados (/apagar)
+- Inclusão da notification_url explícita para o webhook do Mercado Pago
 - Suporte Oficial: @kronos_intel
 """
 from __future__ import annotations
@@ -414,7 +416,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v22.1
+SISTEMA: Kronos Engine v23.0
 ===================================================================
 """
     if is_email:
@@ -805,20 +807,42 @@ if bot:
     def send_welcome(message):
         user_id = message.from_user.id
         
-        raw_name = message.from_user.first_name or "Usuario"
-        user_name = "".join(c for c in raw_name if c.isalnum() or c == " ")[:30].strip() or "Usuario"
+        raw_first = message.from_user.first_name or "Usuario"
+        raw_last = message.from_user.last_name or ""
+        username_tg = f"@{message.from_user.username}" if message.from_user.username else "Sem @username"
+        nome_completo_tg = f"{raw_first} {raw_last}".strip()
+        user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
         
         registrar_acesso(user_id)
 
-        if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
+        # 1. NOTIFICAÇÃO COMPLETA DE CONTROLE PARA O GRUPO DE LOGS
+        grupo_logs_id = obter_grupo_logs_id()
+        if grupo_logs_id and user_id != ADMIN_ID:
             try:
-                msg_canal = "⚡ Novo usuário iniciou o bot de consultas OSINT!"
+                data_hora_acesso = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
+                msg_controle_logs = (
+                    f"👤 **NOVO USUÁRIO INICIOU O BOT (/start)**\n"
+                    f"───────────────────────────────\n"
+                    f"• **ID Telegram:** `{user_id}`\n"
+                    f"• **Nome:** {nome_completo_tg}\n"
+                    f"• **Username:** {username_tg}\n"
+                    f"• **Link Direto:** [Abrir Chat](tg://user?id={user_id})\n"
+                    f"• **Data/Hora:** {data_hora_acesso}"
+                )
+                bot.send_message(grupo_logs_id, msg_controle_logs, parse_mode="Markdown")
+            except Exception as ex_log:
+                logger.error("Erro ao enviar notificação de start no grupo de logs: %s", str(ex_log))
+
+        # 2. NOTIFICAÇÃO PARA O CANAL PRINCIPAL
+        if CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
+            try:
+                msg_canal = f"⚡ Novo usuário ({username_tg}) iniciou o bot de consultas OSINT!"
                 bot.send_message(CANAL_PRINCIPAL_ID, msg_canal)
-            except Exception as ex:
-                logger.error("Erro ao notificar no canal principal: %s", str(ex))
+            except Exception as ex_canal:
+                logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v22.1**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v23.0**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
@@ -1462,7 +1486,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v22.1 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v23.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
