@@ -1,9 +1,10 @@
 """
-Kronos Intel OSINT Bot v25.0
-- Correção crítica: Remoção de parse_mode="Markdown" em ofertas para suportar usernames e e-mails com "_"
-- Prevenção de spam e vazamento de privacidade no /start (notificação apenas para novos usuários e sem @username no canal)
+Kronos Intel OSINT Bot v26.0
+- Atualização dos usernames oficiais: @kronosinteloficial (Canal) e @kronosintel (Suporte)
+- Correção de parse_mode="Markdown" em ofertas para suportar usernames e e-mails com "_"
+- Prevenção de spam e vazamento de privacidade no /start (notificação apenas para novos usuários)
 - Trava atômica no banco SQLite para impedir resgate duplo de relatório gratuito (claimfree_)
-- Suporte Oficial: @kronos_intel
+- Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
 
@@ -53,9 +54,9 @@ RE_USERNAME = re.compile(r"^(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{2,40}$")
 
 CANAL_PRINCIPAL_ID = int(os.getenv("CANAL_PRINCIPAL_ID", "-1003802363624"))
 LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "-1003986408630"))
-CANAL_TAG_PUBLICO = os.getenv("CANAL_TAG_PUBLICO", "@kronosintel_oficial")
+CANAL_TAG_PUBLICO = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
-SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronos_intel")
+SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronosintel")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosSearchbot")
 WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
 
@@ -434,7 +435,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v25.0
+SISTEMA: Kronos Engine v26.0
 ===================================================================
 """
     if is_email:
@@ -886,7 +887,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao Kronos Intel OSINT Bot v25.0.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao Kronos Intel OSINT Bot v26.0.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
             f"Basta fazer parte do nosso canal oficial! Ao entrar, você ganha o direito de gerar 1 consulta gratuita (Username, E-mail ou Nome Completo).\n\n"
@@ -1575,7 +1576,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v25.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v26.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
