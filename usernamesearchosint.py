@@ -1,8 +1,10 @@
 """
-Kronos Intel OSINT Bot v22.1
-- Correção crítica do NameError na calibração de falsos positivos no startup
-- Supressão de lembrete de remarketing para dados apagados (/apagar)
-- Inclusão de notification_url explícita na criação da cobrança Pix via Mercado Pago
+Kronos Intel OSINT Bot v24.0
+- Relatório Gratuito de boas-vindas para novos membros do canal/grupo oficial (Uso Único por utilizador)
+- Comando /statistics e /stats unificados enviando relatório financeiro ao grupo de logs
+- Notificação de entrada (/start) enviada para o canal principal e grupo de logs
+- Correção do NameError na calibração de falsos positivos
+- Supressão de lembretes para dados apagados (/apagar) e notification_url explícita
 - Suporte Oficial: @kronos_intel
 """
 from __future__ import annotations
@@ -123,6 +125,12 @@ def init_db():
                 created_at TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS free_claims (
+                user_id INTEGER PRIMARY KEY,
+                claimed_at TEXT
+            )
+        """)
         
         try:
             cursor.execute("ALTER TABLE payments ADD COLUMN pix_code TEXT")
@@ -155,6 +163,24 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
             conn.commit()
         conn.close()
         return res
+
+def usuario_ja_usou_gratis(user_id: int) -> bool:
+    res = db_execute("SELECT 1 FROM free_claims WHERE user_id = ?", (user_id,), fetchone=True)
+    return res is not None
+
+def registrar_uso_gratis(user_id: int):
+    now_str = datetime.now(TIMEZONE_BR).isoformat()
+    db_execute("INSERT OR IGNORE INTO free_claims (user_id, claimed_at) VALUES (?, ?)", (user_id, now_str), commit=True)
+
+def usuario_e_membro_canal(user_id: int) -> bool:
+    if not bot or not CANAL_PRINCIPAL_ID:
+        return False
+    try:
+        member = bot.get_chat_member(CANAL_PRINCIPAL_ID, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        logger.error("Erro ao verificar membro no canal: %s", str(e))
+        return False
 
 def registrar_hash_alvo(alvo: str, query_type: str, resultados: dict | None = None) -> str:
     hash_curto = hashlib.md5(f"{alvo}_{query_type}".encode('utf-8')).hexdigest()[:10]
@@ -414,7 +440,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v22.1
+SISTEMA: Kronos Engine v24.0
 ===================================================================
 """
     if is_email:
@@ -495,6 +521,37 @@ def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: s
     except Exception as e:
         logger.error("Erro ao gerar Pix: %s", str(e))
         return None, None, None
+
+def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, resultados: dict) -> str:
+    results_json = json.dumps(resultados)
+    token_relatorio = secrets.token_urlsafe(16)
+    pid_free = f"free_claim_{user_id}_{int(time.time())}"
+
+    db_execute(
+        "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
+        "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?) "
+        "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token, results_json=excluded.results_json",
+        (pid_free, user_id, target, token_relatorio, query_type, results_json, datetime.now(TIMEZONE_BR).isoformat()),
+        commit=True
+    )
+    registrar_uso_gratis(user_id)
+    registrar_relatorio()
+
+    return f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
+
+def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    
+    if not usuario_ja_usou_gratis(user_id):
+        btn_gratis = InlineKeyboardButton("🎁 RESGATAR RELATÓRIO GRATUITO (Membros)", callback_data=f"claimfree_{hash_alvo}")
+        markup.add(btn_gratis)
+
+    btn_sim = InlineKeyboardButton(f"⚡ 🔓 OBTER PAINEL COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
+    btn_canal = InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
+    btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
+    
+    markup.add(btn_sim, btn_canal, btn_nao)
+    return markup
 
 def worker_background():
     while True:
@@ -805,31 +862,52 @@ if bot:
     def send_welcome(message):
         user_id = message.from_user.id
         
-        raw_name = message.from_user.first_name or "Usuario"
-        user_name = "".join(c for c in raw_name if c.isalnum() or c == " ")[:30].strip() or "Usuario"
+        raw_first = message.from_user.first_name or "Usuario"
+        raw_last = message.from_user.last_name or ""
+        username_tg = f"@{message.from_user.username}" if message.from_user.username else "Sem @username"
+        nome_completo_tg = f"{raw_first} {raw_last}".strip()
+        user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
         
         registrar_acesso(user_id)
 
-        if bot and CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
+        # 1. NOTIFICAÇÃO COMPLETA DE CONTROLE PARA O GRUPO DE LOGS
+        grupo_logs_id = obter_grupo_logs_id()
+        if grupo_logs_id and user_id != ADMIN_ID:
             try:
-                msg_canal = "⚡ Novo usuário iniciou o bot de consultas OSINT!"
+                data_hora_acesso = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
+                msg_controle_logs = (
+                    f"👤 **NOVO USUÁRIO INICIOU O BOT (/start)**\n"
+                    f"───────────────────────────────\n"
+                    f"• **ID Telegram:** `{user_id}`\n"
+                    f"• **Nome:** {nome_completo_tg}\n"
+                    f"• **Username:** {username_tg}\n"
+                    f"• **Link Direto:** [Abrir Chat](tg://user?id={user_id})\n"
+                    f"• **Data/Hora:** {data_hora_acesso}"
+                )
+                bot.send_message(grupo_logs_id, msg_controle_logs, parse_mode="Markdown")
+            except Exception as ex_log:
+                logger.error("Erro ao enviar notificação de start no grupo de logs: %s", str(ex_log))
+
+        # 2. NOTIFICAÇÃO PARA O CANAL PRINCIPAL
+        if CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
+            try:
+                msg_canal = f"⚡ Novo usuário ({username_tg}) iniciou o bot de consultas OSINT!"
                 bot.send_message(CANAL_PRINCIPAL_ID, msg_canal)
-            except Exception as ex:
-                logger.error("Erro ao notificar no canal principal: %s", str(ex))
+            except Exception as ex_canal:
+                logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v22.1**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v24.0**.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
-            f"🛠 **ESCOLHA O MÓDULO DE BUSCA QUE DESEJA USAR:**\n\n"
+            f"🎁 **GANHE 1 RELATÓRIO COMPLETO GRATUITO!**\n"
+            f"Basta fazer parte do nosso canal oficial! Ao entrar, você ganha o direito de gerar **1 consulta gratuita** (Username, E-mail ou Nome Completo).\n\n"
+            f"🛠 **MÓDULOS DISPONÍVEIS:**\n\n"
             f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
-            f"• Use `/user alvo123`\n"
-            f"• Mapeia possíveis perfis em plataformas abertas.\n\n"
+            f"• Use `/user alvo123`\n\n"
             f"2️⃣ **BUSCA POR E-MAIL (FONTES DE VERIFICAÇÃO):**\n"
-            f"• Use `/email alvo@gmail.com`\n"
-            f"• Gera painel de busca em bases globais.\n\n"
+            f"• Use `/email alvo@gmail.com`\n\n"
             f"3️⃣ **BUSCA POR NOME COMPLETO (ATALHOS JUDICIAIS):**\n"
-            f"• Use `/nome João da Silva`\n"
-            f"• Conecta aos motores do Jusbrasil, Escavador e Diários Oficiais.\n\n"
+            f"• Use `/nome João da Silva`\n\n"
             f"⚙️ **PRIVACIDADE (LGPD):**\n"
             f"• Use `/apagar` para excluir instantaneamente todos os seus registros.\n\n"
             f"📢 **Canal Oficial:** {CANAL_TAG_PUBLICO}\n"
@@ -837,7 +915,7 @@ if bot:
         )
 
         markup = InlineKeyboardMarkup(row_width=1)
-        btn_canal = InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
+        btn_canal = InlineKeyboardButton("📢 Entrar no Canal Oficial (Ganhar Relatório Grátis)", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
         btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
         markup.add(btn_canal, btn_suporte)
 
@@ -893,23 +971,23 @@ if bot:
         if encontrados:
             hash_alvo = registrar_hash_alvo(target_user, "username", resultados)
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+            
+            status_gratis_txt = ""
+            if not usuario_ja_usou_gratis(user_id):
+                status_gratis_txt = f"🎁 **BÓNNUS GRATUITO DISPONÍVEL:** Como ainda não resgatou a sua consulta gratuita de membro do grupo, pode gerar este relatório **SEM CUSTO** clicando no botão abaixo!\n\n"
+
             texto_resultado = (
                 f"🎯 POSSÍVEIS PERFIS PARA @{target_user}\n"
                 f"───────────────────────────────\n\n"
                 f"{lista_plataformas}\n\n"
                 f"⚠️ Identificamos {len(encontrados)} possíveis plataformas associadas a este termo.\n\n"
-                f"Deseja obter o Painel Interativo Web com os links diretos para cada perfil, presença digital (Yandex/Google) e relatório TXT?\n\n"
-                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+                f"{status_gratis_txt}"
+                f"💳 Valor normal da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
-            markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 OBTER RELATÓRIO COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
-            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="final_cancel")
-            markup.add(btn_sim, btn_canal, btn_nao)
-
-            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
+            markup = construir_markup_oferta(hash_alvo, user_id)
+            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
         else:
             bot.send_message(
                 message.chat.id,
@@ -939,27 +1017,23 @@ if bot:
         resultados = executar_varredura_osint(email_alvo, is_email=True)
         hash_alvo = registrar_hash_alvo(email_alvo, "email", resultados)
 
+        status_gratis_txt = ""
+        if not usuario_ja_usou_gratis(user_id):
+            status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+
         texto_email = (
             f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
             f"👤 {email_alvo}\n"
             f"───────────────────────────────\n\n"
             f"Gere o Painel Web Interativo com os atalhos organizados para as principais plataformas de verificação:\n"
-            f"• Have I Been Pwned\n"
-            f"• DeHashed\n"
-            f"• Intelligence X (IntelX)\n"
-            f"• BreachDirectory\n"
-            f"• Leak-Lookup & Scylla\n\n"
+            f"• Have I Been Pwned | DeHashed | IntelX | BreachDirectory | Scylla\n\n"
+            f"{status_gratis_txt}"
             f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
             f"👉 Acompanhe alertas no canal: {CANAL_TAG_PUBLICO}"
         )
 
-        markup = InlineKeyboardMarkup(row_width=1)
-        btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
-        btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-        btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
-        markup.add(btn_sim, btn_canal, btn_nao)
-
-        bot.send_message(message.chat.id, texto_email, reply_markup=markup)
+        markup = construir_markup_oferta(hash_alvo, user_id)
+        bot.send_message(message.chat.id, texto_email, reply_markup=markup, parse_mode="Markdown")
 
     @bot.message_handler(commands=['nome'])
     def handle_nome_command(message):
@@ -983,27 +1057,25 @@ if bot:
         resultados = executar_varredura_osint(nome_alvo, is_fullname=True)
         hash_alvo = registrar_hash_alvo(nome_alvo, "fullname", resultados)
 
+        status_gratis_txt = ""
+        if not usuario_ja_usou_gratis(user_id):
+            status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+
         texto_oferta = (
             f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
             f"👤 {nome_alvo.upper()}\n"
             f"───────────────────────────────\n\n"
             f"Gere o Painel Web Interativo com consultas configuradas para os principais portais públicos:\n"
-            f"• Jusbrasil e Escavador\n"
-            f"• Diários Oficiais Estaduais e União\n"
-            f"• Portal da Transparência\n\n"
+            f"• Jusbrasil | Escavador | Diários Oficiais | Portal Transparência\n\n"
+            f"{status_gratis_txt}"
             f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
             f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
         )
 
-        markup = InlineKeyboardMarkup(row_width=1)
-        btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL JUDICIAL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
-        btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-        btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
-        markup.add(btn_sim, btn_canal, btn_nao)
+        markup = construir_markup_oferta(hash_alvo, user_id)
+        bot.send_message(message.chat.id, texto_oferta, reply_markup=markup, parse_mode="Markdown")
 
-        bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
-
-    @bot.message_handler(commands=['stats'])
+    @bot.message_handler(commands=['stats', 'statistics'])
     def handle_stats_command(message):
         if message.from_user.id != ADMIN_ID:
             return
@@ -1175,51 +1247,45 @@ if bot:
         if e_email_valido(target):
             resultados = executar_varredura_osint(target, is_email=True)
             hash_alvo = registrar_hash_alvo(target, "email", resultados)
+            status_gratis_txt = ""
+            if not usuario_ja_usou_gratis(user_id):
+                status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+
             texto_email = (
                 f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
                 f"👤 {target}\n"
                 f"───────────────────────────────\n\n"
                 f"Gere o Painel Web Interativo com os atalhos organizados para as principais plataformas de verificação:\n"
-                f"• Have I Been Pwned\n"
-                f"• DeHashed\n"
-                f"• Intelligence X (IntelX)\n"
-                f"• BreachDirectory\n"
-                f"• Leak-Lookup & Scylla\n\n"
+                f"• Have I Been Pwned | DeHashed | IntelX | BreachDirectory | Scylla\n\n"
+                f"{status_gratis_txt}"
                 f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Acompanhe alertas no canal: {CANAL_TAG_PUBLICO}"
             )
 
-            markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL DE E-MAIL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
-            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-            btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
-            markup.add(btn_sim, btn_canal, btn_nao)
-
-            bot.send_message(message.chat.id, texto_email, reply_markup=markup)
+            markup = construir_markup_oferta(hash_alvo, user_id)
+            bot.send_message(message.chat.id, texto_email, reply_markup=markup, parse_mode="Markdown")
             return
 
         if e_nome_completo(target):
             resultados = executar_varredura_osint(target, is_fullname=True)
             hash_alvo = registrar_hash_alvo(target, "fullname", resultados)
+            status_gratis_txt = ""
+            if not usuario_ja_usou_gratis(user_id):
+                status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+
             texto_upsell_oferta = (
                 f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
                 f"👤 {target.upper()}\n"
                 f"───────────────────────────────\n\n"
                 f"Gere o Painel Web Interativo com consultas configuradas para os principais portais públicos:\n"
-                f"• Jusbrasil e Escavador\n"
-                f"• Diários Oficiais Estaduais e União\n"
-                f"• Portal da Transparência\n\n"
+                f"• Jusbrasil | Escavador | Diários Oficiais | Portal Transparência\n\n"
+                f"{status_gratis_txt}"
                 f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
-            markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 GERAR PAINEL JUDICIAL (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
-            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-            btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
-            markup.add(btn_sim, btn_canal, btn_nao)
-
-            bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup)
+            markup = construir_markup_oferta(hash_alvo, user_id)
+            bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup, parse_mode="Markdown")
             return
 
         if not RE_USERNAME.match(target):
@@ -1244,23 +1310,22 @@ if bot:
         if encontrados:
             hash_alvo = registrar_hash_alvo(target, "username", resultados)
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+            status_gratis_txt = ""
+            if not usuario_ja_usou_gratis(user_id):
+                status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+
             texto_resultado = (
                 f"🎯 POSSÍVEIS PERFIS PARA @{target}\n"
                 f"───────────────────────────────\n\n"
                 f"{lista_plataformas}\n\n"
                 f"⚠️ Identificamos {len(encontrados)} possíveis plataformas associadas a este termo.\n\n"
-                f"Deseja obter o Painel Interativo Web com os links diretos para cada perfil, presença digital (Yandex/Google) e relatório TXT?\n\n"
+                f"{status_gratis_txt}"
                 f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
-            markup = InlineKeyboardMarkup(row_width=1)
-            btn_sim = InlineKeyboardButton(f"⚡ 🔓 OBTER RELATÓRIO COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
-            btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-            btn_nao = InlineKeyboardButton("❌ Não, obrigado", callback_data="final_cancel")
-            markup.add(btn_sim, btn_canal, btn_nao)
-
-            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
+            markup = construir_markup_oferta(hash_alvo, user_id)
+            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
         else:
             bot.send_message(
                 message.chat.id,
@@ -1270,7 +1335,66 @@ if bot:
 
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
-        if call.data.startswith("b_"):
+        if call.data.startswith("claimfree_"):
+            hash_curto = call.data.split("claimfree_")[1]
+            target, qtype, results_json_str = obter_alvo_por_hash(hash_curto)
+            user_id = call.from_user.id
+
+            if usuario_ja_usou_gratis(user_id):
+                bot.answer_callback_query(call.id, "⚠️ Você já utilizou o seu relatório gratuito único!", show_alert=True)
+                return
+
+            if not target or not results_json_str:
+                bot.answer_callback_query(call.id, "Sessão expirada. Envie a busca novamente.", show_alert=True)
+                return
+
+            if not usuario_e_membro_canal(user_id):
+                bot.answer_callback_query(call.id, "⚠️ Você precisa entrar no nosso canal oficial para liberar o teste grátis!", show_alert=True)
+                
+                msg_aviso = (
+                    f"🔒 **RESGATE DO RELATÓRIO GRATUITO**\n\n"
+                    f"Para liberar a sua consulta gratuita, você precisa estar inscrito no nosso canal oficial!\n\n"
+                    f"1. Clique no botão abaixo e entre no canal {CANAL_TAG_PUBLICO}.\n"
+                    f"2. Após entrar, volte aqui e clique novamente em **RESGATAR RELATÓRIO GRATUITO**."
+                )
+                markup = InlineKeyboardMarkup(row_width=1)
+                markup.add(InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}"))
+                bot.send_message(call.message.chat.id, msg_aviso, parse_mode="Markdown", reply_markup=markup)
+                return
+
+            # Utilizador é membro e ainda não usou o grátis -> LIBERAR
+            bot.answer_callback_query(call.id, "🎉 Membro validado! Gerando seu relatório gratuito...")
+            resultados = json.loads(results_json_str)
+            link_web = gerar_painel_gratuito_membro(user_id, target, qtype, resultados)
+
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(InlineKeyboardButton("🌐 Acessar Seu Painel VIP (GRÁTIS)", url=link_web))
+
+            bot.send_message(
+                call.message.chat.id,
+                f"🎉 **PARABÉNS! SEU RELATÓRIO GRATUITO FOI LIBERADO!**\n\n"
+                f"Obrigado por fazer parte da comunidade Kronos Intel.\n"
+                f"Clique no botão abaixo para acessar o painel completo do alvo `{target}`:",
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+
+            # Notificar no grupo de logs
+            grupo_logs_id = obter_grupo_logs_id()
+            if grupo_logs_id:
+                try:
+                    bot.send_message(
+                        grupo_logs_id,
+                        f"🎁 **RELATÓRIO GRATUITO RESGATADO**\n"
+                        f"• **Utilizador ID:** `{user_id}`\n"
+                        f"• **Alvo:** `{target}` ({qtype.upper()})\n"
+                        f"• **Status:** Sucesso (Membro do Canal)",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+
+        elif call.data.startswith("b_"):
             hash_curto = call.data.split("b_")[1]
             target, qtype, results_json_str = obter_alvo_por_hash(hash_curto)
 
@@ -1462,7 +1586,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v22.1 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v24.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
