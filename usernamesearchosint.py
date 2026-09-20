@@ -1,10 +1,8 @@
 """
-Kronos Intel OSINT Bot v24.0
-- Relatório Gratuito de boas-vindas para novos membros do canal/grupo oficial (Uso Único por utilizador)
-- Comando /statistics e /stats unificados enviando relatório financeiro ao grupo de logs
-- Notificação de entrada (/start) enviada para o canal principal e grupo de logs
-- Correção do NameError na calibração de falsos positivos
-- Supressão de lembretes para dados apagados (/apagar) e notification_url explícita
+Kronos Intel OSINT Bot v25.0
+- Correção crítica: Remoção de parse_mode="Markdown" em ofertas para suportar usernames e e-mails com "_"
+- Prevenção de spam e vazamento de privacidade no /start (notificação apenas para novos usuários e sem @username no canal)
+- Trava atômica no banco SQLite para impedir resgate duplo de relatório gratuito (claimfree_)
 - Suporte Oficial: @kronos_intel
 """
 from __future__ import annotations
@@ -168,10 +166,6 @@ def usuario_ja_usou_gratis(user_id: int) -> bool:
     res = db_execute("SELECT 1 FROM free_claims WHERE user_id = ?", (user_id,), fetchone=True)
     return res is not None
 
-def registrar_uso_gratis(user_id: int):
-    now_str = datetime.now(TIMEZONE_BR).isoformat()
-    db_execute("INSERT OR IGNORE INTO free_claims (user_id, claimed_at) VALUES (?, ?)", (user_id, now_str), commit=True)
-
 def usuario_e_membro_canal(user_id: int) -> bool:
     if not bot or not CANAL_PRINCIPAL_ID:
         return False
@@ -331,17 +325,17 @@ def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
 
 def orientar_uso_correto(chat_id: int):
     msg_guia = (
-        "💡 **COMO UTILIZAR O BOT CORRETAMENTE:**\n\n"
-        "1️⃣ **Para buscar por Username (Redes Sociais):**\n"
-        "• Use: `/user alvo123`\n"
+        "💡 COMO UTILIZAR O BOT CORRETAMENTE:\n\n"
+        "1️⃣ Para buscar por Username (Redes Sociais):\n"
+        "• Use: /user alvo123\n"
         "*(Apenas o nome de usuário sem espaços, links ou @)*\n\n"
-        "2️⃣ **Para buscar por E-mail (Fontes de Verificação):**\n"
-        "• Use: `/email exemplo@dominio.com`\n\n"
-        "3️⃣ **Para buscar por Nome Completo (Atalhos Judiciais):**\n"
-        "• Use: `/nome João da Silva`"
+        "2️⃣ Para buscar por E-mail (Fontes de Verificação):\n"
+        "• Use: /email exemplo@dominio.com\n\n"
+        "3️⃣ Para buscar por Nome Completo (Atalhos Judiciais):\n"
+        "• Use: /nome João da Silva"
     )
     try:
-        bot.send_message(chat_id, msg_guia, parse_mode="Markdown")
+        bot.send_message(chat_id, msg_guia)
     except Exception as e:
         logger.error("Erro ao enviar orientação para %s: %s", chat_id, str(e))
 
@@ -440,7 +434,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v24.0
+SISTEMA: Kronos Engine v25.0
 ===================================================================
 """
     if is_email:
@@ -534,7 +528,6 @@ def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, res
         (pid_free, user_id, target, token_relatorio, query_type, results_json, datetime.now(TIMEZONE_BR).isoformat()),
         commit=True
     )
-    registrar_uso_gratis(user_id)
     registrar_relatorio()
 
     return f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
@@ -588,7 +581,7 @@ def worker_background():
                                 )
                                 markup = InlineKeyboardMarkup(row_width=1)
                                 markup.add(InlineKeyboardButton(f"⚡ 🔓 CONCLUIR AGORA (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}"))
-                                bot.send_message(uid, msg_lembrete, parse_mode="Markdown", reply_markup=markup)
+                                bot.send_message(uid, msg_lembrete, reply_markup=markup)
                         elif minutos_decorridos >= 30:
                             db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
                     except Exception as ex:
@@ -868,50 +861,46 @@ if bot:
         nome_completo_tg = f"{raw_first} {raw_last}".strip()
         user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
         
+        novo = db_execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,), fetchone=True) is None
         registrar_acesso(user_id)
 
-        # 1. NOTIFICAÇÃO COMPLETA DE CONTROLE PARA O GRUPO DE LOGS
-        grupo_logs_id = obter_grupo_logs_id()
-        if grupo_logs_id and user_id != ADMIN_ID:
-            try:
-                data_hora_acesso = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
-                msg_controle_logs = (
-                    f"👤 **NOVO USUÁRIO INICIOU O BOT (/start)**\n"
-                    f"───────────────────────────────\n"
-                    f"• **ID Telegram:** `{user_id}`\n"
-                    f"• **Nome:** {nome_completo_tg}\n"
-                    f"• **Username:** {username_tg}\n"
-                    f"• **Link Direto:** [Abrir Chat](tg://user?id={user_id})\n"
-                    f"• **Data/Hora:** {data_hora_acesso}"
-                )
-                bot.send_message(grupo_logs_id, msg_controle_logs, parse_mode="Markdown")
-            except Exception as ex_log:
-                logger.error("Erro ao enviar notificação de start no grupo de logs: %s", str(ex_log))
+        # NOTIFICAÇÕES APENAS SE FOR PRIMEIRO ACESSO DE USUÁRIO COMUM
+        if message.chat.type == 'private' and novo and user_id != ADMIN_ID:
+            grupo_logs_id = obter_grupo_logs_id()
+            if grupo_logs_id:
+                try:
+                    data_hora_acesso = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
+                    msg_controle_logs = (
+                        f"👤 NOVO USUÁRIO (/start)\n"
+                        f"ID: {user_id}\nNome: {nome_completo_tg}\nUsername: {username_tg}\n"
+                        f"Chat: tg://user?id={user_id}\nData: {data_hora_acesso}"
+                    )
+                    bot.send_message(grupo_logs_id, msg_controle_logs)
+                except Exception as ex_log:
+                    logger.error("Erro ao enviar notificação de start no grupo de logs: %s", str(ex_log))
 
-        # 2. NOTIFICAÇÃO PARA O CANAL PRINCIPAL
-        if CANAL_PRINCIPAL_ID and user_id != ADMIN_ID:
-            try:
-                msg_canal = f"⚡ Novo usuário ({username_tg}) iniciou o bot de consultas OSINT!"
-                bot.send_message(CANAL_PRINCIPAL_ID, msg_canal)
-            except Exception as ex_canal:
-                logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
+            if CANAL_PRINCIPAL_ID:
+                try:
+                    bot.send_message(CANAL_PRINCIPAL_ID, "⚡ Mais um usuário iniciou o bot de consultas OSINT!")
+                except Exception as ex_canal:
+                    logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao **Kronos Intel OSINT Bot v24.0**.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao Kronos Intel OSINT Bot v25.0.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
-            f"🎁 **GANHE 1 RELATÓRIO COMPLETO GRATUITO!**\n"
-            f"Basta fazer parte do nosso canal oficial! Ao entrar, você ganha o direito de gerar **1 consulta gratuita** (Username, E-mail ou Nome Completo).\n\n"
-            f"🛠 **MÓDULOS DISPONÍVEIS:**\n\n"
-            f"1️⃣ **BUSCA POR USERNAME / REDES SOCIAIS:**\n"
-            f"• Use `/user alvo123`\n\n"
-            f"2️⃣ **BUSCA POR E-MAIL (FONTES DE VERIFICAÇÃO):**\n"
-            f"• Use `/email alvo@gmail.com`\n\n"
-            f"3️⃣ **BUSCA POR NOME COMPLETO (ATALHOS JUDICIAIS):**\n"
-            f"• Use `/nome João da Silva`\n\n"
-            f"⚙️ **PRIVACIDADE (LGPD):**\n"
-            f"• Use `/apagar` para excluir instantaneamente todos os seus registros.\n\n"
-            f"📢 **Canal Oficial:** {CANAL_TAG_PUBLICO}\n"
-            f"💬 **Suporte Direto:** @{SUPORTE_USERNAME}"
+            f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
+            f"Basta fazer parte do nosso canal oficial! Ao entrar, você ganha o direito de gerar 1 consulta gratuita (Username, E-mail ou Nome Completo).\n\n"
+            f"🛠 MÓDULOS DISPONÍVEIS:\n\n"
+            f"1️⃣ BUSCA POR USERNAME / REDES SOCIAIS:\n"
+            f"• Use /user alvo123\n\n"
+            f"2️⃣ BUSCA POR E-MAIL (FONTES DE VERIFICAÇÃO):\n"
+            f"• Use /email alvo@gmail.com\n\n"
+            f"3️⃣ BUSCA POR NOME COMPLETO (ATALHOS JUDICIAIS):\n"
+            f"• Use /nome João da Silva\n\n"
+            f"⚙️ PRIVACIDADE (LGPD):\n"
+            f"• Use /apagar para excluir instantaneamente todos os seus registros.\n\n"
+            f"📢 Canal Oficial: {CANAL_TAG_PUBLICO}\n"
+            f"💬 Suporte Direto: @{SUPORTE_USERNAME}"
         )
 
         markup = InlineKeyboardMarkup(row_width=1)
@@ -919,20 +908,20 @@ if bot:
         btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
         markup.add(btn_canal, btn_suporte)
 
-        bot.send_message(message.chat.id, menu_boas_vindas, parse_mode="Markdown", reply_markup=markup)
+        bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
 
     @bot.message_handler(commands=['apagar'])
     def handle_apagar_dados(message):
         user_id = message.from_user.id
         db_execute("DELETE FROM users WHERE user_id = ?", (user_id,), commit=True)
         db_execute("UPDATE payments SET target_username='(apagado)', results_json=NULL, pix_code=NULL WHERE user_id = ?", (user_id,), commit=True)
-        bot.reply_to(message, "🗑️ **Solicitação de Privacidade LGPD Concluída:** Seus dados de acesso e pesquisas associados foram apagados permanentemente do sistema.", parse_mode="Markdown")
+        bot.reply_to(message, "🗑️ Solicitação de Privacidade LGPD Concluída: Seus dados de acesso e pesquisas associados foram apagados permanentemente do sistema.")
 
     @bot.message_handler(content_types=['document', 'photo', 'audio', 'video', 'voice', 'sticker'])
     def handle_invalid_media(message):
         if message.chat.type in ['group', 'supergroup']:
             return
-        responder_seguro(message, "⚠️ **Comando Inválido!**\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos.", parse_mode="Markdown")
+        responder_seguro(message, "⚠️ Comando Inválido!\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos.")
         orientar_uso_correto(message.chat.id)
 
     @bot.message_handler(commands=['user'])
@@ -943,19 +932,19 @@ if bot:
         texto_limpo = message.text.replace("\n", " ").strip()
         partes = texto_limpo.split(maxsplit=1)
         if len(partes) < 2:
-            responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o username após o comando `/user`.\nExemplo: `/user alvo123`", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o username após o comando /user.\nExemplo: /user alvo123")
             orientar_uso_correto(message.chat.id)
             return
 
         target_user = partes[1].replace("@", "").strip()
 
         if not RE_USERNAME.match(target_user):
-            responder_seguro(message, "⚠️ **Username Inválido!**\nEnvia apenas letras, números, pontos e traços (sem e-mail, espaços ou links).", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Username Inválido!\nEnvia apenas letras, números, pontos e traços (sem e-mail, espaços ou links).")
             orientar_uso_correto(message.chat.id)
             return
 
         if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ **Limite de buscas atingido!**\nVocê atingiu o limite de 6 consultas por hora. Aguarde um momento para realizar novas varreduras.")
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nVocê atingiu o limite de 6 consultas por hora. Aguarde um momento para realizar novas varreduras.")
             return
 
         msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target_user}...")
@@ -974,7 +963,7 @@ if bot:
             
             status_gratis_txt = ""
             if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = f"🎁 **BÓNNUS GRATUITO DISPONÍVEL:** Como ainda não resgatou a sua consulta gratuita de membro do grupo, pode gerar este relatório **SEM CUSTO** clicando no botão abaixo!\n\n"
+                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Como ainda não resgatou a sua consulta gratuita de membro do grupo, pode gerar este relatório SEM CUSTO clicando no botão abaixo!\n\n"
 
             texto_resultado = (
                 f"🎯 POSSÍVEIS PERFIS PARA @{target_user}\n"
@@ -987,7 +976,7 @@ if bot:
             )
 
             markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
         else:
             bot.send_message(
                 message.chat.id,
@@ -1003,14 +992,14 @@ if bot:
         texto_limpo = message.text.replace("\n", " ").strip()
         partes = texto_limpo.split(maxsplit=1)
         if len(partes) < 2:
-            responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o e-mail após o comando `/email`.\nExemplo: `/email alvo@gmail.com`", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o e-mail após o comando /email.\nExemplo: /email alvo@gmail.com")
             orientar_uso_correto(message.chat.id)
             return
 
         email_alvo = partes[1].strip()
 
         if not e_email_valido(email_alvo):
-            responder_seguro(message, "⚠️ **Comando Inválido para E-mail!**\nO comando `/email` exige um e-mail válido no formato `usuario@dominio.com`.", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Comando Inválido para E-mail!\nO comando /email exige um e-mail válido no formato usuario@dominio.com.")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -1019,7 +1008,7 @@ if bot:
 
         status_gratis_txt = ""
         if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
 
         texto_email = (
             f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
@@ -1033,7 +1022,7 @@ if bot:
         )
 
         markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto_email, reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(message.chat.id, texto_email, reply_markup=markup)
 
     @bot.message_handler(commands=['nome'])
     def handle_nome_command(message):
@@ -1043,14 +1032,14 @@ if bot:
         texto_limpo = message.text.replace("\n", " ").strip()
         partes = texto_limpo.split(maxsplit=1)
         if len(partes) < 2:
-            responder_seguro(message, "⚠️ **Comando Incompleto!**\nEnvie o nome completo após o comando `/nome`.\nExemplo: `/nome João da Silva`", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o nome completo após o comando /nome.\nExemplo: /nome João da Silva")
             orientar_uso_correto(message.chat.id)
             return
 
         nome_alvo = partes[1].strip()
 
         if not e_nome_completo(nome_alvo) or "@" in nome_alvo or e_url(nome_alvo):
-            responder_seguro(message, "⚠️ **Comando Inválido para Nome Completo!**\nO comando `/nome` exige nome e sobrenome completo (sem e-mails ou URLs).", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Comando Inválido para Nome Completo!\nO comando /nome exige nome e sobrenome completo (sem e-mails ou URLs).")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -1059,7 +1048,7 @@ if bot:
 
         status_gratis_txt = ""
         if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
 
         texto_oferta = (
             f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
@@ -1073,7 +1062,7 @@ if bot:
         )
 
         markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto_oferta, reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
 
     @bot.message_handler(commands=['stats', 'statistics'])
     def handle_stats_command(message):
@@ -1091,21 +1080,21 @@ if bot:
         data_hora_solicitacao = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
 
         relatorio_financeiro = (
-            f"📊 **RELATÓRIO FINANCEIRO E MÉTRICAS DE USO**\n"
+            f"📊 RELATÓRIO FINANCEIRO E MÉTRICAS DE USO\n"
             f"───────────────────────────────\n"
-            f"👤 **Usuários Totais Registrados:** {total_users}\n"
-            f"🔎 **Total de Buscas Executadas:** {searches}\n"
-            f"📄 **Relatórios VIP Gerados:** {reports}\n"
-            f"💰 **Vendas Aprovadas (Pix):** {qtd_vendas}\n"
-            f"💵 **Faturamento Total Adquirido:** R$ {faturamento:.2f}\n"
+            f"👤 Usuários Totais Registrados: {total_users}\n"
+            f"🔎 Total de Buscas Executadas: {searches}\n"
+            f"📄 Relatórios VIP Gerados: {reports}\n"
+            f"💰 Vendas Aprovadas (Pix): {qtd_vendas}\n"
+            f"💵 Faturamento Total Adquirido: R$ {faturamento:.2f}\n"
             f"───────────────────────────────\n"
-            f"📅 **Solicitado em:** {data_hora_solicitacao}"
+            f"📅 Solicitado em: {data_hora_solicitacao}"
         )
 
         grupo_target = obter_grupo_logs_id()
         
         try:
-            bot.send_message(grupo_target, relatorio_financeiro, parse_mode="Markdown")
+            bot.send_message(grupo_target, relatorio_financeiro)
             logger.info("Relatório de estatísticas enviado para o grupo de logs: %s", grupo_target)
             if message.chat.type == 'private':
                 bot.reply_to(message, "✅ Relatório de estatísticas enviado diretamente para o grupo de logs/financeiro.")
@@ -1113,8 +1102,7 @@ if bot:
             logger.error("Falha ao enviar relatório para o grupo (%s): %s", grupo_target, str(e))
             bot.reply_to(
                 message,
-                f"⚠️ **Erro ao enviar para o grupo ({grupo_target}):** Verifique se o bot é administrador do grupo.",
-                parse_mode="Markdown"
+                f"⚠️ Erro ao enviar para o grupo ({grupo_target}): Verifique se o bot é administrador do grupo."
             )
 
     @bot.message_handler(commands=['conceder'])
@@ -1236,7 +1224,7 @@ if bot:
         target = texto.replace("@", "").strip()
 
         if e_url(target):
-            responder_seguro(message, "⚠️ **Comando Inválido!**\nBusca por URLs/links não são aceitas. Digite apenas o username, /email ou /nome.", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Comando Inválido!\nBusca por URLs/links não são aceitas. Digite apenas o username, /email ou /nome.")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -1249,7 +1237,7 @@ if bot:
             hash_alvo = registrar_hash_alvo(target, "email", resultados)
             status_gratis_txt = ""
             if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
 
             texto_email = (
                 f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
@@ -1263,7 +1251,7 @@ if bot:
             )
 
             markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_email, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(message.chat.id, texto_email, reply_markup=markup)
             return
 
         if e_nome_completo(target):
@@ -1271,7 +1259,7 @@ if bot:
             hash_alvo = registrar_hash_alvo(target, "fullname", resultados)
             status_gratis_txt = ""
             if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
 
             texto_upsell_oferta = (
                 f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
@@ -1285,16 +1273,16 @@ if bot:
             )
 
             markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup)
             return
 
         if not RE_USERNAME.match(target):
-            responder_seguro(message, "⚠️ **Username Inválido!**\nUse apenas letras, números, pontos ou traços.", parse_mode="Markdown")
+            responder_seguro(message, "⚠️ Username Inválido!\nUse apenas letras, números, pontos ou traços.")
             orientar_uso_correto(message.chat.id)
             return
 
         if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ **Limite de buscas atingido!**\nVocê atingiu o limite de 6 consultas por hora. Aguarde um momento para realizar novas varreduras.")
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nVocê atingiu o limite de 6 consultas por hora. Aguarde um momento para realizar novas varreduras.")
             return
 
         msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target}...")
@@ -1312,7 +1300,7 @@ if bot:
             lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
             status_gratis_txt = ""
             if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = f"🎁 **BÓNUS GRATUITO DISPONÍVEL:** Resgate o seu relatório **SEM CUSTO** por ser membro do canal oficial!\n\n"
+                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
 
             texto_resultado = (
                 f"🎯 POSSÍVEIS PERFIS PARA @{target}\n"
@@ -1325,7 +1313,7 @@ if bot:
             )
 
             markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup, parse_mode="Markdown")
+            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
         else:
             bot.send_message(
                 message.chat.id,
@@ -1340,10 +1328,6 @@ if bot:
             target, qtype, results_json_str = obter_alvo_por_hash(hash_curto)
             user_id = call.from_user.id
 
-            if usuario_ja_usou_gratis(user_id):
-                bot.answer_callback_query(call.id, "⚠️ Você já utilizou o seu relatório gratuito único!", show_alert=True)
-                return
-
             if not target or not results_json_str:
                 bot.answer_callback_query(call.id, "Sessão expirada. Envie a busca novamente.", show_alert=True)
                 return
@@ -1352,17 +1336,25 @@ if bot:
                 bot.answer_callback_query(call.id, "⚠️ Você precisa entrar no nosso canal oficial para liberar o teste grátis!", show_alert=True)
                 
                 msg_aviso = (
-                    f"🔒 **RESGATE DO RELATÓRIO GRATUITO**\n\n"
+                    f"🔒 RESGATE DO RELATÓRIO GRATUITO\n\n"
                     f"Para liberar a sua consulta gratuita, você precisa estar inscrito no nosso canal oficial!\n\n"
                     f"1. Clique no botão abaixo e entre no canal {CANAL_TAG_PUBLICO}.\n"
-                    f"2. Após entrar, volte aqui e clique novamente em **RESGATAR RELATÓRIO GRATUITO**."
+                    f"2. Após entrar, volte aqui e clique novamente em RESGATAR RELATÓRIO GRATUITO."
                 )
                 markup = InlineKeyboardMarkup(row_width=1)
                 markup.add(InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}"))
-                bot.send_message(call.message.chat.id, msg_aviso, parse_mode="Markdown", reply_markup=markup)
+                bot.send_message(call.message.chat.id, msg_aviso, reply_markup=markup)
                 return
 
-            # Utilizador é membro e ainda não usou o grátis -> LIBERAR
+            # REIVINDICAÇÃO ATÔMICA NO BANCO
+            ok = db_execute(
+                "INSERT INTO free_claims (user_id, claimed_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING RETURNING user_id",
+                (user_id, datetime.now(TIMEZONE_BR).isoformat()), fetchone=True, commit=True
+            )
+            if not ok:
+                bot.answer_callback_query(call.id, "⚠️ Você já utilizou o seu relatório gratuito!", show_alert=True)
+                return
+
             bot.answer_callback_query(call.id, "🎉 Membro validado! Gerando seu relatório gratuito...")
             resultados = json.loads(results_json_str)
             link_web = gerar_painel_gratuito_membro(user_id, target, qtype, resultados)
@@ -1372,10 +1364,9 @@ if bot:
 
             bot.send_message(
                 call.message.chat.id,
-                f"🎉 **PARABÉNS! SEU RELATÓRIO GRATUITO FOI LIBERADO!**\n\n"
+                f"🎉 PARABÉNS! SEU RELATÓRIO GRATUITO FOI LIBERADO!\n\n"
                 f"Obrigado por fazer parte da comunidade Kronos Intel.\n"
-                f"Clique no botão abaixo para acessar o painel completo do alvo `{target}`:",
-                parse_mode="Markdown",
+                f"Clique no botão abaixo para acessar o painel completo do alvo {target}:",
                 reply_markup=markup
             )
 
@@ -1385,11 +1376,10 @@ if bot:
                 try:
                     bot.send_message(
                         grupo_logs_id,
-                        f"🎁 **RELATÓRIO GRATUITO RESGATADO**\n"
-                        f"• **Utilizador ID:** `{user_id}`\n"
-                        f"• **Alvo:** `{target}` ({qtype.upper()})\n"
-                        f"• **Status:** Sucesso (Membro do Canal)",
-                        parse_mode="Markdown"
+                        f"🎁 RELATÓRIO GRATUITO RESGATADO\n"
+                        f"• Utilizador ID: {user_id}\n"
+                        f"• Alvo: {target} ({qtype.upper()})\n"
+                        f"• Status: Sucesso (Membro do Canal)"
                     )
                 except Exception:
                     pass
@@ -1450,7 +1440,7 @@ if bot:
                 row = db_execute("SELECT pix_code FROM payments WHERE token = ? AND status = 'pending'", (token_pix,), fetchone=True)
                 if row and row[0]:
                     bot.answer_callback_query(call.id, "Enviando chave...")
-                    bot.send_message(call.message.chat.id, text=f"`{row[0]}`", parse_mode="Markdown")
+                    bot.send_message(call.message.chat.id, text=f"`{row[0]}`")
                 else:
                     bot.answer_callback_query(call.id, "Chave Pix não encontrada ou já expirada.")
             except Exception as e:
@@ -1512,12 +1502,11 @@ def webhook():
                                 if bot and grupo_logs_id:
                                     bot.send_message(
                                         grupo_logs_id,
-                                        f"⚠️ **Pix aprovado SEM registro utilizável**\n"
-                                        f"• Pagamento ID: `{pid_str}`\n"
-                                        f"• Comprador ID: `{meta.get('telegram_user_id')}`\n"
+                                        f"⚠️ Pix aprovado SEM registro utilizável\n"
+                                        f"• Pagamento ID: {pid_str}\n"
+                                        f"• Comprador ID: {meta.get('telegram_user_id')}\n"
                                         f"• Valor: R$ {info.get('transaction_amount', 0.0):.2f}\n\n"
-                                        f"Estorne ou solicite o alvo ao cliente para utilizar o comando /conceder.",
-                                        parse_mode="Markdown"
+                                        f"Estorne ou solicite o alvo ao cliente para utilizar o comando /conceder."
                                     )
                         except Exception:
                             logger.exception("Falha ao alertar pagamento órfão no grupo de logs")
@@ -1586,7 +1575,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v24.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v25.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
