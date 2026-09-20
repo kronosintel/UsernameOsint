@@ -1,9 +1,10 @@
 """
-Kronos Intel OSINT Bot v26.0
+Kronos Intel OSINT Bot v27.0
+- Mensagem automática diária de divulgação/tutorial enviada no Canal Principal
 - Atualização dos usernames oficiais: @kronosinteloficial (Canal) e @kronosintel (Suporte)
-- Correção de parse_mode="Markdown" em ofertas para suportar usernames e e-mails com "_"
-- Prevenção de spam e vazamento de privacidade no /start (notificação apenas para novos usuários)
-- Trava atômica no banco SQLite para impedir resgate duplo de relatório gratuito (claimfree_)
+- Suporte a usernames e e-mails com "_" sem quebras de formatação
+- Prevenção de spam e vazamento de privacidade no /start
+- Trava atômica no banco SQLite para resgate único de relatório gratuito
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -435,7 +436,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {tipo_txt}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v26.0
+SISTEMA: Kronos Engine v27.0
 ===================================================================
 """
     if is_email:
@@ -546,6 +547,47 @@ def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarku
     
     markup.add(btn_sim, btn_canal, btn_nao)
     return markup
+
+def worker_divulgacao_diaria():
+    """Envia uma mensagem de tutorial e incentivo no canal principal 1x por dia."""
+    ultimo_envio = None
+    while True:
+        try:
+            time.sleep(300)  # Verifica a cada 5 minutos
+            now = datetime.now(TIMEZONE_BR)
+
+            # Define o envio diário para as 10:00 da manhã
+            if now.hour == 10 and (ultimo_envio is None or ultimo_envio.date() < now.date()):
+                if bot and CANAL_PRINCIPAL_ID:
+                    msg_divulgacao = (
+                        "🔍 COMO UTILIZAR O BOT DE INVESTIGAÇÃO OSINT KRONOS INTEL ⚡\n\n"
+                        "Quer localizar perfis em redes sociais, checar vazamentos de e-mail ou consultar atalhos judiciais em segundos?\n\n"
+                        "💡 VEJA COMO É SIMPLES USAR:\n\n"
+                        "1️⃣ Busca por Username (Redes Sociais):\n"
+                        "   👉 Digite /user seguido do nome do perfil.\n"
+                        "   Exemplo: /user joaodesilva\n\n"
+                        "2️⃣ Busca por E-mail (Verificação de Bases):\n"
+                        "   👉 Digite /email seguido do e-mail do alvo.\n"
+                        "   Exemplo: /email contato@empresa.com\n\n"
+                        "3️⃣ Busca por Nome Completo (Atalhos Judiciais):\n"
+                        "   👉 Digite /nome seguido do nome completo.\n"
+                        "   Exemplo: /nome Carlos Eduardo Souza\n\n"
+                        "🎁 MEMBROS DO CANAL GANHAM 1 CONSULTE GRATUITA!\n"
+                        "Se você é novo no canal, acesse o bot agora mesmo e resgate o seu relatório cortesia totalmente grátis!\n\n"
+                        "👇 Clique no botão abaixo para iniciar suas consultas no chat privado:"
+                    )
+
+                    markup = InlineKeyboardMarkup(row_width=1)
+                    btn_usar = InlineKeyboardButton("🚀 Iniciar Bot de Consultas Agora", url=f"https://t.me/{BOT_USERNAME}")
+                    markup.add(btn_usar)
+
+                    bot.send_message(CANAL_PRINCIPAL_ID, msg_divulgacao, reply_markup=markup)
+                    ultimo_envio = now
+                    logger.info("Mensagem diária de divulgação enviada no Canal Principal com sucesso.")
+        except Exception as e:
+            logger.error("Erro no worker de divulgação diária: %s", str(e))
+
+Thread(target=worker_divulgacao_diaria, daemon=True).start()
 
 def worker_background():
     while True:
@@ -887,7 +929,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao Kronos Intel OSINT Bot v26.0.\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo ao Kronos Intel OSINT Bot v27.0.\n\n"
             f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
             f"Basta fazer parte do nosso canal oficial! Ao entrar, você ganha o direito de gerar 1 consulta gratuita (Username, E-mail ou Nome Completo).\n\n"
@@ -1309,7 +1351,7 @@ if bot:
                 f"{lista_plataformas}\n\n"
                 f"⚠️ Identificamos {len(encontrados)} possíveis plataformas associadas a este termo.\n\n"
                 f"{status_gratis_txt}"
-                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+                f"💳 Valor normal da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
@@ -1576,7 +1618,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v26.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v27.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
