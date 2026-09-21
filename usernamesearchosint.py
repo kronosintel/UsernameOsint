@@ -1,5 +1,6 @@
 """
-Kronos Intel OSINT Bot v29.0 — Plataforma VIP
+Kronos Intel OSINT Bot v30.0 — Plataforma VIP
+- Comandos Administrativos Expandidos: /admin, /admin_fone, /admin_cnpj, /admin_placa, /admin_dominio, /admin_user, /admin_email, /admin_nome
 - Etapa 2: Gerador de Relatório Executivo VIP em PDF (ReportLab)
 - Módulos Expandidos: /user, /email, /nome, /fone, /cnpj, /placa e /dominio
 - Divulgação Diária Automática no Canal Principal
@@ -467,7 +468,6 @@ def obter_links_buscadores(termo: str) -> dict[str, str]:
     }
 
 def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
-    """Gera um PDF altamente estilizado e profissional com ReportLab."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     story = []
@@ -608,7 +608,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {titulos_map.get(query_type, 'GERAL')}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v29.0
+SISTEMA: Kronos Engine v30.0
 ===================================================================
 """
     if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
@@ -698,6 +698,23 @@ def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, res
     registrar_relatorio()
 
     return f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
+
+def executar_consulta_admin_direta(admin_id: int, target: str, query_type: str) -> tuple[str, str]:
+    resultados = executar_varredura_osint(target, query_type=query_type)
+    results_json = json.dumps(resultados)
+    token_relatorio = secrets.token_urlsafe(16)
+    pid_admin = f"admin_exec_{admin_id}_{int(time.time())}"
+
+    db_execute(
+        "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
+        "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?) "
+        "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token, results_json=excluded.results_json",
+        (pid_admin, admin_id, target, token_relatorio, query_type, results_json, datetime.now(TIMEZONE_BR).isoformat()),
+        commit=True
+    )
+    registrar_relatorio()
+    link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
+    return link_web, token_relatorio
 
 def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
@@ -1105,7 +1122,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v29.0 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v30.0 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
@@ -1137,6 +1154,151 @@ if bot:
         markup.add(btn_canal, btn_suporte)
 
         bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
+
+    @bot.message_handler(commands=['admin'])
+    def handle_admin_panel(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+
+        total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
+        searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)[0]
+        vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved' AND amount > 0", fetchone=True)
+        qtd_vendas = vendas[0] if vendas else 0
+        faturamento = vendas[1] if vendas and vendas[1] else 0.0
+
+        texto_admin = (
+            f"👑 PAINEL CENTRAL DE ADMINISTRAÇÃO KRONOS INTEL\n"
+            f"─────────────────────────────────────────────\n"
+            f"📊 Métricas de Operação:\n"
+            f"• Usuários Totais: {total_users}\n"
+            f"• Buscas Executadas: {searches}\n"
+            f"• Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n\n"
+            f"🛠️ COMANDOS DE CONSULTA DIRETA (SEM COBRANÇA):\n"
+            f"📱 /admin_fone 11999998888\n"
+            f"🏢 /admin_cnpj 00000000000191\n"
+            f"🚗 /admin_placa ABC1D23\n"
+            f"🌐 /admin_dominio site.com\n"
+            f"👤 /admin_user alvo123\n"
+            f"📧 /admin_email alvo@dominio.com\n"
+            f"⚖️ /admin_nome Carlos Eduardo\n\n"
+            f"🎁 CONCESSÃO DE CORTESIA:\n"
+            f"• /conceder <user_id> <termo_alvo>\n\n"
+            f"📊 ENVIAR RELATÓRIO FINANCEIRO PRO GRUPO:\n"
+            f"• /stats"
+        )
+        responder_seguro(message, texto_admin)
+
+    @bot.message_handler(commands=['admin_fone'])
+    def handle_admin_fone(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /admin_fone 11999998888")
+            return
+        target = re.sub(r'\D', '', partes[1])
+        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "fone")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
+        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
+        responder_seguro(message, f"✅ Consulta Admin de Telefone concluída para +55 {target}:", reply_markup=markup)
+
+    @bot.message_handler(commands=['admin_cnpj'])
+    def handle_admin_cnpj(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /admin_cnpj 00000000000191")
+            return
+        target = re.sub(r'\D', '', partes[1])
+        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "cnpj")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
+        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
+        responder_seguro(message, f"✅ Consulta Admin de CNPJ concluída para {target}:", reply_markup=markup)
+
+    @bot.message_handler(commands=['admin_placa'])
+    def handle_admin_placa(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /admin_placa ABC1D23")
+            return
+        target = partes[1].upper().replace("-", "").strip()
+        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "placa")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
+        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
+        responder_seguro(message, f"✅ Consulta Admin de Placa concluída para {target}:", reply_markup=markup)
+
+    @bot.message_handler(commands=['admin_dominio'])
+    def handle_admin_dominio(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /admin_dominio site.com")
+            return
+        target = partes[1].lower().replace("https://", "").replace("http://", "").strip('/')
+        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "dominio")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
+        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
+        responder_seguro(message, f"✅ Consulta Admin de Domínio concluída para {target}:", reply_markup=markup)
+
+    @bot.message_handler(commands=['admin_user'])
+    def handle_admin_user(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /admin_user alvo123")
+            return
+        target = partes[1].replace("@", "").strip()
+        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "username")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
+        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
+        responder_seguro(message, f"✅ Consulta Admin de Username concluída para @{target}:", reply_markup=markup)
+
+    @bot.message_handler(commands=['admin_email'])
+    def handle_admin_email(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /admin_email alvo@dominio.com")
+            return
+        target = partes[1].strip()
+        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "email")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
+        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
+        responder_seguro(message, f"✅ Consulta Admin de E-mail concluída para {target}:", reply_markup=markup)
+
+    @bot.message_handler(commands=['admin_nome'])
+    def handle_admin_nome(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /admin_nome Carlos Eduardo")
+            return
+        target = partes[1].strip()
+        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "fullname")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
+        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
+        responder_seguro(message, f"✅ Consulta Admin Judicial concluída para {target}:", reply_markup=markup)
 
     @bot.message_handler(commands=['apagar'])
     def handle_apagar_dados(message):
@@ -1786,7 +1948,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v29.0 VIP Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v30.0 VIP Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
