@@ -72,7 +72,7 @@ class Config:
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
     ADMIN_ID: int = _env_int("ADMIN_ID", 5041637922)
     CANAL_PRINCIPAL_ID: int = _env_int("CANAL_PRINCIPAL_ID", -1003802363624)
-    LOG_GROUP_ID: int = _env_int("LOG_GROUP_ID", -1003986408630)
+    LOG_GROUP_ID: int = _env_int("GRUPO_LOGS_ID", _env_int("LOG_GROUP_ID", -1003986408630))
     CANAL_TAG_PUBLICO: str = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     BOT_USERNAME: str = os.getenv("BOT_USERNAME", "KronosSearchbot")
