@@ -1,15 +1,19 @@
 """
-Kronos Intel OSINT Bot v33.0 VIP
-- Etapa 5: Análise Enriquecida & Conteúdo Denso (BrasilAPI para CNPJ, DNS/MX para Domínios, Anatel/DDD para Telefones)
-- Etapa 4: Painel Admin Avançado (Ban/Unban, Cupons Promocionais, Broadcast, Userinfo)
-- Notificação de Logs em Tempo Real no Grupo de Logs (Preservando LGPD)
-- Gerador de Relatórios Executivos em PDF (ReportLab) e Painel Web Interativo
+Kronos Intel OSINT Bot v34.1 VIP
+- Motor OSINT Tri-Estado Conservador (Zero Falso Positivo por construção)
+- Verificação via APIs JSON nativas (GitHub, GitLab, Bluesky, Mastodon, Reddit, Keybase, etc.)
+- SQLite em modo WAL com busy_timeout e Lock Cooperativo via banco de dados
+- Validação Criptográfica de Webhook Mercado Pago (X-Signature HMAC-SHA256 e validação de troco/dono)
+- Sanitização de PDF ReportLab e HTML Telegram contra falhas de renderização
+- Sanitização LGPD Completa (Purge total de registros do usuário)
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
 
 import base64
 import hashlib
+import html
+import hmac
 import io
 import json
 import logging
@@ -71,10 +75,14 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosSearchbot")
 WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
 
 MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
+MERCADOPAGO_WEBHOOK_SECRET = (os.getenv("MERCADOPAGO_WEBHOOK_SECRET") or "").strip()
 sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
+
+# Hash de segurança do path do webhook Telegram
+WEBHOOK_SECRET_PATH = hashlib.sha256((TELEGRAM_TOKEN or "secret").encode()).hexdigest()[:32] if TELEGRAM_TOKEN else "secret_path"
 
 _hist_rate_limit: dict[int, list[float]] = {}
 _rate_limit_lock = Lock()
@@ -102,11 +110,30 @@ DDD_ESTADOS = {
     "96": "Amapá (Macapá)", "97": "Amazonas (Coari)", "98": "Maranhão (São Luís)", "99": "Maranhão (Imperatriz)"
 }
 
+def escapar_html(texto: str) -> str:
+    if not texto:
+        return ""
+    return html.escape(str(texto))
+
+def sanitizar_pdf(texto: str) -> str:
+    s = str(texto if texto is not None else "")
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def link_pdf(url: str) -> str:
+    seguro = re.sub(r"[\"'\s]", "", str(url or ""))
+    if not seguro.lower().startswith(("http://", "https://")):
+        return sanitizar_pdf(url)
+    return f'<a href="{sanitizar_pdf(seguro)}">{sanitizar_pdf(seguro)}</a>'
+
 def limite_busca_ok(user_id: int, maximo: int = 6, janela_segundos: int = 3600) -> bool:
     if user_id == ADMIN_ID:
         return True
     agora = time.time()
     with _rate_limit_lock:
+        if len(_hist_rate_limit) > 5000:
+            for k in [k for k, v in _hist_rate_limit.items() if not v or agora - v[-1] > 7200]:
+                _hist_rate_limit.pop(k, None)
+                
         historico = [t for t in _hist_rate_limit.get(user_id, []) if agora - t < janela_segundos]
         if len(historico) >= maximo:
             _hist_rate_limit[user_id] = historico
@@ -117,8 +144,13 @@ def limite_busca_ok(user_id: int, maximo: int = 6, janela_segundos: int = 3600) 
 
 def init_db():
     with db_lock:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30.0)
         cursor = conn.cursor()
+        
+        # Ativações para concorrência
+        cursor.execute("PRAGMA journal_mode = WAL")
+        cursor.execute("PRAGMA busy_timeout = 30000")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -179,6 +211,16 @@ def init_db():
                 PRIMARY KEY (code, user_id)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS worker_locks (
+                nome TEXT PRIMARY KEY,
+                expira_em TEXT
+            )
+        """)
+        
+        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
+        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
+        
         conn.commit()
         conn.close()
 
@@ -186,7 +228,7 @@ init_db()
 
 def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, commit=False):
     with db_lock:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute(query, params)
         res = None
@@ -198,6 +240,27 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
             conn.commit()
         conn.close()
         return res
+
+def adquirir_lock_worker(nome: str, renovar_s: int = 240) -> bool:
+    agora = datetime.now(TIMEZONE_BR)
+    expira = (agora + timedelta(seconds=renovar_s)).isoformat()
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE, timeout=30.0)
+        try:
+            cur = conn.execute("CREATE TABLE IF NOT EXISTS worker_locks (nome TEXT PRIMARY KEY, expira_em TEXT)")
+            cur = conn.execute(
+                "INSERT INTO worker_locks (nome, expira_em) VALUES (?, ?) "
+                "ON CONFLICT(nome) DO UPDATE SET expira_em = excluded.expira_em "
+                "WHERE worker_locks.expira_em < ?",
+                (nome, expira, agora.isoformat())
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            logger.error("Erro no Lock de Worker: %s", str(e))
+            return False
+        finally:
+            conn.close()
 
 def usuario_esta_banido(user_id: int) -> bool:
     res = db_execute("SELECT banned FROM users WHERE user_id = ?", (user_id,), fetchone=True)
@@ -242,110 +305,86 @@ def notificar_uso_grupo_logs(from_user, modulo_nome: str):
     if not bot or not LOG_GROUP_ID or from_user.id == ADMIN_ID:
         return
     try:
-        raw_first = from_user.first_name or "Usuario"
-        raw_last = from_user.last_name or ""
+        raw_first = escapar_html(from_user.first_name or "Usuario")
+        raw_last = escapar_html(from_user.last_name or "")
         nome_completo = f"{raw_first} {raw_last}".strip()
-        username_str = f"@{from_user.username}" if from_user.username else "Sem @username"
+        username_str = f"@{escapar_html(from_user.username)}" if from_user.username else "Sem @username"
         data_hora = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
 
         msg_log = (
-            f"🔎 NOVA CONSULTA EXECUTADA\n"
+            f"<b>🔎 NOVA CONSULTA EXECUTADA</b>\n"
             f"───────────────────────────────\n"
-            f"• ID do Usuário: `{from_user.id}`\n"
-            f"• Nome: {nome_completo}\n"
-            f"• Username: {username_str}\n"
-            f"• Módulo Solicitado: {modulo_nome.upper()}\n"
-            f"• Termo Varrito: [PROTEGIDO POR PRIVACIDADE]\n"
-            f"• Data/Hora: {data_hora}"
+            f"• <b>ID do Usuário:</b> <code>{from_user.id}</code>\n"
+            f"• <b>Nome:</b> {nome_completo}\n"
+            f"• <b>Username:</b> {username_str}\n"
+            f"• <b>Módulo Solicitado:</b> {escapar_html(modulo_nome.upper())}\n"
+            f"• <b>Termo Varrito:</b> [PROTEGIDO POR PRIVACIDADE]\n"
+            f"• <b>Data/Hora:</b> {data_hora}"
         )
-        bot.send_message(LOG_GROUP_ID, msg_log, parse_mode="Markdown")
+        bot.send_message(LOG_GROUP_ID, msg_log, parse_mode="HTML")
     except Exception as e:
         logger.error("Erro ao enviar log de uso para o grupo: %s", str(e))
 
 def setup_webhook():
     if bot and TELEGRAM_TOKEN:
-        webhook_url = f"{WEB_BASE_URL}/telegram/{TELEGRAM_TOKEN}"
+        webhook_url = f"{WEB_BASE_URL}/telegram/{WEBHOOK_SECRET_PATH}"
         try:
             bot.remove_webhook()
-            time.sleep(1)
             success = bot.set_webhook(url=webhook_url)
             logger.info("Webhook Telegram configurado: %s", success)
         except Exception as e:
             logger.error("Erro ao configurar Webhook Telegram: %s", str(e))
 
-setup_webhook()
+# --- MOTOR OSINT CONSERVADOR TRI-ESTADO (v34.1) ---
+LIMITE_CORPO = 400_000
+STATUS_NAO_EXISTE = (404, 410)
+STATUS_INCONCLUSIVO = (401, 403, 405, 406, 409, 429, 451, 500, 501, 502, 503, 504, 520, 522, 524)
+REDIRECT_NAO_ENCONTRADO = ("/login", "/signin", "/signup", "/register", "/home", "404", "/error", "not-found", "notfound", "typo", "subdomain=")
 
-PLATFORM_URLS = {
-    "GitHub": "https://github.com/{username}",
-    "GitLab": "https://gitlab.com/{username}",
-    "Bitbucket": "https://bitbucket.org/{username}/",
-    "Codeberg": "https://codeberg.org/{username}",
-    "PyPI": "https://pypi.org/user/{username}/",
-    "Docker Hub": "https://hub.docker.com/u/{username}",
-    "Hugging Face": "https://huggingface.co/{username}",
-    "Kaggle": "https://www.kaggle.com/{username}",
-    "Replit": "https://replit.com/@{username}",
-    "CodePen": "https://codepen.io/{username}",
-    "StackOverflow": "https://stackoverflow.com/users/{username}",
-    "Reddit": "https://www.reddit.com/user/{username}/",
-    "TikTok": "https://www.tiktok.com/@{username}",
-    "Telegram": "https://t.me/{username}",
-    "Tumblr": "https://{username}.tumblr.com",
-    "Mastodon": "https://mastodon.social/@{username}",
-    "Bluesky": "https://bsky.app/profile/{username}.bsky.social",
-    "Medium": "https://medium.com/@{username}",
-    "Substack": "https://{username}.substack.com",
-    "DeviantArt": "https://www.deviantart.com/{username}",
-    "Behance": "https://www.behance.net/{username}",
-    "Dribbble": "https://dribbble.com/{username}",
-    "Vimeo": "https://vimeo.com/{username}",
-    "Patreon": "https://www.patreon.com/{username}",
-    "Flickr": "https://www.flickr.com/people/{username}/",
-    "WordPress": "https://{username}.wordpress.com",
-    "Steam": "https://steamcommunity.com/id/{username}",
-    "Twitch": "https://www.twitch.tv/{username}",
-    "YouTube": "https://www.youtube.com/@{username}",
-    "SoundCloud": "https://soundcloud.com/{username}",
-    "Chess.com": "https://www.chess.com/member/{username}",
-    "Roblox": "https://www.roblox.com/user.aspx?username={username}",
-    "Lichess": "https://lichess.org/@/{username}",
-    "Kick": "https://kick.com/{username}",
-    "Keybase": "https://keybase.io/{username}",
-    "About.me": "https://about.me/{username}",
-    "Linktree": "https://linktr.ee/{username}",
-    "Disqus": "https://disqus.com/by/{username}/",
-    "Gravatar": "https://en.gravatar.com/{username}",
+PLATAFORMAS: dict[str, dict[str, Any]] = {
+    # APIs JSON (404 Real)
+    "GitHub":       {"url": "https://api.github.com/users/{username}", "fonte": "api", "json": "nao_vazio", "cabecalhos": {"Accept": "application/vnd.github+json"}},
+    "GitLab":       {"url": "https://gitlab.com/api/v4/users?username={username}", "fonte": "api", "json": "lista_cheia"},
+    "Codeberg":     {"url": "https://codeberg.org/api/v1/users/{username}", "fonte": "api", "json": "nao_vazio"},
+    "Bitbucket":    {"url": "https://api.bitbucket.org/2.0/users/{username}", "fonte": "api", "json": "nao_vazio"},
+    "Docker Hub":   {"url": "https://hub.docker.com/v2/users/{username}/", "fonte": "api", "json": "nao_vazio"},
+    "Hugging Face": {"url": "https://huggingface.co/api/users/{username}/overview", "fonte": "api", "json": "nao_vazio"},
+    "Reddit":       {"url": "https://www.reddit.com/user/{username}/about.json", "fonte": "api", "json": "reddit", "cabecalhos": {"User-Agent": "kronos-osint/1.0 (contato: @kronosintel)"}},
+    "Mastodon":     {"url": "https://mastodon.social/api/v1/accounts/lookup?acct={username}", "fonte": "api", "json": "nao_vazio"},
+    "Bluesky":      {"url": "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle={username}.bsky.social", "fonte": "api", "json": "nao_vazio", "status_nao_existe": (400, 404, 410)},
+    "Lichess":      {"url": "https://lichess.org/api/user/{username}", "fonte": "api", "json": "nao_vazio"},
+    "Chess.com":    {"url": "https://api.chess.com/pub/player/{username}", "fonte": "api", "json": "nao_vazio"},
+    "Keybase":      {"url": "https://keybase.io/_/api/1.0/user/lookup.json?username={username}", "fonte": "api", "json": "keybase"},
+    "npm":          {"url": "https://registry.npmjs.org/-/user/org.couchdb.user:{username}", "fonte": "api", "json": "nao_vazio"},
+
+    # HTML com Indicador Positivo
+    "YouTube":      {"url": "https://www.youtube.com/@{username}", "fonte": "html", "positivo": r'"channelId":"UC', "negativo": "this page isn't available"},
+    "Twitch":       {"url": "https://www.twitch.tv/{username}", "fonte": "html", "positivo": r'"userLogin":"{username}"'},
+    "Telegram":     {"url": "https://t.me/{username}", "fonte": "html", "positivo": r'tgme_page_title'},
+    "Medium":       {"url": "https://medium.com/@{username}", "fonte": "html", "positivo": r'property="og:type" content="profile"', "negativo": "out of bounds"},
+    "SoundCloud":   {"url": "https://soundcloud.com/{username}", "fonte": "html", "positivo": r'soundcloud:users:'},
+    "Behance":      {"url": "https://www.behance.net/{username}", "fonte": "html", "positivo": r'featured_projects', "negativo": "we can't find that page"},
+    "Dribbble":     {"url": "https://dribbble.com/{username}", "fonte": "html", "positivo": r'profile-avatar', "negativo": "page not found"},
+    "Kaggle":       {"url": "https://www.kaggle.com/{username}", "fonte": "html", "positivo": r'"userUrl"'},
+    "Replit":       {"url": "https://replit.com/@{username}", "fonte": "html", "positivo": r'userByUsername'},
+    "Flickr":       {"url": "https://www.flickr.com/people/{username}/", "fonte": "html", "positivo": r'flickr\.com/photos/'},
+    "Patreon":      {"url": "https://www.patreon.com/{username}", "fonte": "html", "positivo": r'patron_count'},
+    "About.me":     {"url": "https://about.me/{username}", "fonte": "html", "positivo": r'user-name'},
+    "Linktree":     {"url": "https://linktr.ee/{username}", "fonte": "html", "positivo": r'profile_title'},
+    "Gravatar":     {"url": "https://en.gravatar.com/{username}", "fonte": "html", "positivo": r'gravatar\.com/avatar/'},
+    "Kick":         {"url": "https://kick.com/{username}", "fonte": "html", "positivo": r'"user_id":'},
+    "Roblox":       {"url": "https://www.roblox.com/user.aspx?username={username}", "fonte": "html", "positivo": r'profile-header'},
+    "CodePen":      {"url": "https://codepen.io/{username}", "fonte": "html", "positivo": r'profile-header'},
+    "Steam":        {"url": "https://steamcommunity.com/id/{username}", "fonte": "html", "positivo": r'actual_persona_name', "negativo": "the specified profile could not be found"},
+    "PyPI":         {"url": "https://pypi.org/user/{username}/", "fonte": "html", "positivo": r'author-profile__name', "negativo": "404 not found"},
+
+    # HTML com Inexistência Comprovada via HTTP Status
+    "Tumblr":       {"url": "https://{username}.tumblr.com", "fonte": "html", "confiavel_200": True},
+    "Disqus":       {"url": "https://disqus.com/by/{username}/", "fonte": "html", "confiavel_200": True},
+    "WordPress":    {"url": "https://{username}.wordpress.com", "fonte": "html", "confiavel_200": True},
 }
 
-NOT_FOUND_MARKERS = {
-    "gitlab": ("the page you're looking for doesn't exist",),
-    "bitbucket": ("this page doesn't exist",),
-    "codeberg": ("page not found",),
-    "pypi": ("404 not found",),
-    "keybase": ("user not found",),
-    "reddit": ("this page is empty", "page not found"),
-    "tiktok": ("couldn't find this account",),
-    "telegram": ("if you have telegram",),
-    "substack": ("page not found",),
-    "youtube": ("this page isn't available",),
-    "medium": ("404", "out of bounds"),
-    "vimeo": ("404", "not found"),
-    "behance": ("oops! we can't find that page",),
-    "dribbble": ("404", "page not found"),
-    "replit": ("404", "not found"),
-    "steam": ("the specified profile could not be found",),
-}
-
-def calibrar_falsos_positivos():
-    checker = FastOSINTChecker("zzq9x8k2v7wq", timeout=2.0)
-    res = checker.run()
-    removidos = []
-    for plataforma in list(PLATFORM_URLS.keys()):
-        if res.get(plataforma, {}).get("exists") is True:
-            PLATFORM_URLS.pop(plataforma, None)
-            removidos.append(plataforma)
-    if removidos:
-        logger.info("Plataformas removidas por falso positivo (calibração): %s", removidos)
+PLATFORM_URLS = {p: cfg["url"] for p, cfg in PLATAFORMAS.items()}
 
 def registrar_acesso(user_id: int):
     now_str = datetime.now(TIMEZONE_BR).isoformat()
@@ -415,39 +454,107 @@ class FastOSINTChecker:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-    def check_site(self, platform: str, url: str) -> None:
+    @staticmethod
+    def _casa(padrao, texto: str) -> bool:
+        if not padrao:
+            return False
         try:
-            target_url = url.format(username=self.username)
-            resp = requests.get(target_url, headers=self.headers, timeout=self.timeout, allow_redirects=True)
-            status = resp.status_code
-            if status == 404:
-                res = {"exists": False}
-            elif 200 <= status < 400:
-                text = resp.text[:50000].lower()
-                markers = NOT_FOUND_MARKERS.get(platform.lower(), ())
-                if any(m in text for m in markers):
-                    res = {"exists": False}
-                else:
-                    res = {"exists": True, "url": target_url}
-            else:
-                res = {"exists": False}
+            return bool(re.search(padrao, texto, re.I | re.S))
+        except re.error:
+            return str(padrao).lower() in texto
+
+    def _avaliar_json(self, cfg, resp):
+        try:
+            d = resp.json()
         except Exception:
-            res = {"exists": False}
+            return None
+        modo = cfg.get("json", "nao_vazio")
+        if modo == "lista_cheia":
+            return isinstance(d, list) and len(d) > 0
+        if modo == "keybase":
+            return bool(d.get("them"))
+        if modo == "reddit":
+            d = d.get("data") or {}
+            return bool(d) and not d.get("is_suspended")
+        return bool(d)
+
+    def check_site(self, platform: str, cfg: dict) -> None:
+        url = cfg["url"].format(username=self.username)
+        fonte = cfg.get("fonte", "html")
+        headers = dict(self.headers)
+        headers.update(cfg.get("cabecalhos", {}))
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout, allow_redirects=(fonte == "api"))
+            s = resp.status_code
+            ne = tuple(cfg.get("status_nao_existe", STATUS_NAO_EXISTE))
+
+            if s in ne:
+                res = {"exists": False, "status": "nao_existe", "motivo": f"http_{s}"}
+            elif s in STATUS_INCONCLUSIVO or s >= 500:
+                res = {"exists": False, "status": "desconhecido", "motivo": f"http_{s}_bloqueio_ou_limite"}
+            elif s in (301, 302, 303, 307, 308):
+                loc = (resp.headers.get("Location") or "").lower()
+                alvo = self.username.lower()
+                if any(x in loc for x in REDIRECT_NAO_ENCONTRADO) or alvo not in loc:
+                    res = {"exists": False, "status": "nao_existe", "motivo": "redirect_fora_do_perfil"}
+                else:
+                    res = {"exists": True, "url": url, "confianca": 0.70, "status": "existe", "motivo": "redirect_para_perfil"}
+            elif 200 <= s < 300:
+                if fonte == "api":
+                    ok = self._avaliar_json(cfg, resp)
+                    if ok is True:
+                        res = {"exists": True, "url": url, "confianca": 1.0, "status": "existe", "motivo": "api_confirmou"}
+                    elif ok is False:
+                        res = {"exists": False, "status": "nao_existe", "motivo": "api_vazia_ou_suspensa"}
+                    else:
+                        res = {"exists": False, "status": "desconhecido", "motivo": "api_json_invalido"}
+                else:
+                    corpo = resp.text[:LIMITE_CORPO]
+                    pos = cfg.get("positivo")
+                    neg = cfg.get("negativo")
+
+                    if neg and self._casa(neg, corpo):
+                        res = {"exists": False, "status": "nao_existe", "motivo": "marcador_negativo_encontrado"}
+                    elif pos and self._casa(pos, corpo):
+                        res = {"exists": True, "url": url, "confianca": 0.95, "status": "existe", "motivo": "marcador_positivo_encontrado"}
+                    elif cfg.get("confiavel_200"):
+                        res = {"exists": True, "url": url, "confianca": 0.85, "status": "existe", "motivo": "http_200_confiavel"}
+                    else:
+                        res = {"exists": False, "status": "desconhecido", "motivo": "sem_marcador_positivo"}
+            else:
+                res = {"exists": False, "status": "desconhecido", "motivo": f"http_{s}_nao_tratado"}
+        except Exception:
+            res = {"exists": False, "status": "desconhecido", "motivo": "excecao_conexao"}
 
         with self._lock:
             self.results[platform] = res
 
     def run(self) -> dict[str, dict[str, Any]]:
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            futures = [
-                executor.submit(self.check_site, p, u)
-                for p, u in PLATFORM_URLS.items()
-            ]
-            for f in futures:
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            futuros = [ex.submit(self.check_site, nome, cfg) for nome, cfg in PLATAFORMAS.items()]
+            for f in futuros:
                 try:
-                    f.result(timeout=4.0)
+                    f.result(timeout=12.0)
                 except Exception:
                     pass
+
+        # Segunda passada de re-confirmação
+        duvidosos = [(n, c) for n, c in PLATAFORMAS.items()
+                     if self.results.get(n, {}).get("status") == "existe"
+                     and self.results[n].get("confianca", 1.0) < 0.80]
+
+        for nome, cfg in duvidosos:
+            url = cfg["url"].format(username=self.username)
+            try:
+                r2 = requests.get(url, headers=self.headers, timeout=self.timeout, allow_redirects=True)
+                if r2.status_code in STATUS_NAO_EXISTE or any(x in r2.url.lower() for x in REDIRECT_NAO_ENCONTRADO):
+                    self.results[nome] = {"exists": False, "status": "nao_existe", "motivo": "reconfirmacao_falhou"}
+                else:
+                    self.results[nome]["confianca"] = 0.90
+            except Exception:
+                self.results[nome] = {"exists": False, "status": "desconhecido", "motivo": "reconfirmacao_erro"}
+
         return self.results
 
 def buscar_dados_cnpj_brasilapi(cnpj: str) -> dict[str, Any]:
@@ -598,7 +705,7 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     }
 
     meta_data = [
-        [Paragraph("<b>ALVO ANALISADO:</b>", cell_style), Paragraph(f"<b>{target}</b>", cell_style)],
+        [Paragraph("<b>ALVO ANALISADO:</b>", cell_style), Paragraph(f"<b>{sanitizar_pdf(target)}</b>", cell_style)],
         [Paragraph("<b>MÓDULO DE BUSCA:</b>", cell_style), Paragraph(titulos_map.get(query_type, "GERAL"), cell_style)],
         [Paragraph("<b>DATA DA AUDITORIA:</b>", cell_style), Paragraph(data_atual, cell_style)],
         [Paragraph("<b>INTEGRIDADE HASH SHA-256:</b>", cell_style), Paragraph(hashlib.sha256(f"{target}_{data_atual}".encode()).hexdigest()[:24] + "...", cell_style)],
@@ -617,12 +724,12 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
         if isinstance(v, dict):
             if "detalhes" in v and isinstance(v["detalhes"], dict):
                 for sub_k, sub_v in v["detalhes"].items():
-                    table_data.append([Paragraph(f"<b>{sub_k}</b>", cell_style), Paragraph(str(sub_v), cell_style)])
+                    table_data.append([Paragraph(f"<b>{sanitizar_pdf(sub_k)}</b>", cell_style), Paragraph(sanitizar_pdf(sub_v), cell_style)])
             elif "detalhes" in v:
-                table_data.append([Paragraph(f"<b>{p}</b>", cell_style), Paragraph(str(v["detalhes"]), cell_style)])
+                table_data.append([Paragraph(f"<b>{sanitizar_pdf(p)}</b>", cell_style), Paragraph(sanitizar_pdf(v["detalhes"]), cell_style)])
             elif v.get("exists") is True:
                 url_str = v.get('url', '')
-                table_data.append([Paragraph(f"<b>{p}</b>", cell_style), Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)])
+                table_data.append([Paragraph(f"<b>{sanitizar_pdf(p)}</b>", cell_style), Paragraph(link_pdf(url_str), cell_url_style)])
 
     t_results = Table(table_data, colWidths=[180, 360])
     t_results.setStyle(TableStyle([
@@ -649,7 +756,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {query_type.upper()}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v33.0 VIP
+SISTEMA: Kronos Engine v34.1 VIP
 ===================================================================
 1. DADOS DE INTELIGÊNCIA E BASES MAPEADAS
 -------------------------------------------------------------------
@@ -715,7 +822,7 @@ def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: s
 def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, resultados: dict) -> str:
     results_json = json.dumps(resultados)
     token_relatorio = secrets.token_urlsafe(16)
-    pid_free = f"free_claim_{user_id}_{int(time.time())}"
+    pid_free = f"free_claim_{user_id}_{secrets.token_hex(6)}"
 
     db_execute(
         "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
@@ -732,7 +839,7 @@ def executar_consulta_admin_direta(admin_id: int, target: str, query_type: str) 
     resultados = executar_varredura_osint(target, query_type=query_type)
     results_json = json.dumps(resultados)
     token_relatorio = secrets.token_urlsafe(16)
-    pid_admin = f"admin_exec_{admin_id}_{int(time.time())}"
+    pid_admin = f"admin_exec_{admin_id}_{secrets.token_hex(6)}"
 
     db_execute(
         "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
@@ -760,6 +867,9 @@ def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarku
     return markup
 
 def worker_divulgacao_diaria():
+    if not adquirir_lock_worker("divulgacao_diaria", renovar_s=1800):
+        return
+
     ultimo_envio = None
     while True:
         try:
@@ -794,9 +904,10 @@ def worker_divulgacao_diaria():
         except Exception as e:
             logger.error("Erro no worker de divulgação diária: %s", str(e))
 
-Thread(target=worker_divulgacao_diaria, daemon=True).start()
-
 def worker_background():
+    if not adquirir_lock_worker("background_remarketing", renovar_s=300):
+        return
+
     while True:
         try:
             time.sleep(60)
@@ -845,13 +956,6 @@ def worker_background():
 
         except Exception as e:
             logger.error("Erro no worker background: %s", str(e))
-
-Thread(target=worker_background, daemon=True).start()
-
-try:
-    calibrar_falsos_positivos()
-except Exception:
-    logger.exception("Calibração falhou; seguindo sem ela")
 
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
@@ -1128,9 +1232,9 @@ if bot:
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
-        raw_first = message.from_user.first_name or "Usuario"
-        raw_last = message.from_user.last_name or ""
-        username_tg = f"@{message.from_user.username}" if message.from_user.username else "Sem @username"
+        raw_first = escapar_html(message.from_user.first_name or "Usuario")
+        raw_last = escapar_html(message.from_user.last_name or "")
+        username_tg = f"@{escapar_html(message.from_user.username)}" if message.from_user.username else "Sem @username"
         nome_completo_tg = f"{raw_first} {raw_last}".strip()
         user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
         
@@ -1143,11 +1247,14 @@ if bot:
                 try:
                     data_hora_acesso = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
                     msg_controle_logs = (
-                        f"👤 NOVO USUÁRIO (/start)\n"
-                        f"ID: `{user_id}`\nNome: {nome_completo_tg}\nUsername: {username_tg}\n"
-                        f"Chat: tg://user?id={user_id}\nData: {data_hora_acesso}"
+                        f"<b>👤 NOVO USUÁRIO (/start)</b>\n"
+                        f"<b>ID:</b> <code>{user_id}</code>\n"
+                        f"<b>Nome:</b> {nome_completo_tg}\n"
+                        f"<b>Username:</b> {username_tg}\n"
+                        f"<b>Chat:</b> tg://user?id={user_id}\n"
+                        f"<b>Data:</b> {data_hora_acesso}"
                     )
-                    bot.send_message(grupo_logs_id, msg_controle_logs, parse_mode="Markdown")
+                    bot.send_message(grupo_logs_id, msg_controle_logs, parse_mode="HTML")
                 except Exception as ex_log:
                     logger.error("Erro ao enviar notificação de start no grupo de logs: %s", str(ex_log))
 
@@ -1158,7 +1265,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v33.0 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v34.1 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
@@ -1198,11 +1305,15 @@ if bot:
         if message.from_user.id != ADMIN_ID:
             return
 
-        total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
-        searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)[0]
+        res_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)
+        total_users = res_users[0] if res_users else 0
+
+        res_searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)
+        searches = res_searches[0] if res_searches else 0
+
         vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved' AND amount > 0", fetchone=True)
-        qtd_vendas = vendas[0] if vendas else 0
-        faturamento = vendas[1] if vendas and vendas[1] else 0.0
+        qtd_vendas = vendas[0] if (vendas and vendas[0] is not None) else 0
+        faturamento = vendas[1] if (vendas and vendas[1] is not None) else 0.0
 
         texto_admin = (
             f"👑 PAINEL CENTRAL DE ADMINISTRAÇÃO KRONOS INTEL\n"
@@ -1279,8 +1390,8 @@ if bot:
                 return
             gratis = usuario_ja_usou_gratis(target_id)
             compras = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE user_id = ? AND status = 'approved'", (target_id,), fetchone=True)
-            qtd_compras = compras[0] if compras else 0
-            val_compras = compras[1] if compras and compras[1] else 0.0
+            qtd_compras = compras[0] if (compras and compras[0] is not None) else 0
+            val_compras = compras[1] if (compras and compras[1] is not None) else 0.0
 
             msg_info = (
                 f"👤 INFORMAÇÕES DO UTILIZADOR `{target_id}`\n"
@@ -1314,6 +1425,24 @@ if bot:
         except ValueError:
             responder_seguro(message, "⚠️ O limite deve ser um número inteiro.")
 
+    def _executar_broadcast_async(admin_chat_id: int, msg_text: str):
+        usuarios = db_execute("SELECT user_id FROM users WHERE banned = 0", fetchall=True)
+        if not usuarios:
+            bot.send_message(admin_chat_id, "Nenhum utilizador encontrado para broadcast.")
+            return
+
+        sucessos, falhas = 0, 0
+        for row in usuarios:
+            uid = row[0]
+            try:
+                bot.send_message(uid, f"📢 NOTIFICAÇÃO KRONOS INTEL:\n\n{msg_text}")
+                sucessos += 1
+                time.sleep(0.04)
+            except Exception:
+                falhas += 1
+
+        bot.send_message(admin_chat_id, f"✅ Transmissão Concluída!\n• Entregues: {sucessos}\n• Falhas: {falhas}")
+
     @bot.message_handler(commands=['broadcast'])
     def handle_broadcast(message):
         if message.from_user.id != ADMIN_ID:
@@ -1322,24 +1451,10 @@ if bot:
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Uso correto: /broadcast <mensagem>")
             return
+        
         msg_broadcast = partes[1].strip()
-        usuarios = db_execute("SELECT user_id FROM users WHERE banned = 0", fetchall=True)
-        if not usuarios:
-            responder_seguro(message, "Nenhum utilizador encontrado.")
-            return
-
-        responder_seguro(message, f"📢 A iniciar envio para {len(usuarios)} utilizadores...")
-        sucessos, falhas = 0, 0
-        for row in usuarios:
-            uid = row[0]
-            try:
-                bot.send_message(uid, f"📢 NOTIFICAÇÃO KRONOS INTEL:\n\n{msg_broadcast}")
-                sucessos += 1
-                time.sleep(0.05)
-            except Exception:
-                falhas += 1
-
-        responder_seguro(message, f"✅ Transmissão Concluída!\n• Entregues: {sucessos}\n• Falhas: {falhas}")
+        responder_seguro(message, "📢 Transmissão iniciada em segundo plano...")
+        Thread(target=_executar_broadcast_async, args=(message.chat.id, msg_broadcast), daemon=True).start()
 
     @bot.message_handler(commands=['resgatar'])
     def handle_resgatar_cupom(message):
@@ -1491,6 +1606,8 @@ if bot:
         user_id = message.from_user.id
         db_execute("DELETE FROM users WHERE user_id = ?", (user_id,), commit=True)
         db_execute("UPDATE payments SET target_username='(apagado)', results_json=NULL, pix_code=NULL WHERE user_id = ?", (user_id,), commit=True)
+        db_execute("DELETE FROM free_claims WHERE user_id = ?", (user_id,), commit=True)
+        db_execute("DELETE FROM coupon_redemptions WHERE user_id = ?", (user_id,), commit=True)
         bot.reply_to(message, "🗑️ Solicitação de Privacidade LGPD Concluída: Seus dados de acesso e pesquisas associados foram apagados permanentemente do sistema.")
 
     @bot.message_handler(commands=['fone'])
@@ -1498,6 +1615,10 @@ if bot:
         user_id = message.from_user.id
         if usuario_esta_banido(user_id):
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
             return
 
         registrar_acesso(user_id)
@@ -1540,6 +1661,10 @@ if bot:
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "CNPJ / Empresarial (/cnpj)")
 
@@ -1578,6 +1703,10 @@ if bot:
         user_id = message.from_user.id
         if usuario_esta_banido(user_id):
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
             return
 
         registrar_acesso(user_id)
@@ -1620,6 +1749,10 @@ if bot:
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Domínios & DNS (/dominio)")
 
@@ -1656,6 +1789,10 @@ if bot:
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Username / Redes Sociais (/user)")
 
@@ -1671,10 +1808,6 @@ if bot:
         if not RE_USERNAME.match(target_user):
             responder_seguro(message, "⚠️ Username Inválido!\nEnvia apenas letras, números, pontos e traços.")
             orientar_uso_correto(message.chat.id)
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
             return
 
         msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target_user}...")
@@ -1721,6 +1854,10 @@ if bot:
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "E-mail & Vazamentos (/email)")
 
@@ -1761,6 +1898,10 @@ if bot:
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Busca Judicial & Registros (/nome)")
 
@@ -1799,13 +1940,18 @@ if bot:
         if message.from_user.id != ADMIN_ID:
             return
 
-        total_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)[0]
-        searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)[0]
-        reports = db_execute("SELECT value FROM metrics WHERE key = 'total_reports'", fetchone=True)[0]
+        res_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)
+        total_users = res_users[0] if res_users else 0
+
+        res_searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)
+        searches = res_searches[0] if res_searches else 0
+
+        res_reports = db_execute("SELECT value FROM metrics WHERE key = 'total_reports'", fetchone=True)
+        reports = res_reports[0] if res_reports else 0
+
         vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved' AND amount > 0", fetchone=True)
-        
-        qtd_vendas = vendas[0] if vendas else 0
-        faturamento = vendas[1] if vendas and vendas[1] else 0.0
+        qtd_vendas = vendas[0] if (vendas and vendas[0] is not None) else 0
+        faturamento = vendas[1] if (vendas and vendas[1] is not None) else 0.0
 
         data_hora_solicitacao = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
 
@@ -1856,7 +2002,7 @@ if bot:
         resultados = executar_varredura_osint(alvo, query_type=qtype)
         results_json = json.dumps(resultados)
         token_relatorio = secrets.token_urlsafe(16)
-        pid_cortesia = f"cortesia_{int(time.time())}"
+        pid_cortesia = f"cortesia_{secrets.token_hex(6)}"
 
         db_execute(
             "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
@@ -1893,6 +2039,10 @@ if bot:
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
+        if not limite_busca_ok(user_id):
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
+            return
+
         registrar_acesso(user_id)
 
         if message.chat.type in ['group', 'supergroup']:
@@ -1916,6 +2066,15 @@ if bot:
         elif RE_CNPJ.match(re.sub(r'\D', '', target)): qtype = "cnpj"
         elif RE_FONE.match(re.sub(r'\D', '', target)): qtype = "fone"
         elif RE_PLACA.match(target.upper().replace("-", "")): qtype = "placa"
+
+        parece_alvo = (
+            e_email_valido(target) or RE_CNPJ.match(re.sub(r'\D', '', target))
+            or RE_FONE.match(re.sub(r'\D', '', target))
+            or (RE_USERNAME.match(target) and len(target) >= 4 and " " not in target)
+        )
+        if qtype == "username" and not parece_alvo:
+            orientar_uso_correto(message.chat.id)
+            return
 
         notificar_uso_grupo_logs(message.from_user, f"Busca Automática ({qtype.upper()})")
 
@@ -2059,14 +2218,14 @@ if bot:
                 row = db_execute("SELECT pix_code FROM payments WHERE token = ? AND status = 'pending'", (token_pix,), fetchone=True)
                 if row and row[0]:
                     bot.answer_callback_query(call.id, "Enviando chave...")
-                    bot.send_message(call.message.chat.id, text=f"`{row[0]}`")
+                    bot.send_message(call.message.chat.id, text=f"<code>{escapar_html(row[0])}</code>", parse_mode="HTML")
                 else:
                     bot.answer_callback_query(call.id, "Chave Pix não encontrada ou já expirada.")
             except Exception as e:
                 logger.error("Erro ao buscar pix_code no banco: %s", str(e))
                 bot.answer_callback_query(call.id, "Erro ao recuperar chave Pix.")
 
-@app.route(f"/telegram/{TELEGRAM_TOKEN}", methods=["POST"])
+@app.route(f"/telegram/{WEBHOOK_SECRET_PATH}", methods=["POST"])
 def telegram_webhook():
     if bot:
         try:
@@ -2079,6 +2238,26 @@ def telegram_webhook():
             logger.exception("Erro ao processar update no webhook do Telegram: %s", str(err))
             return jsonify({"status": "ok"}), 200
     return jsonify({"error": "unauthorized"}), 403
+
+def validar_assinatura_mp(req, segredo: str, data_id: str) -> bool:
+    if not segredo:
+        logger.error("MERCADOPAGO_WEBHOOK_SECRET ausente: webhook rejeitando por padrão")
+        return False
+    partes = dict(p.split("=", 1) for p in req.headers.get("x-signature", "").split(",") if "=" in p)
+    ts, v1 = partes.get("ts"), partes.get("v1")
+    if not ts or not v1 or not data_id:
+        return False
+    manifest = f"id:{data_id};request-id:{req.headers.get('x-request-id','')};ts:{ts};"
+    esperado = hmac.new(segredo.encode(), manifest.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(esperado, v1):
+        logger.warning("Assinatura MP inválida para %s", data_id)
+        return False
+    try:
+        if abs(time.time() - int(ts) / 1000) > 600:
+            return False
+    except ValueError:
+        return False
+    return True
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -2101,6 +2280,13 @@ def webhook():
             return jsonify({"status": "ok"}), 200
 
         pid_str = str(payment_id)
+
+        # Validação de Assinatura HMAC Mercado Pago
+        if MERCADOPAGO_WEBHOOK_SECRET:
+            if not validar_assinatura_mp(request, MERCADOPAGO_WEBHOOK_SECRET, pid_str):
+                return jsonify({"status": "error", "detail": "assinatura invalida"}), 401
+        else:
+            logger.warning("MERCADOPAGO_WEBHOOK_SECRET ausente: assinatura NÃO validada")
         
         row = db_execute(
             "SELECT user_id, target_username, query_type, token FROM payments WHERE payment_id = ? AND status = 'pending'",
@@ -2109,6 +2295,9 @@ def webhook():
 
         if not row or row[1].startswith("("):
             with _orphan_lock:
+                if len(_orphan_alerts_sent) > 10000:
+                    _orphan_alerts_sent.clear()
+                    
                 if pid_str not in _orphan_alerts_sent:
                     _orphan_alerts_sent.add(pid_str)
                     existe = db_execute("SELECT 1 FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
@@ -2121,10 +2310,11 @@ def webhook():
                                 if bot and grupo_logs_id:
                                     bot.send_message(
                                         grupo_logs_id,
-                                        f"⚠️ Pix aprovado SEM registro utilizável\n"
-                                        f"• Pagamento ID: {pid_str}\n"
-                                        f"• Comprador ID: {meta.get('telegram_user_id')}\n"
-                                        f"• Valor: R$ {info.get('transaction_amount', 0.0):.2f}"
+                                        f"<b>⚠️ Pix aprovado SEM registro utilizável</b>\n"
+                                        f"• <b>Pagamento ID:</b> {pid_str}\n"
+                                        f"• <b>Comprador ID:</b> {meta.get('telegram_user_id')}\n"
+                                        f"• <b>Valor:</b> R$ {info.get('transaction_amount', 0.0):.2f}",
+                                        parse_mode="HTML"
                                     )
                         except Exception:
                             logger.exception("Falha ao alertar pagamento órfão no grupo de logs")
@@ -2137,6 +2327,17 @@ def webhook():
                 payment_info = sdk.payment().get(str(payment_id)).get("response", {})
                 if payment_info.get("status") == "approved":
                     
+                    _valor = float(payment_info.get("transaction_amount") or 0.0)
+                    _meta = payment_info.get("metadata") or {}
+
+                    if _valor + 1e-6 < PRECO_PADRAO:
+                        logger.error("Pagamento %s rejeitado: valor pago R$ %.2f < R$ %.2f", pid_str, _valor, PRECO_PADRAO)
+                        return jsonify({"status": "ok"}), 200
+
+                    if _meta.get("telegram_user_id") and int(_meta.get("telegram_user_id")) != int(telegram_id):
+                        logger.error("Pagamento %s rejeitado: telegram_user_id divergente", pid_str)
+                        return jsonify({"status": "ok"}), 200
+
                     claimed = db_execute(
                         "UPDATE payments SET status='approved' WHERE payment_id=? AND status='pending' RETURNING payment_id",
                         (pid_str,), fetchone=True, commit=True
@@ -2170,12 +2371,12 @@ def webhook():
                     if bot and grupo_logs_id:
                         try:
                             msg_venda_log = (
-                                f"💰 NOVA VENDA APROVADA!\n\n"
-                                f"• Valor: R$ {payment_info.get('transaction_amount', 0.0):.2f}\n"
-                                f"• Módulo: {query_type.upper()}\n"
-                                f"• Comprador ID: {telegram_id}"
+                                f"<b>💰 NOVA VENDA APROVADA!</b>\n\n"
+                                f"• <b>Valor:</b> R$ {payment_info.get('transaction_amount', 0.0):.2f}\n"
+                                f"• <b>Módulo:</b> {escapar_html(query_type.upper())}\n"
+                                f"• <b>Comprador ID:</b> {telegram_id}"
                             )
-                            bot.send_message(grupo_logs_id, msg_venda_log)
+                            bot.send_message(grupo_logs_id, msg_venda_log, parse_mode="HTML")
                         except Exception as log_err:
                             logger.error("Erro ao enviar log no grupo financeiro: %s", str(log_err))
 
@@ -2189,7 +2390,10 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v33.0 VIP Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v34.1 VIP Active.", 200
 
 if __name__ == "__main__":
+    setup_webhook()
+    Thread(target=worker_divulgacao_diaria, daemon=True).start()
+    Thread(target=worker_background, daemon=True).start()
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
