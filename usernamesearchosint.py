@@ -1,7 +1,8 @@
 """
-Kronos Intel OSINT Bot v35.6 VIP
-- Processamento assíncrono em Thread separada (não trava o Flask/Render)
-- Resposta instantânea de Webhook 200 OK
+Kronos Intel OSINT Bot v35.7 VIP
+- Restauração Completa de Todos os Módulos no Menu /start
+- Handlers para /email, /nome, /fone, /cnpj, /placa, /dominio, /user e /admin_user
+- Processamento em Thread separada no Webhook (sem bloqueios)
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -67,6 +68,27 @@ TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 db_lock = Lock()
 
 bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=False) if CFG.TELEGRAM_TOKEN else None
+
+DDD_ESTADOS = {
+    "11": "São Paulo (Grande SP)", "12": "São Paulo (Vale do Paraíba/Litoral Norte)", "13": "São Paulo (Baixada Santista)",
+    "14": "São Paulo (Bauru/Marília/Jaú)", "15": "São Paulo (Sorocaba/Itapetininga)", "16": "São Paulo (Ribeirão Preto/Franca)",
+    "17": "São Paulo (São José do Rio Preto)", "18": "São Paulo (Presidente Prudente/Araçatuba)", "19": "São Paulo (Campinas/Piracicaba)",
+    "21": "Rio de Janeiro (Capital/Metropolitana)", "22": "Rio de Janeiro (Norte/Região dos Lagos)", "24": "Rio de Janeiro (Serrana/Sul Fluminense)",
+    "27": "Espírito Santo (Vitória/Metropolitana)", "28": "Espírito Santo (Sul)",
+    "31": "Minas Gerais (Belo Horizonte)", "32": "Minas Gerais (Juiz de Fora)", "33": "Minas Gerais (Governador Valadares)",
+    "34": "Minas Gerais (Uberlândia/Triângulo)", "35": "Minas Gerais (Poços de Caldas/Pouso Alegre)", "37": "Minas Gerais (Divinópolis)", "38": "Minas Gerais (Montes Claros)",
+    "41": "Paraná (Curitiba)", "42": "Paraná (Ponta Grossa)", "43": "Paraná (Londrina)", "44": "Paraná (Maringá)", "45": "Paraná (Cascavel)", "46": "Paraná (Francisco Beltrão)",
+    "47": "Santa Catarina (Joinville/Blumenau)", "48": "Santa Catarina (Florianópolis)", "49": "Santa Catarina (Chapecó)",
+    "51": "Rio Grande do Sul (Porto Alegre)", "53": "Rio Grande do Sul (Pelotas)", "54": "Rio Grande do Sul (Caxias do Sul)", "55": "Rio Grande do Sul (Santa Maria)",
+    "61": "Distrito Federal / Goiás (Entorno)", "62": "Goiás (Goiânia)", "64": "Goiás (Rio Verde)",
+    "63": "Tocantins (Palmas)", "65": "Mato Grosso (Cuiabá)", "66": "Mato Grosso (Rondonópolis)", "67": "Mato Grosso do Sul (Campo Grande)",
+    "68": "Acre (Rio Branco)", "69": "Rondônia (Porto Velho)",
+    "71": "Bahia (Salvador)", "73": "Bahia (Ilhéus/Porto Seguro)", "74": "Bahia (Juazeiro)", "75": "Bahia (Feira de Santana)", "77": "Bahia (Vitória da Conquista)",
+    "79": "Sergipe (Aracaju)", "81": "Pernambuco (Recife)", "82": "Alagoas (Maceió)", "83": "Paraíba (João Pessoa)", "84": "Rio Grande do Norte (Natal)",
+    "85": "Ceará (Fortaleza)", "86": "Piauí (Teresina)", "87": "Pernambuco (Petrolina)", "88": "Ceará (Juazeiro do Norte)", "89": "Piauí (Picos)",
+    "91": "Pará (Belém)", "92": "Amazonas (Manaus)", "93": "Pará (Santarém)", "94": "Pará (Marabá)", "95": "Roraima (Boa Vista)",
+    "96": "Amapá (Macapá)", "97": "Amazonas (Coari)", "98": "Maranhão (São Luís)", "99": "Maranhão (Imperatriz)"
+}
 
 def escaping_html(texto: str) -> str:
     return html.escape(str(texto or ""))
@@ -160,10 +182,59 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
     
     return resultados
 
-def executar_varredura(target: str) -> dict[str, Any]:
-    return asyncio.run(consultar_alvo_async(target))
+def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
+    target_limpo = limpar_comando_string(target)
 
-def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
+    if query_type == "email":
+        encoded_email = urllib.parse.quote(target_limpo)
+        return {
+            "Have I Been Pwned (Vazamentos)": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
+            "DeHashed CyberIntelligence": {"exists": True, "url": f"https://dehashed.com/search?query={encoded_email}"},
+            "Intelligence X (IntelX)": {"exists": True, "url": f"https://intelx.io/?s={encoded_email}"},
+            "BreachDirectory Engine": {"exists": True, "url": f"https://breachdirectory.org/search?query={encoded_email}"}
+        }
+    elif query_type == "fullname":
+        encoded_name = urllib.parse.quote(f'"{target_limpo}"')
+        return {
+            "Jusbrasil (Processos e Diários)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
+            "Escavador (Publicações)": {"exists": True, "url": f"https://www.escavador.com/busca?q={encoded_name}"},
+            "Portal da Transparência": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target_limpo)}"}
+        }
+    elif query_type == "fone":
+        limpo = re.sub(r'\D', '', target_limpo)
+        ddd = limpo[:2] if len(limpo) >= 10 else "N/A"
+        regiao = DDD_ESTADOS.get(ddd, "Região Não Mapeada")
+        return {
+            "WhatsApp Direct Chat": {"exists": True, "url": f"https://wa.me/55{limpo}"},
+            "Truecaller Directory": {"exists": True, "url": f"https://www.truecaller.com/search/br/{limpo}"},
+            "Google Search (Busca Numérica)": {"exists": True, "url": f"https://www.google.com/search?q=%22{limpo}%22"},
+            "Região Geográfica / UF": {"exists": True, "url": "#", "detalhes": regiao}
+        }
+    elif query_type == "cnpj":
+        limpo = re.sub(r'\D', '', target_limpo)
+        return {
+            "Receita Federal (Consulta)": {"exists": True, "url": f"https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp?cnpj={limpo}"},
+            "CNPJ.biz Consultas": {"exists": True, "url": f"https://cnpj.biz/{limpo}"},
+            "Casa dos Dados (QSA)": {"exists": True, "url": f"https://casadosdados.com.br/solucao/cnpj/{limpo}"}
+        }
+    elif query_type == "placa":
+        placa = target_limpo.upper().replace("-", "")
+        return {
+            "Sinesp Cidadão (Atalho)": {"exists": True, "url": f"https://www.google.com/search?q=consultar+placa+{placa}"},
+            "Tabela FIPE Veículos": {"exists": True, "url": f"https://www.google.com/search?q=fipe+placa+{placa}"},
+            "QualVeiculo Registro": {"exists": True, "url": f"https://www.qualveiculo.net/?placa={placa}"}
+        }
+    elif query_type == "dominio":
+        dom = target_limpo.lower().replace("https://", "").replace("http://", "").strip('/')
+        return {
+            "Whois ICANN / DomainTools": {"exists": True, "url": f"https://whois.domaintools.com/{dom}"},
+            "DNS Dumpster Infra": {"exists": True, "url": f"https://dnsdumpster.com/"},
+            "SecurityTrails DNS History": {"exists": True, "url": f"https://securitytrails.com/domain/{dom}/dns"}
+        }
+    else:
+        return asyncio.run(consultar_alvo_async(target_limpo))
+
+def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     story = []
@@ -183,6 +254,7 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]]) -> io.By
 
     meta_data = [
         [Paragraph("<b>ALVO ANALISADO:</b>", cell_style), Paragraph(f"<b>{sanitizar_pdf(target)}</b>", cell_style)],
+        [Paragraph("<b>MÓDULO DE BUSCA:</b>", cell_style), Paragraph(query_type.upper(), cell_style)],
         [Paragraph("<b>DATA DA AUDITORIA:</b>", cell_style), Paragraph(data_atual, cell_style)]
     ]
     t_meta = Table(meta_data, colWidths=[160, 380])
@@ -205,20 +277,20 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]]) -> io.By
     buffer.seek(0)
     return buffer
 
-def gerar_painel_gratuito(user_id: int, target: str, resultados: dict) -> str:
+def gerar_painel_gratuito(user_id: int, target: str, qtype: str, resultados: dict) -> str:
     results_json = json.dumps(resultados)
     token_relatorio = secrets.token_urlsafe(16)
     pid_free = f"free_{user_id}_{secrets.token_hex(4)}"
 
     db_execute(
         "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
-        "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, 'username', ?)",
-        (pid_free, user_id, target, token_relatorio, results_json, datetime.now(TIMEZONE_BR).isoformat()),
+        "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?)",
+        (pid_free, user_id, target, token_relatorio, results_json, qtype, datetime.now(TIMEZONE_BR).isoformat()),
         commit=True
     )
     return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
-def processar_busca(message, raw_target: str):
+def processar_busca(message, raw_target: str, qtype: str = "username"):
     user_id = message.from_user.id
     target = limpar_comando_string(raw_target)
 
@@ -228,9 +300,9 @@ def processar_busca(message, raw_target: str):
 
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
-    resultados = executar_varredura(target)
+    resultados = executar_varredura(target, query_type=qtype)
 
-    link_web = gerar_painel_gratuito(user_id, target, resultados)
+    link_web = gerar_painel_gratuito(user_id, target, qtype, resultados)
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("🌐 Acessar Painel VIP", url=link_web),
@@ -242,7 +314,7 @@ def processar_busca(message, raw_target: str):
             message.chat.id,
             f"👑 **MODO ADMINISTRADOR - CONSULTA LIBERADA**\n\n"
             f"• **Alvo:** `{target}`\n"
-            f"• **Modalidade:** USERNAME\n\n"
+            f"• **Modalidade:** {qtype.upper()}\n\n"
             f"Relatório processado e disponível abaixo:",
             reply_markup=markup,
             parse_mode="Markdown"
@@ -250,7 +322,7 @@ def processar_busca(message, raw_target: str):
     else:
         bot.send_message(
             message.chat.id,
-            f"🎯 **CONSULTA OSINT CONCLUÍDA**\n\n"
+            f"🎯 **CONSULTA OSINT CONCLUÍDA ({qtype.upper()})**\n\n"
             f"• **Alvo:** `{target}`\n\n"
             f"Clique abaixo para ver o painel:",
             reply_markup=markup,
@@ -267,15 +339,27 @@ if bot:
         db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v35.6 VIP ⚡️\n"
+            f"👑 **KRONOS INTEL OSINT BOT v35.7 VIP** ⚡️\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central de inteligência cibernética!\n\n"
-            f"🛠️ MÓDULOS DE CONSULTA DISPONÍVEIS:\n\n"
-            f"1️⃣ 👤 USERNAME / REDES SOCIAIS:\n"
+            f"🛠️ **MÓDULOS DE CONSULTA DISPONÍVEIS:**\n\n"
+            f"1️⃣ 👤 **USERNAME / REDES SOCIAIS:**\n"
             f"   • `/user alvo123`\n"
             f"   • `/admin_user alvo123` (Admin)\n\n"
-            f"📢 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}\n"
-            f"💬 Suporte Direto: @{CFG.SUPORTE_USERNAME}"
+            f"2️⃣ 📧 **E-MAIL & VAZAMENTOS:**\n"
+            f"   • `/email exemplo@dominio.com`\n\n"
+            f"3️⃣ ⚖️ **NOME COMPLETO (JUDICIAL):**\n"
+            f"   • `/nome João da Silva`\n\n"
+            f"4️⃣ 📱 **TELEFONE & WHATSAPP:**\n"
+            f"   • `/fone 11999998888`\n\n"
+            f"5️⃣ 🏢 **CNPJ EMPRESARIAL:**\n"
+            f"   • `/cnpj 00000000000191`\n\n"
+            f"6️⃣ 🚗 **VEÍCULOS (PLACA):**\n"
+            f"   • `/placa ABC1D23`\n\n"
+            f"7️⃣ 🌐 **DOMÍNIOS & DNS:**\n"
+            f"   • `/dominio site.com`\n\n"
+            f"📢 **Canal Oficial:** {CFG.CANAL_TAG_PUBLICO}\n"
+            f"💬 **Suporte Direto:** @{CFG.SUPORTE_USERNAME}"
         )
 
         markup = InlineKeyboardMarkup(row_width=1)
@@ -289,7 +373,7 @@ if bot:
     def handle_admin_user_cmd(message):
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) >= 2:
-            processar_busca(message, partes[1])
+            processar_busca(message, partes[1], "username")
         else:
             bot.reply_to(message, "⚠️ Uso correto: `/admin_user <username>`", parse_mode="Markdown")
 
@@ -297,9 +381,57 @@ if bot:
     def handle_user_cmd(message):
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) >= 2:
-            processar_busca(message, partes[1])
+            processar_busca(message, partes[1], "username")
         else:
             bot.reply_to(message, "⚠️ Uso correto: `/user <username>`", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['email'])
+    def handle_email_cmd(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) >= 2:
+            processar_busca(message, partes[1], "email")
+        else:
+            bot.reply_to(message, "⚠️ Uso correto: `/email exemplo@dominio.com`", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['nome'])
+    def handle_nome_cmd(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) >= 2:
+            processar_busca(message, partes[1], "fullname")
+        else:
+            bot.reply_to(message, "⚠️ Uso correto: `/nome João da Silva`", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['fone'])
+    def handle_fone_cmd(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) >= 2:
+            processar_busca(message, partes[1], "fone")
+        else:
+            bot.reply_to(message, "⚠️ Uso correto: `/fone 11999998888`", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['cnpj'])
+    def handle_cnpj_cmd(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) >= 2:
+            processar_busca(message, partes[1], "cnpj")
+        else:
+            bot.reply_to(message, "⚠️ Uso correto: `/cnpj 00000000000191`", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['placa'])
+    def handle_placa_cmd(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) >= 2:
+            processar_busca(message, partes[1], "placa")
+        else:
+            bot.reply_to(message, "⚠️ Uso correto: `/placa ABC1D23`", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['dominio'])
+    def handle_dominio_cmd(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) >= 2:
+            processar_busca(message, partes[1], "dominio")
+        else:
+            bot.reply_to(message, "⚠️ Uso correto: `/dominio site.com`", parse_mode="Markdown")
 
     @bot.message_handler(func=lambda message: True)
     def handle_catch_all(message):
@@ -307,15 +439,15 @@ if bot:
             return
         target = limpar_comando_string(message.text)
         if len(target) >= 2:
-            processar_busca(message, target)
+            processar_busca(message, target, "username")
 
 @app.route("/relatorio/<token>")
 def ver_relatorio_web(token):
-    p = db_execute("SELECT target_username, results_json, created_at FROM payments WHERE token = ?", (token,), fetchone=True)
+    p = db_execute("SELECT target_username, results_json, query_type, created_at FROM payments WHERE token = ?", (token,), fetchone=True)
     if not p:
         return "Relatório não encontrado ou expirado.", 404
 
-    target, results_json_str, created_at = p[0], p[1], p[2]
+    target, results_json_str, query_type, created_at = p[0], p[1], p[2], p[3]
     try:
         results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
     except Exception:
@@ -344,11 +476,11 @@ def ver_relatorio_web(token):
     <body>
         <div class="container">
             <div class="card-custom">
-                <h2>🔎 Relatório OSINT: {target}</h2>
+                <h2>🔎 Relatório OSINT ({query_type.upper()}): {target}</h2>
                 <p class="text-muted">Data: {created_at}</p>
             </div>
             <div class="card-custom">
-                <h4>Fontes e Redes Localizadas:</h4>
+                <h4>Fontes e Bases Localizadas:</h4>
                 <div class="mt-3">
     """
     for item in encontrados:
@@ -365,17 +497,17 @@ def ver_relatorio_web(token):
 
 @app.route("/download/pdf/<token>")
 def download_pdf(token):
-    p = db_execute("SELECT target_username, results_json FROM payments WHERE token = ?", (token,), fetchone=True)
+    p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ?", (token,), fetchone=True)
     if not p:
         return "Relatório não encontrado.", 404
 
-    target, results_json_str = p[0], p[1]
+    target, results_json_str, query_type = p[0], p[1], p[2]
     try:
         results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
     except Exception:
         results_json = {}
     
-    pdf_buf = gerar_pdf_osint(target, results_json)
+    pdf_buf = gerar_pdf_osint(target, results_json, query_type=query_type)
     return send_file(
         pdf_buf,
         mimetype="application/pdf",
