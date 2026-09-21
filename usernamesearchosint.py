@@ -6,7 +6,7 @@ Kronos Intel OSINT Bot v35.0 VIP
 - SQLite WAL com PRAGMA user_version para migrações automáticas e Rate Limit Persistido
 - Webhook do Telegram com secret_token e validação HMAC-SHA256 no Mercado Pago
 - Sanitização de PDF (ReportLab), HTML Telegram e Trilha de Auditoria LGPD via Hash SHA-256
-- Sistema de Cupons (/gerar_cupom, /resgatar) e Comandos de Administrador (/admin, /conceder)
+- Sistema de Cupons (/gerar_cupom, /resgatar) e Comandos de Administrador VIP (/admin, /conceder, /admin_buscar)
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -1326,6 +1326,26 @@ def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str
     registrar_auditoria(user_id, qtype, target)
 
     resultados = executar_varredura_osint(target, query_type=qtype)
+
+    # --- LIBERAÇÃO VIP DIRETA PARA O ADMINISTRADOR ---
+    if user_id == CFG.ADMIN_ID:
+        link_web = gerar_painel_gratuito_membro(user_id, target, qtype, resultados)
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🌐 Acessar Seu Painel VIP (ADMIN)", url=link_web),
+            InlineKeyboardButton("📄 Baixar Relatório PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
+        )
+        bot.send_message(
+            message.chat.id,
+            f"👑 **MODO ADMINISTRADOR - CONSULTA LIBERADA**\n\n"
+            f"• **Alvo:** `{target}`\n"
+            f"• **Modalidade:** {qtype.upper()}\n\n"
+            f"Relatório processado e disponível abaixo:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        return
+
     encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
 
     if encontrados or qtype != "username":
@@ -1451,6 +1471,27 @@ if bot:
         _comando_busca("username", lambda x: x.replace("@", "").strip() if RE_USERNAME.match(x.replace("@", "").strip()) else None, "Envie um username válido (ex: /user alvo123)", "Username (/user)")
     )
 
+    # --- COMANDO DEDICADO DE BUSCA DIRETA DO ADMIN ---
+    @bot.message_handler(commands=['admin_buscar'])
+    def handle_admin_buscar(message):
+        if message.from_user.id != CFG.ADMIN_ID:
+            return
+
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            bot.reply_to(message, "⚠️ Uso: `/admin_buscar <termo_alvo>`", parse_mode="Markdown")
+            return
+
+        target = partes[1].strip()
+        qtype = "username"
+        if e_email_valido(target): qtype = "email"
+        elif e_nome_completo(target): qtype = "fullname"
+        elif RE_CNPJ.match(re.sub(r'\D', '', target)): qtype = "cnpj"
+        elif RE_FONE.match(re.sub(r'\D', '', target)): qtype = "fone"
+        elif RE_PLACA.match(target.upper().replace("-", "")): qtype = "placa"
+
+        _processar_busca_generica(message, target, qtype, f"Busca Admin ({qtype.upper()})")
+
     # --- COMANDOS DE CUPOM ---
     @bot.message_handler(commands=['gerar_cupom'])
     def handle_gerar_cupom(message):
@@ -1567,6 +1608,7 @@ if bot:
             f"• Buscas Executadas: {searches}\n"
             f"• Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n\n"
             f"🛠️ COMANDOS DE ADMIN:\n"
+            f"• /admin_buscar <termo> — Consulta direta sem cobrança\n"
             f"• /gerar_cupom CODIGO [usos]\n"
             f"• /conceder <user_id> <termo_alvo>\n"
             f"• /broadcast <mensagem>\n"
@@ -1655,8 +1697,18 @@ if bot:
 
         texto = message.text.replace("\n", " ").strip()
 
-        # Proteção para ignorar mensagens administrativas como "admin_fone 91996289106" ou comandos inválidos
-        if message.from_user.id == CFG.ADMIN_ID and (texto.startswith("admin_") or texto.startswith("/")):
+        # Tratamento especial de entrada para Administrador (remove prefixos admin_ ou Admin_)
+        if texto.lower().startswith("admin_"):
+            termo_real = re.sub(r'^(admin_fone|admin_nome|admin_email|admin_user|admin_cnpj|admin_placa|admin_dominio|admin_)\s*', '', texto, flags=re.I).strip()
+            
+            qtype = "username"
+            if e_email_valido(termo_real): qtype = "email"
+            elif e_nome_completo(termo_real): qtype = "fullname"
+            elif RE_CNPJ.match(re.sub(r'\D', '', termo_real)): qtype = "cnpj"
+            elif RE_FONE.match(re.sub(r'\D', '', termo_real)): qtype = "fone"
+            elif RE_PLACA.match(termo_real.upper().replace("-", "")): qtype = "placa"
+
+            _processar_busca_generica(message, termo_real, qtype, f"Busca Admin Direct ({qtype.upper()})")
             return
 
         target = texto.replace("@", "").strip()
