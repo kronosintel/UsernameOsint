@@ -1,6 +1,7 @@
-pyTelegramBotAPI==4.14.0
-requests==2.31.0
-mercadopago==2.1.0
-Flask==3.0.0
-gunicorn==21.2.0
-reportlab==4.0.8
+Flask
+pyTelegramBotAPI
+mercadopago
+requests
+httpx
+reportlab
+gunicorn
