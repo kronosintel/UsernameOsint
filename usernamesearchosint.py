@@ -1,8 +1,9 @@
 """
-Kronos Intel OSINT Bot v30.0 — Plataforma VIP
-- Comandos Administrativos Expandidos: /admin, /admin_fone, /admin_cnpj, /admin_placa, /admin_dominio, /admin_user, /admin_email, /admin_nome
+Kronos Intel OSINT Bot v30.1 VIP
+- Correção de Segurança e Renderização no Painel Web (/relatorio/<token>)
+- Módulos Administrativos VIP: /admin, /admin_fone, /admin_cnpj, /admin_placa, /admin_dominio, /admin_user, /admin_email, /admin_nome
 - Etapa 2: Gerador de Relatório Executivo VIP em PDF (ReportLab)
-- Módulos Expandidos: /user, /email, /nome, /fone, /cnpj, /placa e /dominio
+- Módulos Públicos: /user, /email, /nome, /fone, /cnpj, /placa e /dominio
 - Divulgação Diária Automática no Canal Principal
 - Suporte Oficial: @kronosintel
 """
@@ -551,11 +552,12 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
 
     table_data = [[Paragraph("PLATAFORMA / FONTE", header_table_style), Paragraph("STATUS / LINK DIRETO", header_table_style)]]
     
-    encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+    encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
 
     if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
         for p in resultados:
-            url_str = resultados[p].get('url', '')
+            v = resultados[p]
+            url_str = v.get('url', '') if isinstance(v, dict) else str(v)
             table_data.append([
                 Paragraph(f"<b>{p}</b>", cell_style),
                 Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)
@@ -563,7 +565,8 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     else:
         if encontrados:
             for p in encontrados:
-                url_str = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=target))
+                v = resultados[p]
+                url_str = v.get("url", PLATFORM_URLS.get(p, "").format(username=target)) if isinstance(v, dict) else str(v)
                 table_data.append([
                     Paragraph(f"<b>{p}</b>", cell_style),
                     Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)
@@ -589,7 +592,7 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     return buffer
 
 def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
-    encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+    encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
     data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
     titulos_map = {
@@ -608,7 +611,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {titulos_map.get(query_type, 'GERAL')}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v30.0
+SISTEMA: Kronos Engine v30.1
 ===================================================================
 """
     if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
@@ -616,7 +619,9 @@ SISTEMA: Kronos Engine v30.0
 -------------------------------------------------------------------
 """
         for p in resultados:
-            corpo += f"[+] {p.ljust(28)} : {resultados[p].get('url')}\n"
+            v = resultados[p]
+            url_str = v.get('url', '') if isinstance(v, dict) else str(v)
+            corpo += f"[+] {p.ljust(28)} : {url_str}\n"
 
     else:
         corpo += f"""1. PERFIS E PLATAFORMAS LOCALIZADAS
@@ -624,7 +629,8 @@ SISTEMA: Kronos Engine v30.0
 """
         if encontrados:
             for p in encontrados:
-                url = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=target))
+                v = resultados[p]
+                url = v.get("url", PLATFORM_URLS.get(p, "").format(username=target)) if isinstance(v, dict) else str(v)
                 corpo += f"[+] {p.ljust(25)} : {url}\n"
         else:
             corpo += "[-] Nenhuma rede social pública identificada para este nome de usuário.\n"
@@ -1007,26 +1013,34 @@ def ver_relatorio_web(token):
         return "Relatório não encontrado, expirado ou acesso pendente.", 404
 
     target, results_json_str, query_type, created_at = p[0], p[1], p[2], p[3]
-    results_json = json.loads(results_json_str)
     
+    try:
+        results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
+    except Exception:
+        results_json = {}
+
     is_direct = (query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"])
     encontrados = []
     
-    if is_direct:
+    if is_direct and isinstance(results_json, dict):
         for k, v in results_json.items():
-            encontrados.append({"nome": k, "url": v.get("url")})
-    else:
+            url_item = v.get("url") if isinstance(v, dict) else str(v)
+            encontrados.append({"nome": k, "url": url_item})
+    elif isinstance(results_json, dict):
         for plat, data in results_json.items():
-            if data.get("exists") is True:
+            if isinstance(data, dict) and data.get("exists") is True:
                 url = data.get("url", PLATFORM_URLS.get(plat, "").format(username=target))
                 encontrados.append({"nome": plat, "url": url})
 
     buscadores = obter_links_buscadores(target) if not is_direct else {}
     
-    dt_obj = datetime.fromisoformat(created_at)
-    if dt_obj.tzinfo is None:
-        dt_obj = dt_obj.replace(tzinfo=TIMEZONE_BR)
-    data_formatada = dt_obj.astimezone(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
+    try:
+        dt_obj = datetime.fromisoformat(created_at)
+        if dt_obj.tzinfo is None:
+            dt_obj = dt_obj.replace(tzinfo=TIMEZONE_BR)
+        data_formatada = dt_obj.astimezone(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        data_formatada = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
     titulos_map = {
         "email": "CONSULTA DE E-MAIL",
@@ -1056,7 +1070,10 @@ def download_pdf(token):
         return "Relatório não encontrado ou expirado.", 404
 
     target, results_json_str, query_type = p[0], p[1], p[2]
-    results_json = json.loads(results_json_str)
+    try:
+        results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
+    except Exception:
+        results_json = {}
     
     pdf_buf = gerar_pdf_osint(target, results_json, query_type=query_type)
 
@@ -1074,7 +1091,10 @@ def download_txt(token):
         return "Relatório não encontrado ou expirado.", 404
 
     target, results_json_str, query_type = p[0], p[1], p[2]
-    results_json = json.loads(results_json_str)
+    try:
+        results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
+    except Exception:
+        results_json = {}
     
     txt_buf = construir_relatorio_osint(target, results_json, query_type=query_type)
     txt_buf.seek(0)
@@ -1122,7 +1142,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v30.0 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v30.1 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
@@ -1464,7 +1484,7 @@ if bot:
 
         msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target_user}...")
         resultados = executar_varredura_osint(target_user, query_type="username")
-        encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+        encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
 
         if msg_status:
             try:
@@ -1687,7 +1707,7 @@ if bot:
         elif RE_PLACA.match(target.upper().replace("-", "")): qtype = "placa"
 
         resultados = executar_varredura_osint(target, query_type=qtype)
-        encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+        encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
 
         if encontrados or qtype != "username":
             hash_alvo = registrar_hash_alvo(target, qtype, resultados)
@@ -1948,7 +1968,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v30.0 VIP Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v30.1 VIP Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
