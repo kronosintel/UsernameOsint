@@ -1,16 +1,21 @@
 """
-Kronos Intel OSINT Bot v34.1 VIP
-- Motor OSINT Tri-Estado Conservador (Zero Falso Positivo por construção)
-- Verificação via APIs JSON nativas (GitHub, GitLab, Bluesky, Mastodon, Reddit, Keybase, etc.)
-- SQLite em modo WAL com busy_timeout e Lock Cooperativo via banco de dados
-- Validação Criptográfica de Webhook Mercado Pago (X-Signature HMAC-SHA256 e validação de troco/dono)
-- Sanitização de PDF ReportLab e HTML Telegram contra falhas de renderização
-- Sanitização LGPD Completa (Purge total de registros do usuário)
+Kronos Intel OSINT Bot v35.0 VIP
+- Motor OSINT Assíncrono com httpx.AsyncClient, Keep-Alive e Concorrência por Semáforo
+- Classificador Tri-Estado Puro (Zero Falso Positivo por construção)
+- Cache TTL para otimização de pesquisas sequenciais do mesmo alvo
+- SQLite WAL com PRAGMA user_version para migrações automáticas e Rate Limit Persistido
+- Webhook do Telegram com secret_token e validação HMAC-SHA256 no Mercado Pago
+- Sanitização de PDF (ReportLab), HTML Telegram e Trilha de Auditoria LGPD via Hash SHA-256
+- Fábrica genérica de Handlers Telegram e Endpoints de Liveness/Readiness
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import dataclass
+from dataclass import dataclass
+from datetime import datetime, timedelta
 import hashlib
 import html
 import hmac
@@ -23,20 +28,18 @@ import secrets
 import socket
 import sqlite3
 import time
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from threading import Lock, Thread
-from typing import Any
 
-import requests
+import httpx
+import mercadopago
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
-import mercadopago
 from flask import Flask, jsonify, request, render_template_string, send_file
 
-# Dependências do ReportLab para geração de PDF
+# Dependências do ReportLab
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
@@ -46,48 +49,70 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("kronos_osint")
+
+# --- CONFIGURAÇÃO TIPADA DO SISTEMA ---
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+def _env_bool(key: str, default: bool) -> bool:
+    val = os.getenv(key, str(default)).lower()
+    return val in ("1", "true", "yes", "on")
+
+@dataclass
+class Config:
+    TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
+    ADMIN_ID: int = _env_int("ADMIN_ID", 5041637922)
+    CANAL_PRINCIPAL_ID: int = _env_int("CANAL_PRINCIPAL_ID", -1003802363624)
+    LOG_GROUP_ID: int = _env_int("LOG_GROUP_ID", -1003986408630)
+    CANAL_TAG_PUBLICO: str = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
+    SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
+    BOT_USERNAME: str = os.getenv("BOT_USERNAME", "KronosSearchbot")
+    WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
+    
+    MERCADOPAGO_TOKEN: str = os.getenv("MERCADOPAGO_TOKEN", "")
+    MERCADOPAGO_WEBHOOK_SECRET: str = os.getenv("MERCADOPAGO_WEBHOOK_SECRET", "").strip()
+    
+    PRECO_PADRAO: float = _env_float("PRECO_PADRAO", 3.90)
+    DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
+    PORT: int = _env_int("PORT", 5000)
+    
+    CACHE_TTL_SECONDS: int = _env_int("CACHE_TTL_SECONDS", 900)
+    RETENTION_DAYS: int = _env_int("RETENTION_DAYS", 30)
+    REQUIRE_TERMS: bool = _env_bool("REQUIRE_TERMS", False)
+    
+    TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", hashlib.sha256((os.getenv("TELEGRAM_TOKEN", "") + "secret_token").encode()).hexdigest()[:32])
+
+CFG = Config()
+
+if not CFG.TELEGRAM_TOKEN:
+    logger.warning("TELEGRAM_TOKEN não configurado. Funcionalidades do Bot estarão desativadas.")
 
 app = Flask(__name__)
 app.config.update(
-    SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
-    MAX_CONTENT_LENGTH=1024 * 1024,  # 1 MB
+    SECRET_KEY=os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32),
+    MAX_CONTENT_LENGTH=1024 * 1024,
 )
 
-DEFAULT_TIMEOUT = 4.0
-PORT = int(os.getenv("PORT", "5000"))
-PRECO_PADRAO = 3.90
-DB_FILE = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
-db_lock = Lock()
 TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
+db_lock = Lock()
 
 RE_USERNAME = re.compile(r"^(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{2,40}$")
 RE_CNPJ = re.compile(r"^\d{14}$")
 RE_PLACA = re.compile(r"^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$")
 RE_FONE = re.compile(r"^\d{10,11}$")
 
-CANAL_PRINCIPAL_ID = int(os.getenv("CANAL_PRINCIPAL_ID", "-1003802363624"))
-LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "-1003986408630"))
-CANAL_TAG_PUBLICO = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5041637922"))
-SUPORTE_USERNAME = os.getenv("SUPORTE_USERNAME", "kronosintel")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "KronosSearchbot")
-WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
-
-MERCADOPAGO_TOKEN = os.getenv("MERCADOPAGO_TOKEN")
-MERCADOPAGO_WEBHOOK_SECRET = (os.getenv("MERCADOPAGO_WEBHOOK_SECRET") or "").strip()
-sdk = mercadopago.SDK(MERCADOPAGO_TOKEN) if MERCADOPAGO_TOKEN else None
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False) if TELEGRAM_TOKEN else None
-
-# Hash de segurança do path do webhook Telegram
-WEBHOOK_SECRET_PATH = hashlib.sha256((TELEGRAM_TOKEN or "secret").encode()).hexdigest()[:32] if TELEGRAM_TOKEN else "secret_path"
-
-_hist_rate_limit: dict[int, list[float]] = {}
-_rate_limit_lock = Lock()
-_orphan_alerts_sent: set[str] = set()
-_orphan_lock = Lock()
+sdk = mercadopago.SDK(CFG.MERCADOPAGO_TOKEN) if CFG.MERCADOPAGO_TOKEN else None
+bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=False) if CFG.TELEGRAM_TOKEN else None
 
 DDD_ESTADOS = {
     "11": "São Paulo (Grande SP)", "12": "São Paulo (Vale do Paraíba/Litoral Norte)", "13": "São Paulo (Baixada Santista)",
@@ -110,6 +135,7 @@ DDD_ESTADOS = {
     "96": "Amapá (Macapá)", "97": "Amazonas (Coari)", "98": "Maranhão (São Luís)", "99": "Maranhão (Imperatriz)"
 }
 
+# --- FUNÇÕES UTILITÁRIAS E SANITIZAÇÃO ---
 def escapar_html(texto: str) -> str:
     if not texto:
         return ""
@@ -125,30 +151,18 @@ def link_pdf(url: str) -> str:
         return sanitizar_pdf(url)
     return f'<a href="{sanitizar_pdf(seguro)}">{sanitizar_pdf(seguro)}</a>'
 
-def limite_busca_ok(user_id: int, maximo: int = 6, janela_segundos: int = 3600) -> bool:
-    if user_id == ADMIN_ID:
-        return True
-    agora = time.time()
-    with _rate_limit_lock:
-        if len(_hist_rate_limit) > 5000:
-            for k in [k for k, v in _hist_rate_limit.items() if not v or agora - v[-1] > 7200]:
-                _hist_rate_limit.pop(k, None)
-                
-        historico = [t for t in _hist_rate_limit.get(user_id, []) if agora - t < janela_segundos]
-        if len(historico) >= maximo:
-            _hist_rate_limit[user_id] = historico
-            return False
-        historico.append(agora)
-        _hist_rate_limit[user_id] = historico
-        return True
+def normalizar_termo_hash(termo: str) -> str:
+    limpo = termo.strip().lower()
+    return hashlib.sha256(limpo.encode("utf-8")).hexdigest()
 
+# --- BANCO DE DADOS E MIGRAÇÕES (WAL + USER_VERSION) ---
 def init_db():
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=30.0)
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cursor = conn.cursor()
         
-        # Ativações para concorrência
         cursor.execute("PRAGMA journal_mode = WAL")
+        cursor.execute("PRAGMA synchronous = NORMAL")
         cursor.execute("PRAGMA busy_timeout = 30000")
 
         cursor.execute("""
@@ -156,7 +170,8 @@ def init_db():
                 user_id INTEGER PRIMARY KEY,
                 created_at TEXT,
                 banned INTEGER DEFAULT 0,
-                ban_reason TEXT
+                ban_reason TEXT,
+                accepted_terms INTEGER DEFAULT 0
             )
         """)
         cursor.execute("""
@@ -217,7 +232,31 @@ def init_db():
                 expira_em TEXT
             )
         """)
-        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS rate_events (
+                user_id INTEGER,
+                timestamp REAL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                module TEXT,
+                target_hash TEXT,
+                created_at TEXT
+            )
+        """)
+
+        # Índices de performance
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_token ON payments(token)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_status_reminded ON payments(status, reminded)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_target_hashes_created ON target_hashes(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_events_user_ts ON rate_events(user_id, timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")
+
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
         cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
         
@@ -228,7 +267,7 @@ init_db()
 
 def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, commit=False):
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=30.0)
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute(query, params)
         res = None
@@ -241,13 +280,43 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
         conn.close()
         return res
 
+def registrar_auditoria(user_id: int, modulo: str, termo: str):
+    target_hash = normalizar_termo_hash(termo)
+    db_execute(
+        "INSERT INTO audit_log (user_id, module, target_hash, created_at) VALUES (?, ?, ?, ?)",
+        (user_id, modulo, target_hash, datetime.now(TIMEZONE_BR).isoformat()),
+        commit=True
+    )
+
+def limite_busca_ok(user_id: int, maximo: int = 6, janela_segundos: int = 3600) -> bool:
+    if user_id == CFG.ADMIN_ID:
+        return True
+    agora = time.time()
+    corte = agora - janela_segundos
+    
+    with db_lock:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM rate_events WHERE timestamp < ?", (corte,))
+        cursor.execute("SELECT COUNT(*) FROM rate_events WHERE user_id = ? AND timestamp >= ?", (user_id, corte))
+        qtd = cursor.fetchone()[0]
+        
+        if qtd >= maximo:
+            conn.commit()
+            conn.close()
+            return False
+            
+        cursor.execute("INSERT INTO rate_events (user_id, timestamp) VALUES (?, ?)", (user_id, agora))
+        conn.commit()
+        conn.close()
+        return True
+
 def adquirir_lock_worker(nome: str, renovar_s: int = 240) -> bool:
     agora = datetime.now(TIMEZONE_BR)
     expira = (agora + timedelta(seconds=renovar_s)).isoformat()
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=30.0)
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         try:
-            cur = conn.execute("CREATE TABLE IF NOT EXISTS worker_locks (nome TEXT PRIMARY KEY, expira_em TEXT)")
             cur = conn.execute(
                 "INSERT INTO worker_locks (nome, expira_em) VALUES (?, ?) "
                 "ON CONFLICT(nome) DO UPDATE SET expira_em = excluded.expira_em "
@@ -270,11 +339,17 @@ def usuario_ja_usou_gratis(user_id: int) -> bool:
     res = db_execute("SELECT 1 FROM free_claims WHERE user_id = ?", (user_id,), fetchone=True)
     return res is not None
 
+def usuario_aceitou_termos(user_id: int) -> bool:
+    if not CFG.REQUIRE_TERMS:
+        return True
+    res = db_execute("SELECT accepted_terms FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    return res is not None and res[0] == 1
+
 def usuario_e_membro_canal(user_id: int) -> bool:
-    if not bot or not CANAL_PRINCIPAL_ID:
+    if not bot or not CFG.CANAL_PRINCIPAL_ID:
         return False
     try:
-        member = bot.get_chat_member(CANAL_PRINCIPAL_ID, user_id)
+        member = bot.get_chat_member(CFG.CANAL_PRINCIPAL_ID, user_id)
         return member.status in ['member', 'administrator', 'creator']
     except Exception as e:
         logger.error("Erro ao verificar membro no canal: %s", str(e))
@@ -298,15 +373,12 @@ def obter_alvo_por_hash(hash_curto: str) -> tuple[str | None, str | None, str | 
         return res[0], res[1], res[2]
     return None, None, None
 
-def obter_grupo_logs_id() -> int:
-    return LOG_GROUP_ID
-
 def notificar_uso_grupo_logs(from_user, modulo_nome: str):
-    if not bot or not LOG_GROUP_ID or from_user.id == ADMIN_ID:
+    if not bot or not CFG.LOG_GROUP_ID or from_user.id == CFG.ADMIN_ID:
         return
     try:
-        raw_first = escapar_html(from_user.first_name or "Usuario")
-        raw_last = escapar_html(from_user.last_name or "")
+        raw_first = escaping_html = escapar_html(from_user.first_name or "Usuario")
+        raw_last = escaping_html = escapar_html(from_user.last_name or "")
         nome_completo = f"{raw_first} {raw_last}".strip()
         username_str = f"@{escapar_html(from_user.username)}" if from_user.username else "Sem @username"
         data_hora = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
@@ -318,31 +390,20 @@ def notificar_uso_grupo_logs(from_user, modulo_nome: str):
             f"• <b>Nome:</b> {nome_completo}\n"
             f"• <b>Username:</b> {username_str}\n"
             f"• <b>Módulo Solicitado:</b> {escapar_html(modulo_nome.upper())}\n"
-            f"• <b>Termo Varrito:</b> [PROTEGIDO POR PRIVACIDADE]\n"
+            f"• <b>Termo Varrito:</b> [PROTEGIDO POR PRIVACIDADE LGPD]\n"
             f"• <b>Data/Hora:</b> {data_hora}"
         )
-        bot.send_message(LOG_GROUP_ID, msg_log, parse_mode="HTML")
+        bot.send_message(CFG.LOG_GROUP_ID, msg_log, parse_mode="HTML")
     except Exception as e:
-        logger.error("Erro ao enviar log de uso para o grupo: %s", str(e))
+        logger.error("Erro ao enviar log para o grupo: %s", str(e))
 
-def setup_webhook():
-    if bot and TELEGRAM_TOKEN:
-        webhook_url = f"{WEB_BASE_URL}/telegram/{WEBHOOK_SECRET_PATH}"
-        try:
-            bot.remove_webhook()
-            success = bot.set_webhook(url=webhook_url)
-            logger.info("Webhook Telegram configurado: %s", success)
-        except Exception as e:
-            logger.error("Erro ao configurar Webhook Telegram: %s", str(e))
-
-# --- MOTOR OSINT CONSERVADOR TRI-ESTADO (v34.1) ---
+# --- PLATAFORMAS E CONFIGURAÇÃO DO MOTOR OSINT ---
 LIMITE_CORPO = 400_000
 STATUS_NAO_EXISTE = (404, 410)
 STATUS_INCONCLUSIVO = (401, 403, 405, 406, 409, 429, 451, 500, 501, 502, 503, 504, 520, 522, 524)
 REDIRECT_NAO_ENCONTRADO = ("/login", "/signin", "/signup", "/register", "/home", "404", "/error", "not-found", "notfound", "typo", "subdomain=")
 
 PLATAFORMAS: dict[str, dict[str, Any]] = {
-    # APIs JSON (404 Real)
     "GitHub":       {"url": "https://api.github.com/users/{username}", "fonte": "api", "json": "nao_vazio", "cabecalhos": {"Accept": "application/vnd.github+json"}},
     "GitLab":       {"url": "https://gitlab.com/api/v4/users?username={username}", "fonte": "api", "json": "lista_cheia"},
     "Codeberg":     {"url": "https://codeberg.org/api/v1/users/{username}", "fonte": "api", "json": "nao_vazio"},
@@ -357,8 +418,7 @@ PLATAFORMAS: dict[str, dict[str, Any]] = {
     "Keybase":      {"url": "https://keybase.io/_/api/1.0/user/lookup.json?username={username}", "fonte": "api", "json": "keybase"},
     "npm":          {"url": "https://registry.npmjs.org/-/user/org.couchdb.user:{username}", "fonte": "api", "json": "nao_vazio"},
 
-    # HTML com Indicador Positivo
-    "YouTube":      {"url": "https://www.youtube.com/@{username}", "fonte": "html", "positivo": r'"channelId":"UC', "negativo": "this page isn't available"},
+    "YouTube":      {"url": "https://www.youtube.com/@{username}", "fonte": "html", "positivo": r'"channelId":"UC', "negativo": "this page isn't available", "timeout": 3.0},
     "Twitch":       {"url": "https://www.twitch.tv/{username}", "fonte": "html", "positivo": r'"userLogin":"{username}"'},
     "Telegram":     {"url": "https://t.me/{username}", "fonte": "html", "positivo": r'tgme_page_title'},
     "Medium":       {"url": "https://medium.com/@{username}", "fonte": "html", "positivo": r'property="og:type" content="profile"', "negativo": "out of bounds"},
@@ -373,224 +433,228 @@ PLATAFORMAS: dict[str, dict[str, Any]] = {
     "Linktree":     {"url": "https://linktr.ee/{username}", "fonte": "html", "positivo": r'profile_title'},
     "Gravatar":     {"url": "https://en.gravatar.com/{username}", "fonte": "html", "positivo": r'gravatar\.com/avatar/'},
     "Kick":         {"url": "https://kick.com/{username}", "fonte": "html", "positivo": r'"user_id":'},
-    "Roblox":       {"url": "https://www.roblox.com/user.aspx?username={username}", "fonte": "html", "positivo": r'profile-header'},
+    "Roblox":       {"url": "https://www.roblox.com/user.aspx?username={username}", "fonte": "html", "positivo": r'profile-header', "timeout": 2.5},
     "CodePen":      {"url": "https://codepen.io/{username}", "fonte": "html", "positivo": r'profile-header'},
     "Steam":        {"url": "https://steamcommunity.com/id/{username}", "fonte": "html", "positivo": r'actual_persona_name', "negativo": "the specified profile could not be found"},
     "PyPI":         {"url": "https://pypi.org/user/{username}/", "fonte": "html", "positivo": r'author-profile__name', "negativo": "404 not found"},
 
-    # HTML com Inexistência Comprovada via HTTP Status
     "Tumblr":       {"url": "https://{username}.tumblr.com", "fonte": "html", "confiavel_200": True},
     "Disqus":       {"url": "https://disqus.com/by/{username}/", "fonte": "html", "confiavel_200": True},
     "WordPress":    {"url": "https://{username}.wordpress.com", "fonte": "html", "confiavel_200": True},
 }
 
-PLATFORM_URLS = {p: cfg["url"] for p, cfg in PLATAFORMAS.items()}
-
-def registrar_acesso(user_id: int):
-    now_str = datetime.now(TIMEZONE_BR).isoformat()
-    db_execute(
-        "INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
-        (user_id, now_str), commit=True
-    )
-    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_searches'", commit=True)
-
-def registrar_relatorio():
-    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_reports'", commit=True)
-
-def e_nome_completo(termo: str) -> bool:
-    partes = termo.strip().split()
-    return len(partes) >= 2 and all(len(p) >= 2 for p in partes)
-
-def e_email_valido(termo: str) -> bool:
-    padrao = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(padrao, termo.strip()))
-
-def e_url(termo: str) -> bool:
-    if e_email_valido(termo):
+# --- CLASSIFICADOR TRI-ESTADO PURO ---
+def _casa_padrao(padrao: str, texto: str) -> bool:
+    if not padrao:
         return False
-    if "/" in termo or "http://" in termo or "https://" in termo:
-        padrao_url = re.compile(
-            r'^(?:http|ftp)s?://'
-            r'|(?:www\.)'
-            r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)'
-        , re.IGNORECASE)
-        return bool(padrao_url.search(termo))
-    return False
-
-def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
     try:
-        return bot.reply_to(message, texto, parse_mode=parse_mode, reply_markup=reply_markup)
-    except Exception:
-        try:
-            return bot.send_message(message.chat.id, texto, parse_mode=parse_mode, reply_markup=reply_markup)
-        except Exception as e:
-            logger.error("Erro ao enviar mensagem para chat %s: %s", message.chat.id, str(e))
-            return None
+        return bool(re.search(padrao, texto, re.I | re.S))
+    except re.error:
+        return str(padrao).lower() in texto.lower()
 
-def orientar_uso_correto(chat_id: int):
-    msg_guia = (
-        "💡 COMO UTILIZAR O BOT CORRETAMENTE:\n\n"
-        "1️⃣ 👤 Username: /user alvo123\n"
-        "2️⃣ 📧 E-mail: /email alvo@dominio.com\n"
-        "3️⃣ ⚖️ Nome Completo: /nome João da Silva\n"
-        "4️⃣ 📱 Telefone: /fone 11999998888\n"
-        "5️⃣ 🏢 CNPJ: /cnpj 00000000000191\n"
-        "6️⃣ 🚗 Placa: /placa ABC1D23\n"
-        "7️⃣ 🌐 Domínio: /dominio site.com"
-    )
-    try:
-        bot.send_message(chat_id, msg_guia)
-    except Exception as e:
-        logger.error("Erro ao enviar orientação para %s: %s", chat_id, str(e))
+def _avaliar_json_dados(cfg: dict, dados: Any) -> Optional[bool]:
+    if dados is None:
+        return None
+    modo = cfg.get("json", "nao_vazio")
+    if modo == "lista_cheia":
+        return isinstance(dados, list) and len(dados) > 0
+    if modo == "keybase":
+        return isinstance(dados, dict) and bool(dados.get("them"))
+    if modo == "reddit":
+        if isinstance(dados, dict):
+            d = dados.get("data") or {}
+            return bool(d) and not d.get("is_suspended")
+        return False
+    if isinstance(dados, dict):
+        return len(dados) > 0
+    return bool(dados)
 
-class FastOSINTChecker:
-    def __init__(self, username: str, timeout: float = DEFAULT_TIMEOUT):
-        self.username = username
-        self.timeout = timeout
-        self.results: dict[str, dict[str, Any]] = {}
-        self._lock = Lock()
-        self.headers = {
+def classificar_resposta(cfg: dict, status_code: int, headers: dict, corpo_texto: str, json_dados: Any, username: str) -> dict[str, Any]:
+    ne = tuple(cfg.get("status_nao_existe", STATUS_NAO_EXISTE))
+    fonte = cfg.get("fonte", "html")
+    
+    if status_code in ne:
+        return {"exists": False, "status": "nao_existe", "motivo": f"http_{status_code}"}
+    if status_code in STATUS_INCONCLUSIVO or status_code >= 500:
+        return {"exists": False, "status": "desconhecido", "motivo": f"http_{status_code}_bloqueio_ou_limite"}
+    
+    if status_code in (301, 302, 303, 307, 308):
+        loc = (headers.get("Location") or headers.get("location") or "").lower()
+        alvo = username.lower()
+        if any(x in loc for x in REDIRECT_NAO_ENCONTRADO) or alvo not in loc:
+            return {"exists": False, "status": "nao_existe", "motivo": "redirect_fora_do_perfil"}
+        return {"exists": True, "confianca": 0.70, "status": "existe", "motivo": "redirect_para_perfil"}
+
+    if 200 <= status_code < 300:
+        if fonte == "api":
+            ok = _avaliar_json_dados(cfg, json_dados)
+            if ok is True:
+                return {"exists": True, "confianca": 1.0, "status": "existe", "motivo": "api_confirmou"}
+            if ok is False:
+                return {"exists": False, "status": "nao_existe", "motivo": "api_vazia_ou_suspensa"}
+            return {"exists": False, "status": "desconhecido", "motivo": "api_json_invalido"}
+        else:
+            corpo = corpo_texto[:LIMITE_CORPO]
+            pos = cfg.get("positivo")
+            neg = cfg.get("negativo")
+
+            if neg and _casa_padrao(neg, corpo):
+                return {"exists": False, "status": "nao_existe", "motivo": "marcador_negativo_encontrado"}
+            if pos and _casa_padrao(pos, corpo):
+                return {"exists": True, "confianca": 0.95, "status": "existe", "motivo": "marcador_positivo_encontrado"}
+            if cfg.get("confiavel_200"):
+                return {"exists": True, "confianca": 0.85, "status": "existe", "motivo": "http_200_confiavel"}
+            return {"exists": False, "status": "desconhecido", "motivo": "sem_marcador_positivo"}
+
+    return {"exists": False, "status": "desconhecido", "motivo": f"http_{status_code}_nao_tratado"}
+
+# --- MOTOR ASSÍNCRONO COM HTTPX E EVENT LOOP DEDICADO ---
+class OSINTEngineAsync:
+    def __init__(self, max_concurrency: int = 25):
+        self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._cache_lock = Lock()
+        self.headers_padrao = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-    @staticmethod
-    def _casa(padrao, texto: str) -> bool:
-        if not padrao:
-            return False
-        try:
-            return bool(re.search(padrao, texto, re.I | re.S))
-        except re.error:
-            return str(padrao).lower() in texto
-
-    def _avaliar_json(self, cfg, resp):
-        try:
-            d = resp.json()
-        except Exception:
-            return None
-        modo = cfg.get("json", "nao_vazio")
-        if modo == "lista_cheia":
-            return isinstance(d, list) and len(d) > 0
-        if modo == "keybase":
-            return bool(d.get("them"))
-        if modo == "reddit":
-            d = d.get("data") or {}
-            return bool(d) and not d.get("is_suspended")
-        return bool(d)
-
-    def check_site(self, platform: str, cfg: dict) -> None:
-        url = cfg["url"].format(username=self.username)
+    async def consultar_plataforma(self, client: httpx.AsyncClient, nome: str, cfg: dict, username: str) -> tuple[str, dict[str, Any]]:
+        url = cfg["url"].format(username=username)
         fonte = cfg.get("fonte", "html")
-        headers = dict(self.headers)
+        headers = dict(self.headers_padrao)
         headers.update(cfg.get("cabecalhos", {}))
+        timeout_plat = cfg.get("timeout", 4.0)
 
-        try:
-            resp = requests.get(url, headers=headers, timeout=self.timeout, allow_redirects=(fonte == "api"))
-            s = resp.status_code
-            ne = tuple(cfg.get("status_nao_existe", STATUS_NAO_EXISTE))
-
-            if s in ne:
-                res = {"exists": False, "status": "nao_existe", "motivo": f"http_{s}"}
-            elif s in STATUS_INCONCLUSIVO or s >= 500:
-                res = {"exists": False, "status": "desconhecido", "motivo": f"http_{s}_bloqueio_ou_limite"}
-            elif s in (301, 302, 303, 307, 308):
-                loc = (resp.headers.get("Location") or "").lower()
-                alvo = self.username.lower()
-                if any(x in loc for x in REDIRECT_NAO_ENCONTRADO) or alvo not in loc:
-                    res = {"exists": False, "status": "nao_existe", "motivo": "redirect_fora_do_perfil"}
-                else:
-                    res = {"exists": True, "url": url, "confianca": 0.70, "status": "existe", "motivo": "redirect_para_perfil"}
-            elif 200 <= s < 300:
-                if fonte == "api":
-                    ok = self._avaliar_json(cfg, resp)
-                    if ok is True:
-                        res = {"exists": True, "url": url, "confianca": 1.0, "status": "existe", "motivo": "api_confirmou"}
-                    elif ok is False:
-                        res = {"exists": False, "status": "nao_existe", "motivo": "api_vazia_ou_suspensa"}
-                    else:
-                        res = {"exists": False, "status": "desconhecido", "motivo": "api_json_invalido"}
-                else:
-                    corpo = resp.text[:LIMITE_CORPO]
-                    pos = cfg.get("positivo")
-                    neg = cfg.get("negativo")
-
-                    if neg and self._casa(neg, corpo):
-                        res = {"exists": False, "status": "nao_existe", "motivo": "marcador_negativo_encontrado"}
-                    elif pos and self._casa(pos, corpo):
-                        res = {"exists": True, "url": url, "confianca": 0.95, "status": "existe", "motivo": "marcador_positivo_encontrado"}
-                    elif cfg.get("confiavel_200"):
-                        res = {"exists": True, "url": url, "confianca": 0.85, "status": "existe", "motivo": "http_200_confiavel"}
-                    else:
-                        res = {"exists": False, "status": "desconhecido", "motivo": "sem_marcador_positivo"}
-            else:
-                res = {"exists": False, "status": "desconhecido", "motivo": f"http_{s}_nao_tratado"}
-        except Exception:
-            res = {"exists": False, "status": "desconhecido", "motivo": "excecao_conexao"}
-
-        with self._lock:
-            self.results[platform] = res
-
-    def run(self) -> dict[str, dict[str, Any]]:
-        with ThreadPoolExecutor(max_workers=20) as ex:
-            futuros = [ex.submit(self.check_site, nome, cfg) for nome, cfg in PLATAFORMAS.items()]
-            for f in futuros:
-                try:
-                    f.result(timeout=12.0)
-                except Exception:
-                    pass
-
-        # Segunda passada de re-confirmação
-        duvidosos = [(n, c) for n, c in PLATAFORMAS.items()
-                     if self.results.get(n, {}).get("status") == "existe"
-                     and self.results[n].get("confianca", 1.0) < 0.80]
-
-        for nome, cfg in duvidosos:
-            url = cfg["url"].format(username=self.username)
+        async with self.semaphore:
             try:
-                r2 = requests.get(url, headers=self.headers, timeout=self.timeout, allow_redirects=True)
-                if r2.status_code in STATUS_NAO_EXISTE or any(x in r2.url.lower() for x in REDIRECT_NAO_ENCONTRADO):
-                    self.results[nome] = {"exists": False, "status": "nao_existe", "motivo": "reconfirmacao_falhou"}
-                else:
-                    self.results[nome]["confianca"] = 0.90
-            except Exception:
-                self.results[nome] = {"exists": False, "status": "desconhecido", "motivo": "reconfirmacao_erro"}
+                resp = await client.get(
+                    url,
+                    headers=headers,
+                    timeout=timeout_plat,
+                    follow_redirects=(fonte == "api")
+                )
+                
+                # Tratamento de Retry para 429/5xx
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    retry_after = resp.headers.get("Retry-After")
+                    wait_s = float(retry_after) if retry_after and retry_after.isdigit() else 1.0
+                    if wait_s <= 2.0:
+                        await asyncio.sleep(wait_s)
+                        resp = await client.get(url, headers=headers, timeout=timeout_plat, follow_redirects=(fonte == "api"))
 
-        return self.results
+                json_dados = None
+                if fonte == "api":
+                    try:
+                        json_dados = resp.json()
+                    except Exception:
+                        json_dados = None
 
-def buscar_dados_cnpj_brasilapi(cnpj: str) -> dict[str, Any]:
+                res = classificar_resposta(cfg, resp.status_code, dict(resp.headers), resp.text, json_dados, username)
+                if res.get("exists"):
+                    res["url"] = url
+                return nome, res
+
+            except httpx.TimeoutException:
+                return nome, {"exists": False, "status": "desconhecido", "motivo": "timeout_sem_retry"}
+            except Exception as e:
+                return nome, {"exists": False, "status": "desconhecido", "motivo": f"excecao_{type(e).__name__}"}
+
+    async def executar_varredura(self, username: str) -> dict[str, Any]:
+        agora = time.time()
+        with self._cache_lock:
+            if username in self.cache:
+                ts, res_cached = self.cache[username]
+                if agora - ts < CFG.CACHE_TTL_SECONDS:
+                    return res_cached
+
+        async with httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=20, max_connections=40)) as client:
+            tasks = [
+                self.consultar_plataforma(client, nome, cfg, username)
+                for nome, cfg in PLATAFORMAS.items()
+            ]
+            resultados_raw = await asyncio.gather(*tasks)
+
+        resultados = dict(resultados_raw)
+
+        # Segunda passada assíncrona para reconfirmação de baixa confiança
+        duvidosos = [nome for nome, res in resultados.items() if res.get("status") == "existe" and res.get("confianca", 1.0) < 0.80]
+        if duvidosos:
+            async with httpx.AsyncClient() as client_reconf:
+                for nome in duvidosos:
+                    cfg = PLATAFORMAS[nome]
+                    url = cfg["url"].format(username=username)
+                    try:
+                        r2 = await client_reconf.get(url, headers=self.headers_padrao, timeout=3.0, follow_redirects=True)
+                        if r2.status_code in STATUS_NAO_EXISTE or any(x in str(r2.url).lower() for x in REDIRECT_NAO_ENCONTRADO):
+                            resultados[nome] = {"exists": False, "status": "nao_existe", "motivo": "reconfirmacao_falhou"}
+                        else:
+                            resultados[nome]["confianca"] = 0.90
+                    except Exception:
+                        resultados[nome] = {"exists": False, "status": "desconhecido", "motivo": "reconfirmacao_erro"}
+
+        with self._cache_lock:
+            if len(self.cache) > 2000:
+                self.cache.clear()
+            self.cache[username] = (agora, resultados)
+
+        return resultados
+
+# Loop Async e Gerenciador
+class AsyncLoopThread:
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.thread = Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def run(self, coro, timeout: float = 15.0):
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return future.result(timeout=timeout)
+
+ASYNC_RUNNER = AsyncLoopThread()
+ENGINE_ASYNC = OSINTEngineAsync()
+
+# --- DADOS EXTERNOS ASSÍNCRONOS (CNPJ & DNS) ---
+async def _cnpj_async(cnpj: str) -> dict[str, Any]:
     try:
-        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
-        resp = requests.get(url, timeout=5.0)
-        if resp.status_code == 200:
-            d = resp.json()
-            qsa_list = [f"{s.get('nome_socio', '')} ({s.get('qualificacao_socio', '')})" for s in d.get("qsa", [])]
-            return {
-                "Razão Social": d.get("razao_social"),
-                "Nome Fantasia": d.get("nome_fantasia") or "Não Informado",
-                "Situação Cadastral": d.get("descricao_situacao_cadastral"),
-                "Data de Abertura": d.get("data_inicio_atividade"),
-                "Capital Social": f"R$ {d.get('capital_social', 0):,.2f}",
-                "Atividade Principal": d.get("cnae_fiscal_descricao"),
-                "Endereço": f"{d.get('logradouro')}, {d.get('numero')} - {d.get('bairro')}, {d.get('municipio')}/{d.get('uf')} (CEP: {d.get('cep')})",
-                "Quadro Societário (QSA)": ", ".join(qsa_list) if qsa_list else "Sem sócios declarados"
-            }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}")
+            if resp.status_code == 200:
+                d = resp.json()
+                qsa_list = [f"{s.get('nome_socio', '')} ({s.get('qualificacao_socio', '')})" for s in d.get("qsa", [])]
+                return {
+                    "Razão Social": d.get("razao_social"),
+                    "Nome Fantasia": d.get("nome_fantasia") or "Não Informado",
+                    "Situação Cadastral": d.get("descricao_situacao_cadastral"),
+                    "Data de Abertura": d.get("data_inicio_atividade"),
+                    "Capital Social": f"R$ {d.get('capital_social', 0):,.2f}",
+                    "Atividade Principal": d.get("cnae_fiscal_descricao"),
+                    "Endereço": f"{d.get('logradouro')}, {d.get('numero')} - {d.get('bairro')}, {d.get('municipio')}/{d.get('uf')} (CEP: {d.get('cep')})",
+                    "Quadro Societário (QSA)": ", ".join(qsa_list) if qsa_list else "Sem sócios declarados"
+                }
     except Exception as e:
-        logger.error("Erro na BrasilAPI CNPJ: %s", str(e))
+        logger.error("Erro na consulta de CNPJ: %s", str(e))
     return {}
 
-def analisar_infraestrutura_dominio(dominio: str) -> dict[str, Any]:
+async def _dominio_async(dominio: str) -> dict[str, Any]:
     dados = {}
+    loop = asyncio.get_running_loop()
     try:
-        ip = socket.gethostbyname(dominio)
+        ip = await loop.run_in_executor(None, socket.gethostbyname, dominio)
         dados["Endereço IP Servidor"] = ip
     except Exception:
         dados["Endereço IP Servidor"] = "Indisponível"
 
     try:
-        resp = requests.get(f"https://dns.google/resolve?name={dominio}&type=MX", timeout=4.0)
-        if resp.status_code == 200:
-            mxs = [item.get("data") for item in resp.json().get("Answer", []) if "data" in item]
-            dados["Servidores de E-mail (MX)"] = ", ".join(mxs) if mxs else "Nenhum registro MX localizado"
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(f"https://dns.google/resolve?name={dominio}&type=MX")
+            if resp.status_code == 200:
+                mxs = [item.get("data") for item in resp.json().get("Answer", []) if "data" in item]
+                dados["Servidores de E-mail (MX)"] = ", ".join(mxs) if mxs else "Nenhum registro MX localizado"
     except Exception:
         dados["Servidores de E-mail (MX)"] = "Consulta Falhou"
 
@@ -634,7 +698,7 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
 
     elif query_type == "cnpj":
         limpo = re.sub(r'\D', '', target)
-        dados_reais = buscar_dados_cnpj_brasilapi(limpo)
+        dados_reais = ASYNC_RUNNER.run(_cnpj_async(limpo))
 
         res = {
             "Receita Federal (Comprovante)": {"exists": True, "url": f"https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp?cnpj={limpo}"},
@@ -657,7 +721,7 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
         }
     elif query_type == "dominio":
         dom = target.lower().replace("https://", "").replace("http://", "").strip('/')
-        dados_dns = analisar_infraestrutura_dominio(dom)
+        dados_dns = ASYNC_RUNNER.run(_dominio_async(dom))
 
         res = {
             "Whois ICANN / DomainTools": {"exists": True, "url": f"https://whois.domaintools.com/{dom}"},
@@ -670,18 +734,9 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
             res["Análise de DNS & Infraestrutura"] = {"exists": True, "url": "#", "detalhes": dados_dns}
         return res
     else:
-        return FastOSINTChecker(target).run()
+        return ASYNC_RUNNER.run(ENGINE_ASYNC.executar_varredura(target))
 
-def obter_links_buscadores(termo: str) -> dict[str, str]:
-    encoded_term = urllib.parse.quote(f'"{termo}"')
-    return {
-        "Yandex (Citações & Fóruns)": f"https://yandex.com/search/?text={encoded_term}",
-        "Google (Busca Exata)": f"https://www.google.com/search?q={encoded_term}",
-        "Google Notícias & Mídia": f"https://www.google.com/search?q={encoded_term}&tbm=nws",
-        "Bing Search (Menções)": f"https://www.bing.com/search?q={encoded_term}",
-        "DuckDuckGo (Presença Web)": f"https://duckduckgo.com/?q={encoded_term}"
-    }
-
+# --- GERADORES DE RELATÓRIO (PDF E TXT) ---
 def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
@@ -756,7 +811,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {query_type.upper()}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v34.1 VIP
+SISTEMA: Kronos Engine v35.0 VIP
 ===================================================================
 1. DADOS DE INTELIGÊNCIA E BASES MAPEADAS
 -------------------------------------------------------------------
@@ -782,6 +837,7 @@ Documento de compilação gerado por Kronos Intel OSINT Service.
     buf.name = f"Relatorio_OSINT_{target.replace(' ', '_')}.txt"
     return buf
 
+# --- OPERAÇÕES FINANCEIRAS MERCADO PAGO ---
 def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: str = "username", results_json_str: str | None = None) -> tuple[str | None, bytes | None, str | None]:
     if not sdk:
         return None, None, None
@@ -793,7 +849,7 @@ def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: s
         "description": "Consulta de Dados Publicos OSINT",
         "payment_method_id": "pix",
         "date_of_expiration": expiracao,
-        "notification_url": f"{WEB_BASE_URL}/webhook",
+        "notification_url": f"{CFG.WEB_BASE_URL}/webhook",
         "payer": {"email": f"user_{user_id}@telegram.com", "first_name": "Usuario", "last_name": str(user_id)},
         "metadata": {"telegram_user_id": user_id, "token": token_relatorio}
     }
@@ -831,9 +887,9 @@ def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, res
         (pid_free, user_id, target, token_relatorio, query_type, results_json, datetime.now(TIMEZONE_BR).isoformat()),
         commit=True
     )
-    registrar_relatorio()
+    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_reports'", commit=True)
 
-    return f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
+    return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
 def executar_consulta_admin_direta(admin_id: int, target: str, query_type: str) -> tuple[str, str]:
     resultados = executar_varredura_osint(target, query_type=query_type)
@@ -848,8 +904,8 @@ def executar_consulta_admin_direta(admin_id: int, target: str, query_type: str) 
         (pid_admin, admin_id, target, token_relatorio, query_type, results_json, datetime.now(TIMEZONE_BR).isoformat()),
         commit=True
     )
-    registrar_relatorio()
-    link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
+    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_reports'", commit=True)
+    link_web = f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
     return link_web, token_relatorio
 
 def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarkup:
@@ -859,13 +915,14 @@ def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarku
         btn_gratis = InlineKeyboardButton("🎁 RESGATAR RELATÓRIO GRATUITO (Membros)", callback_data=f"claimfree_{hash_alvo}")
         markup.add(btn_gratis)
 
-    btn_sim = InlineKeyboardButton(f"⚡ 🔓 OBTER PAINEL COMPLETO (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
-    btn_canal = InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
+    btn_sim = InlineKeyboardButton(f"⚡ 🔓 OBTER PAINEL COMPLETO (R$ {CFG.PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}")
+    btn_canal = InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}")
     btn_nao = InlineKeyboardButton("❌ Cancelar", callback_data="final_cancel")
     
     markup.add(btn_sim, btn_canal, btn_nao)
     return markup
 
+# --- WORKERS BACKGROUND DE TAREFAS CONTINUAS ---
 def worker_divulgacao_diaria():
     if not adquirir_lock_worker("divulgacao_diaria", renovar_s=1800):
         return
@@ -877,7 +934,7 @@ def worker_divulgacao_diaria():
             now = datetime.now(TIMEZONE_BR)
 
             if now.hour == 10 and (ultimo_envio is None or ultimo_envio.date() < now.date()):
-                if bot and CANAL_PRINCIPAL_ID:
+                if bot and CFG.CANAL_PRINCIPAL_ID:
                     msg_divulgacao = (
                         "👑 KRONOS INTEL — CENTRAL DE INVESTIGAÇÃO OSINT ⚡\n\n"
                         "Quer localizar dados públicos, perfis de redes sociais, vazamentos de e-mail ou consultas empresariais em segundos?\n\n"
@@ -895,12 +952,12 @@ def worker_divulgacao_diaria():
                     )
 
                     markup = InlineKeyboardMarkup(row_width=1)
-                    btn_usar = InlineKeyboardButton("🚀 Abrir Bot de Consultas Agora", url=f"https://t.me/{BOT_USERNAME}")
+                    btn_usar = InlineKeyboardButton("🚀 Abrir Bot de Consultas Agora", url=f"https://t.me/{CFG.BOT_USERNAME}")
                     markup.add(btn_usar)
 
-                    bot.send_message(CANAL_PRINCIPAL_ID, msg_divulgacao, reply_markup=markup)
+                    bot.send_message(CFG.CANAL_PRINCIPAL_ID, msg_divulgacao, reply_markup=markup)
                     ultimo_envio = now
-                    logger.info("Mensagem diária de divulgação enviada no Canal Principal com sucesso.")
+                    logger.info("Mensagem diária enviada no Canal Principal.")
         except Exception as e:
             logger.error("Erro no worker de divulgação diária: %s", str(e))
 
@@ -938,25 +995,28 @@ def worker_background():
                                 hash_alvo = registrar_hash_alvo(target, qtype, parsed_rj)
                                 msg_lembrete = (
                                     f"⏳ O seu código Pix de consulta expira em breve.\n\n"
-                                    f"Conclua a liberação do seu relatório interativo por R$ {PRECO_PADRAO:.2f} no Pix."
+                                    f"Conclua a liberação do seu relatório interativo por R$ {CFG.PRECO_PADRAO:.2f} no Pix."
                                 )
                                 markup = InlineKeyboardMarkup(row_width=1)
-                                markup.add(InlineKeyboardButton(f"⚡ 🔓 CONCLUIR AGORA (R$ {PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}"))
+                                markup.add(InlineKeyboardButton(f"⚡ 🔓 CONCLUIR AGORA (R$ {CFG.PRECO_PADRAO:.2f}) 🔓 ⚡", callback_data=f"b_{hash_alvo}"))
                                 bot.send_message(uid, msg_lembrete, reply_markup=markup)
                         elif minutos_decorridos >= 30:
                             db_execute("UPDATE payments SET reminded = 1 WHERE payment_id = ?", (pid,), commit=True)
                     except Exception as ex:
                         logger.error("Erro no remarketing: %s", str(ex))
 
+            # Expurgo LGPD e Limpeza de hashes antigas
             lim_hashes = (now - timedelta(days=1)).isoformat()
             db_execute("DELETE FROM target_hashes WHERE created_at < ?", (lim_hashes,), commit=True)
             
-            lim_payments = (now - timedelta(days=30)).isoformat()
-            db_execute("UPDATE payments SET results_json=NULL, target_username='(expirado)' WHERE created_at < ? AND target_username NOT LIKE '(%'", (lim_payments,), commit=True)
+            lim_retention = (now - timedelta(days=CFG.RETENTION_DAYS)).isoformat()
+            db_execute("UPDATE payments SET results_json=NULL, target_username='(expirado)' WHERE created_at < ? AND target_username NOT LIKE '(%'", (lim_retention,), commit=True)
+            db_execute("DELETE FROM audit_log WHERE created_at < ?", (lim_retention,), commit=True)
 
         except Exception as e:
             logger.error("Erro no worker background: %s", str(e))
 
+# --- INTERFACE WEB FLASK ---
 HTML_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -1113,7 +1173,7 @@ HTML_DASHBOARD_TEMPLATE = """
                 <div class="row g-3">
                     {% for p in encontrados %}
                     <div class="col-md-6">
-                        <a href="{{ p.url }}" target="_blank" class="btn-platform">
+                        <a href="{{ p.url }}" target="_blank" rel="noopener" class="btn-platform">
                             <span><i class="bi bi-box-arrow-up-right me-2 code-tag"></i>{{ p.nome }}</span>
                             <i class="bi bi-chevron-right small"></i>
                         </a>
@@ -1137,7 +1197,6 @@ def ver_relatorio_web(token):
         return "Relatório não encontrado, expirado ou acesso pendente.", 404
 
     target, results_json_str, query_type, created_at = p[0], p[1], p[2], p[3]
-    
     try:
         results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
     except Exception:
@@ -1222,384 +1281,172 @@ def download_txt(token):
         download_name=f"Relatorio_OSINT_{target.replace(' ', '_')}.txt"
     )
 
-# --- HANDLERS TELEGRAM ---
+# --- FÁBRICA GENÉRICA DE HANDLERS DO TELEGRAM ---
+def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str):
+    user_id = message.from_user.id
+    if usuario_esta_banido(user_id):
+        bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+        return
+
+    if not usuario_aceitou_termos(user_id):
+        bot.reply_to(message, "⚠️ Você precisa aceitar os termos de uso antes de realizar consultas. Use /termos.")
+        return
+
+    if not limite_busca_ok(user_id):
+        responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
+        return
+
+    now_str = datetime.now(TIMEZONE_BR).isoformat()
+    db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, now_str), commit=True)
+    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_searches'", commit=True)
+    
+    notificar_uso_grupo_logs(message.from_user, modulo_nome)
+    registrar_auditoria(user_id, qtype, target)
+
+    resultados = executar_varredura_osint(target, query_type=qtype)
+    encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
+
+    if encontrados or qtype != "username":
+        hash_alvo = registrar_hash_alvo(target, qtype, resultados)
+        status_gratis_txt = ""
+        if not usuario_ja_usou_gratis(user_id):
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
+
+        texto_resultado = (
+            f"🎯 CONSULTA OSINT DE ALVO ({qtype.upper()}):\n"
+            f"👤 {target}\n"
+            f"───────────────────────────────\n\n"
+            f"Gere o seu Painel Web Interativo completo para acessar todos os atalhos e resultados mapeados.\n\n"
+            f"{status_gratis_txt}"
+            f"💳 Valor da consulta: R$ {CFG.PRECO_PADRAO:.2f} no Pix\n\n"
+            f"👉 Faça parte do nosso canal oficial: {CFG.CANAL_TAG_PUBLICO}"
+        )
+
+        markup = construir_markup_oferta(hash_alvo, user_id)
+        bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
+    else:
+        bot.send_message(
+            message.chat.id,
+            f"ℹ️ Varredura concluída: Nenhum registro público localizado para @{target}.\n\n"
+            f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CFG.CANAL_TAG_PUBLICO}"
+        )
+
+def _comando_busca(qtype: str, validador: Callable[[str], Optional[str]], erro_msg: str, modulo_nome: str):
+    def handler(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, f"⚠️ Comando Incompleto!\n{erro_msg}")
+            return
+        alvo_limpo = validador(partes[1])
+        if not alvo_limpo:
+            responder_seguro(message, f"⚠️ Entrada Inválida!\n{erro_msg}")
+            return
+        _processar_busca_generica(message, alvo_limpo, qtype, modulo_nome)
+    return handler
+
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
         user_id = message.from_user.id
-        
         if usuario_esta_banido(user_id):
             bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
             return
 
         raw_first = escapar_html(message.from_user.first_name or "Usuario")
-        raw_last = escapar_html(message.from_user.last_name or "")
-        username_tg = f"@{escapar_html(message.from_user.username)}" if message.from_user.username else "Sem @username"
-        nome_completo_tg = f"{raw_first} {raw_last}".strip()
         user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
         
-        novo = db_execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,), fetchone=True) is None
-        registrar_acesso(user_id)
-
-        if message.chat.type == 'private' and novo and user_id != ADMIN_ID:
-            grupo_logs_id = obter_grupo_logs_id()
-            if grupo_logs_id:
-                try:
-                    data_hora_acesso = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
-                    msg_controle_logs = (
-                        f"<b>👤 NOVO USUÁRIO (/start)</b>\n"
-                        f"<b>ID:</b> <code>{user_id}</code>\n"
-                        f"<b>Nome:</b> {nome_completo_tg}\n"
-                        f"<b>Username:</b> {username_tg}\n"
-                        f"<b>Chat:</b> tg://user?id={user_id}\n"
-                        f"<b>Data:</b> {data_hora_acesso}"
-                    )
-                    bot.send_message(grupo_logs_id, msg_controle_logs, parse_mode="HTML")
-                except Exception as ex_log:
-                    logger.error("Erro ao enviar notificação de start no grupo de logs: %s", str(ex_log))
-
-            if CANAL_PRINCIPAL_ID:
-                try:
-                    bot.send_message(CANAL_PRINCIPAL_ID, "⚡ Mais um usuário iniciou o bot de consultas OSINT!")
-                except Exception as ex_canal:
-                    logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
+        now_str = datetime.now(TIMEZONE_BR).isoformat()
+        db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, now_str), commit=True)
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v34.1 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v35.0 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
-            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
-            f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
-            f"Membros do nosso canal oficial possuem direito a 1 consulta totalmente grátis!\n\n"
-            f"🛠️ MÓDULOS DE CONSULTA DISPONÍVEIS:\n\n"
-            f"1️⃣ 👤 USERNAME / REDES SOCIAIS:\n"
-            f"   • /user alvo123\n\n"
-            f"2️⃣ 📧 CONSULTA DE E-MAIL & VAZAMENTOS:\n"
-            f"   • /email exemplo@dominio.com\n\n"
-            f"3️⃣ ⚖️ NOME COMPLETO (ATALHOS JUDICIAIS):\n"
-            f"   • /nome João da Silva\n\n"
-            f"4️⃣ 📱 TELEFONE & WHATSAPP:\n"
-            f"   • /fone 11999998888\n\n"
-            f"5️⃣ 🏢 CNPJ & REGISTRO EMPRESARIAL:\n"
-            f"   • /cnpj 00000000000191\n\n"
-            f"6️⃣ 🚗 CONSULTA DE VEÍCULOS (PLACA):\n"
-            f"   • /placa ABC1D23\n\n"
-            f"7️⃣ 🌐 DOMÍNIOS & INFRAESTRUTURA WEB:\n"
-            f"   • /dominio site.com\n\n"
-            f"🎟️ CUPOM DE DESCONTO / CORTESIA:\n"
-            f"   • /resgatar CODIGO\n\n"
-            f"⚙️ PRIVACIDADE (LGPD):\n"
-            f"   • Use /apagar para excluir seus registros.\n\n"
-            f"📢 Canal Oficial: {CANAL_TAG_PUBLICO}\n"
-            f"💬 Suporte Direto: @{SUPORTE_USERNAME}"
+            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética!\n\n"
+            f"🛠️ MÓDULOS DISPONÍVEIS:\n"
+            f"• /user <username>\n"
+            f"• /email <email>\n"
+            f"• /nome <Nome Completo>\n"
+            f"• /fone <telefone_ddd>\n"
+            f"• /cnpj <cnpj>\n"
+            f"• /placa <placa_veiculo>\n"
+            f"• /dominio <dominio_web>\n\n"
+            f"⚙️ COMANDOS DE PRIVACIDADE E TERMOS:\n"
+            f"• /termos — Visualizar políticas e aceitar uso\n"
+            f"• /apagar — Excluir permanentemente seus registros (LGPD)\n\n"
+            f"📢 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}\n"
+            f"💬 Suporte Direto: @{CFG.SUPORTE_USERNAME}"
         )
 
         markup = InlineKeyboardMarkup(row_width=1)
-        btn_canal = InlineKeyboardButton("📢 Entrar no Canal Oficial (Ganhar Relatório Grátis)", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-        btn_suporte = InlineKeyboardButton("💬 Falar com Suporte", url=f"https://t.me/{SUPORTE_USERNAME}")
-        markup.add(btn_canal, btn_suporte)
-
+        markup.add(
+            InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
+            InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
+        )
         bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
+
+    @bot.message_handler(commands=['termos'])
+    def handle_termos(message):
+        user_id = message.from_user.id
+        db_execute("UPDATE users SET accepted_terms = 1 WHERE user_id = ?", (user_id,), commit=True)
+        texto = (
+            "📜 TERMOS DE USO E POLÍTICA DE PRIVACIDADE (LGPD)\n\n"
+            "1. A ferramenta Kronos Intel agrega atalhos e informações estritamente públicas obtidas de fontes abertas.\n"
+            "2. O uso para assédio, stalking, fraudes ou atos ilícitos é expressamente proibido.\n"
+            "3. O sistema registra trilhas de auditoria via Hash Criptográfico SHA-256 para conformidade legal.\n\n"
+            "✅ Termos aceitos com sucesso!"
+        )
+        responder_seguro(message, texto)
+
+    # Registro dinâmico de Handlers via Fábrica
+    bot.message_handler(commands=['fone'])(
+        _comando_busca("fone", lambda x: re.sub(r'\D', '', x) if RE_FONE.match(re.sub(r'\D', '', x)) else None, "Envie o DDD + Número (ex: /fone 11999998888)", "Telefone (/fone)")
+    )
+    bot.message_handler(commands=['cnpj'])(
+        _comando_busca("cnpj", lambda x: re.sub(r'\D', '', x) if RE_CNPJ.match(re.sub(r'\D', '', x)) else None, "Envie apenas os 14 números (ex: /cnpj 00000000000191)", "CNPJ (/cnpj)")
+    )
+    bot.message_handler(commands=['placa'])(
+        _comando_busca("placa", lambda x: x.upper().replace("-", "").strip() if RE_PLACA.match(x.upper().replace("-", "").strip()) else None, "Envie no formato ABC1234 ou ABC1D23", "Placa (/placa)")
+    )
+    bot.message_handler(commands=['email'])(
+        _comando_busca("email", lambda x: x.strip() if e_email_valido(x.strip()) else None, "Envie no formato usuario@dominio.com", "E-mail (/email)")
+    )
+    bot.message_handler(commands=['nome'])(
+        _comando_busca("fullname", lambda x: x.strip() if e_nome_completo(x.strip()) else None, "Envie Nome e Sobrenome completos", "Nome Completo (/nome)")
+    )
+    bot.message_handler(commands=['dominio'])(
+        _comando_busca("dominio", lambda x: x.lower().replace("https://", "").replace("http://", "").strip('/'), "Envie um domínio válido (ex: /dominio site.com)", "Domínio (/dominio)")
+    )
+    bot.message_handler(commands=['user'])(
+        _comando_busca("username", lambda x: x.replace("@", "").strip() if RE_USERNAME.match(x.replace("@", "").strip()) else None, "Envie um username válido (ex: /user alvo123)", "Username (/user)")
+    )
 
     @bot.message_handler(commands=['admin'])
     def handle_admin_panel(message):
-        if message.from_user.id != ADMIN_ID:
+        if message.from_user.id != CFG.ADMIN_ID:
             return
 
         res_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)
         total_users = res_users[0] if res_users else 0
-
         res_searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)
         searches = res_searches[0] if res_searches else 0
-
         vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved' AND amount > 0", fetchone=True)
         qtd_vendas = vendas[0] if (vendas and vendas[0] is not None) else 0
         faturamento = vendas[1] if (vendas and vendas[1] is not None) else 0.0
 
         texto_admin = (
-            f"👑 PAINEL CENTRAL DE ADMINISTRAÇÃO KRONOS INTEL\n"
+            f"👑 PAINEL CENTRAL DE ADMINISTRAÇÃO KRONOS INTEL (v35.0 VIP)\n"
             f"─────────────────────────────────────────────\n"
             f"📊 Métricas de Operação:\n"
             f"• Usuários Totais: {total_users}\n"
             f"• Buscas Executadas: {searches}\n"
             f"• Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n\n"
-            f"🛠️ COMANDOS DE GESTÃO DE USUÁRIOS:\n"
-            f"• /ban <user_id> [motivo]\n"
-            f"• /unban <user_id>\n"
-            f"• /userinfo <user_id>\n"
-            f"• /broadcast <mensagem_massa>\n"
-            f"• /gerar_cupom <CODIGO> <limite_usos>\n\n"
-            f"🛠️ COMANDOS DE CONSULTA DIRETA (ADMIN):\n"
-            f"📱 /admin_fone 11999998888\n"
-            f"🏢 /admin_cnpj 00000000000191\n"
-            f"🚗 /admin_placa ABC1D23\n"
-            f"🌐 /admin_dominio site.com\n"
-            f"👤 /admin_user alvo123\n"
-            f"📧 /admin_email alvo@dominio.com\n"
-            f"⚖️ /admin_nome Carlos Eduardo\n\n"
-            f"🎁 CONCESSÃO DE CORTESIA:\n"
-            f"• /conceder <user_id> <termo_alvo>\n\n"
-            f"📊 ENVIAR RELATÓRIO FINANCEIRO PRO GRUPO:\n"
-            f"• /stats"
+            f"🛠️ COMANDOS DE ADMIN:\n"
+            f"• /ban <user_id> [motivo] | /unban <user_id>\n"
+            f"• /broadcast <mensagem>\n"
+            f"• /stats\n"
+            f"• /conceder <user_id> <termo_alvo>"
         )
         responder_seguro(message, texto_admin)
-
-    @bot.message_handler(commands=['ban'])
-    def handle_ban_command(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=2)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /ban <user_id> [motivo]")
-            return
-        try:
-            target_id = int(partes[1])
-            motivo = partes[2] if len(partes) > 2 else "Violação dos Termos de Uso"
-            db_execute("UPDATE users SET banned = 1, ban_reason = ? WHERE user_id = ?", (motivo, target_id), commit=True)
-            responder_seguro(message, f"🚫 Utilizador `{target_id}` banido com sucesso.\nMotivo: {motivo}")
-        except ValueError:
-            responder_seguro(message, "⚠️ ID inválido.")
-
-    @bot.message_handler(commands=['unban'])
-    def handle_unban_command(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /unban <user_id>")
-            return
-        try:
-            target_id = int(partes[1])
-            db_execute("UPDATE users SET banned = 0, ban_reason = NULL WHERE user_id = ?", (target_id,), commit=True)
-            responder_seguro(message, f"✅ Utilizador `{target_id}` desbanido com sucesso.")
-        except ValueError:
-            responder_seguro(message, "⚠️ ID inválido.")
-
-    @bot.message_handler(commands=['userinfo'])
-    def handle_userinfo_command(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /userinfo <user_id>")
-            return
-        try:
-            target_id = int(partes[1])
-            u = db_execute("SELECT user_id, created_at, banned, ban_reason FROM users WHERE user_id = ?", (target_id,), fetchone=True)
-            if not u:
-                responder_seguro(message, "⚠️ Utilizador não encontrado na base de dados.")
-                return
-            gratis = usuario_ja_usou_gratis(target_id)
-            compras = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE user_id = ? AND status = 'approved'", (target_id,), fetchone=True)
-            qtd_compras = compras[0] if (compras and compras[0] is not None) else 0
-            val_compras = compras[1] if (compras and compras[1] is not None) else 0.0
-
-            msg_info = (
-                f"👤 INFORMAÇÕES DO UTILIZADOR `{target_id}`\n"
-                f"───────────────────────────────\n"
-                f"• Registrado em: {u[1]}\n"
-                f"• Status de Ban: {'🔴 BANIDO (' + str(u[3]) + ')' if u[2] == 1 else '🟢 ATIVO'}\n"
-                f"• Usou Cortesia Grátis: {'SIM' if gratis else 'NÃO'}\n"
-                f"• Total de Compras Aprovadas: {qtd_compras} (R$ {val_compras:.2f})"
-            )
-            responder_seguro(message, msg_info)
-        except ValueError:
-            responder_seguro(message, "⚠️ ID inválido.")
-
-    @bot.message_handler(commands=['gerar_cupom'])
-    def handle_gerar_cupom(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=2)
-        if len(partes) < 3:
-            responder_seguro(message, "⚠️ Uso correto: /gerar_cupom <CODIGO> <limite_usos>")
-            return
-        codigo = partes[1].upper().strip()
-        try:
-            limite = int(partes[2])
-            db_execute(
-                "INSERT INTO coupons (code, max_uses, uses_count, created_at) VALUES (?, ?, 0, ?) "
-                "ON CONFLICT(code) DO UPDATE SET max_uses = excluded.max_uses",
-                (codigo, limite, datetime.now(TIMEZONE_BR).isoformat()), commit=True
-            )
-            responder_seguro(message, f"🎟️ Cupom `{codigo}` gerado com sucesso para {limite} utilizações!")
-        except ValueError:
-            responder_seguro(message, "⚠️ O limite deve ser um número inteiro.")
-
-    def _executar_broadcast_async(admin_chat_id: int, msg_text: str):
-        usuarios = db_execute("SELECT user_id FROM users WHERE banned = 0", fetchall=True)
-        if not usuarios:
-            bot.send_message(admin_chat_id, "Nenhum utilizador encontrado para broadcast.")
-            return
-
-        sucessos, falhas = 0, 0
-        for row in usuarios:
-            uid = row[0]
-            try:
-                bot.send_message(uid, f"📢 NOTIFICAÇÃO KRONOS INTEL:\n\n{msg_text}")
-                sucessos += 1
-                time.sleep(0.04)
-            except Exception:
-                falhas += 1
-
-        bot.send_message(admin_chat_id, f"✅ Transmissão Concluída!\n• Entregues: {sucessos}\n• Falhas: {falhas}")
-
-    @bot.message_handler(commands=['broadcast'])
-    def handle_broadcast(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /broadcast <mensagem>")
-            return
-        
-        msg_broadcast = partes[1].strip()
-        responder_seguro(message, "📢 Transmissão iniciada em segundo plano...")
-        Thread(target=_executar_broadcast_async, args=(message.chat.id, msg_broadcast), daemon=True).start()
-
-    @bot.message_handler(commands=['resgatar'])
-    def handle_resgatar_cupom(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            return
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Digite o código do cupom após o comando.\nExemplo: /resgatar KRONOS100")
-            return
-
-        codigo = partes[1].upper().strip()
-        cupom = db_execute("SELECT max_uses, uses_count FROM coupons WHERE code = ?", (codigo,), fetchone=True)
-        if not cupom:
-            responder_seguro(message, "❌ Cupom inválido ou inexistente.")
-            return
-
-        max_uses, uses_count = cupom[0], cupom[1]
-        if uses_count >= max_uses:
-            responder_seguro(message, "❌ Este cupom já atingiu o limite máximo de utilizações.")
-            return
-
-        ja_usou = db_execute("SELECT 1 FROM coupon_redemptions WHERE code = ? AND user_id = ?", (codigo, user_id), fetchone=True)
-        if ja_usou:
-            responder_seguro(message, "⚠️ Você já resgatou este cupom anteriormente.")
-            return
-
-        db_execute("INSERT INTO coupon_redemptions (code, user_id, redeemed_at) VALUES (?, ?, ?)", (codigo, user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
-        db_execute("UPDATE coupons SET uses_count = uses_count + 1 WHERE code = ?", (codigo,), commit=True)
-        db_execute("DELETE FROM free_claims WHERE user_id = ?", (user_id,), commit=True)
-
-        responder_seguro(message, f"🎉 CUPOM `{codigo}` RESGATADO COM SUCESSO!\n\nFoi-lhe concedida 1 consulta VIP gratuita no bot. Realize a sua busca utilizando um dos comandos disponíveis!")
-
-    @bot.message_handler(commands=['admin_fone'])
-    def handle_admin_fone(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /admin_fone 11999998888")
-            return
-        target = re.sub(r'\D', '', partes[1])
-        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "fone")
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
-        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
-        responder_seguro(message, f"✅ Consulta Admin de Telefone concluída para +55 {target}:", reply_markup=markup)
-
-    @bot.message_handler(commands=['admin_cnpj'])
-    def handle_admin_cnpj(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /admin_cnpj 00000000000191")
-            return
-        target = re.sub(r'\D', '', partes[1])
-        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "cnpj")
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
-        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
-        responder_seguro(message, f"✅ Consulta Admin de CNPJ concluída para {target}:", reply_markup=markup)
-
-    @bot.message_handler(commands=['admin_placa'])
-    def handle_admin_placa(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /admin_placa ABC1D23")
-            return
-        target = partes[1].upper().replace("-", "").strip()
-        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "placa")
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
-        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
-        responder_seguro(message, f"✅ Consulta Admin de Placa concluída para {target}:", reply_markup=markup)
-
-    @bot.message_handler(commands=['admin_dominio'])
-    def handle_admin_dominio(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /admin_dominio site.com")
-            return
-        target = partes[1].lower().replace("https://", "").replace("http://", "").strip('/')
-        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "dominio")
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
-        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
-        responder_seguro(message, f"✅ Consulta Admin de Domínio concluída para {target}:", reply_markup=markup)
-
-    @bot.message_handler(commands=['admin_user'])
-    def handle_admin_user(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /admin_user alvo123")
-            return
-        target = partes[1].replace("@", "").strip()
-        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "username")
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
-        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
-        responder_seguro(message, f"✅ Consulta Admin de Username concluída para @{target}:", reply_markup=markup)
-
-    @bot.message_handler(commands=['admin_email'])
-    def handle_admin_email(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /admin_email alvo@dominio.com")
-            return
-        target = partes[1].strip()
-        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "email")
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
-        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
-        responder_seguro(message, f"✅ Consulta Admin de E-mail concluída para {target}:", reply_markup=markup)
-
-    @bot.message_handler(commands=['admin_nome'])
-    def handle_admin_nome(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Uso correto: /admin_nome Carlos Eduardo")
-            return
-        target = partes[1].strip()
-        link_web, token = executar_consulta_admin_direta(message.from_user.id, target, "fullname")
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Painel VIP do Admin", url=link_web))
-        markup.add(InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token}"))
-        responder_seguro(message, f"✅ Consulta Admin Judicial concluída para {target}:", reply_markup=markup)
 
     @bot.message_handler(commands=['apagar'])
     def handle_apagar_dados(message):
@@ -1608,347 +1455,21 @@ if bot:
         db_execute("UPDATE payments SET target_username='(apagado)', results_json=NULL, pix_code=NULL WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM free_claims WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM coupon_redemptions WHERE user_id = ?", (user_id,), commit=True)
-        bot.reply_to(message, "🗑️ Solicitação de Privacidade LGPD Concluída: Seus dados de acesso e pesquisas associados foram apagados permanentemente do sistema.")
-
-    @bot.message_handler(commands=['fone'])
-    def handle_fone_command(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-        notificar_uso_grupo_logs(message.from_user, "Telefone & WhatsApp (/fone)")
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o telefone após o comando /fone.\nExemplo: /fone 11999998888")
-            return
-
-        target = re.sub(r'\D', '', partes[1])
-        if not RE_FONE.match(target):
-            responder_seguro(message, "⚠️ Telefone Inválido!\nDigite o DDD + Número sem espaços ou traços (ex: 11999998888).")
-            return
-
-        resultados = executar_varredura_osint(target, query_type="fone")
-        hash_alvo = registrar_hash_alvo(target, "fone", resultados)
-
-        status_gratis_txt = ""
-        if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-        texto = (
-            f"📱 MÓDULO DE CONSULTA DE TELEFONE:\n"
-            f"👤 +55 {target}\n"
-            f"───────────────────────────────\n\n"
-            f"Gere o Painel Web Interativo com consultas configuradas para:\n"
-            f"• WhatsApp Direct | Sync.ME | Truecaller | QualEmpresa | Google\n\n"
-            f"{status_gratis_txt}"
-            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
-        )
-        markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto, reply_markup=markup)
-
-    @bot.message_handler(commands=['cnpj'])
-    def handle_cnpj_command(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-        notificar_uso_grupo_logs(message.from_user, "CNPJ / Empresarial (/cnpj)")
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o CNPJ após o comando /cnpj.\nExemplo: /cnpj 00000000000191")
-            return
-
-        target = re.sub(r'\D', '', partes[1])
-        if not RE_CNPJ.match(target):
-            responder_seguro(message, "⚠️ CNPJ Inválido!\nDigite apenas os 14 números do CNPJ.")
-            return
-
-        resultados = executar_varredura_osint(target, query_type="cnpj")
-        hash_alvo = registrar_hash_alvo(target, "cnpj", resultados)
-
-        status_gratis_txt = ""
-        if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-        texto = (
-            f"🏢 CONSULTA EMPRESARIAL (CNPJ):\n"
-            f"👤 {target}\n"
-            f"───────────────────────────────\n\n"
-            f"Gere o Painel Web Interativo com atalhos para:\n"
-            f"• Receita Federal | Casa dos Dados (QSA) | CNPJ.biz | Transparência\n\n"
-            f"{status_gratis_txt}"
-            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
-        )
-        markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto, reply_markup=markup)
-
-    @bot.message_handler(commands=['placa'])
-    def handle_placa_command(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-        notificar_uso_grupo_logs(message.from_user, "Veículos / Placa (/placa)")
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie a placa após o comando /placa.\nExemplo: /placa ABC1D23")
-            return
-
-        target = partes[1].upper().replace("-", "").strip()
-        if not RE_PLACA.match(target):
-            responder_seguro(message, "⚠️ Placa Inválida!\nDigite a placa no formato tradicional (ABC1234) ou Mercosul (ABC1D23).")
-            return
-
-        resultados = executar_varredura_osint(target, query_type="placa")
-        hash_alvo = registrar_hash_alvo(target, "placa", resultados)
-
-        status_gratis_txt = ""
-        if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-        texto = (
-            f"🚗 CONSULTA DE VEÍCULOS (PLACA):\n"
-            f"👤 {target}\n"
-            f"───────────────────────────────\n\n"
-            f"Gere o Painel Web Interativo com consultas para:\n"
-            f"• Sinesp Cidadão | Tabela FIPE | QualVeiculo | Histórico\n\n"
-            f"{status_gratis_txt}"
-            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
-        )
-        markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto, reply_markup=markup)
-
-    @bot.message_handler(commands=['dominio'])
-    def handle_dominio_command(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-        notificar_uso_grupo_logs(message.from_user, "Domínios & DNS (/dominio)")
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o domínio após o comando /dominio.\nExemplo: /dominio site.com")
-            return
-
-        target = partes[1].lower().replace("https://", "").replace("http://", "").strip('/')
-        resultados = executar_varredura_osint(target, query_type="dominio")
-        hash_alvo = registrar_hash_alvo(target, "dominio", resultados)
-
-        status_gratis_txt = ""
-        if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-        texto = (
-            f"🌐 CONSULTA DE INFRAESTRUTURA E DOMÍNIO:\n"
-            f"👤 {target}\n"
-            f"───────────────────────────────\n\n"
-            f"Gere o Painel Web Interativo com ferramentas de análise:\n"
-            f"• Whois ICANN | DNS Dumpster | SecurityTrails | Shodan | Wayback Machine\n\n"
-            f"{status_gratis_txt}"
-            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
-        )
-        markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto, reply_markup=markup)
-
-    @bot.message_handler(commands=['user'])
-    def handle_user_command(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-        notificar_uso_grupo_logs(message.from_user, "Username / Redes Sociais (/user)")
-
-        texto_limpo = message.text.replace("\n", " ").strip()
-        partes = texto_limpo.split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o username após o comando /user.\nExemplo: /user alvo123")
-            orientar_uso_correto(message.chat.id)
-            return
-
-        target_user = partes[1].replace("@", "").strip()
-
-        if not RE_USERNAME.match(target_user):
-            responder_seguro(message, "⚠️ Username Inválido!\nEnvia apenas letras, números, pontos e traços.")
-            orientar_uso_correto(message.chat.id)
-            return
-
-        msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target_user}...")
-        resultados = executar_varredura_osint(target_user, query_type="username")
-        encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
-
-        if msg_status:
-            try:
-                bot.edit_message_text(f"✅ Mapeamento concluído para @{target_user}!", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
-
-        if encontrados:
-            hash_alvo = registrar_hash_alvo(target_user, "username", resultados)
-            lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
-            
-            status_gratis_txt = ""
-            if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Como ainda não resgatou a sua consulta gratuita de membro do grupo, pode gerar este relatório SEM CUSTO clicando no botão abaixo!\n\n"
-
-            texto_resultado = (
-                f"🎯 POSSÍVEIS PERFIS PARA @{target_user}\n"
-                f"───────────────────────────────\n\n"
-                f"{lista_plataformas}\n\n"
-                f"⚠️ Identificamos {len(encontrados)} possíveis plataformas associadas a este termo.\n\n"
-                f"{status_gratis_txt}"
-                f"💳 Valor normal da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-                f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
-            )
-
-            markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
-        else:
-            bot.send_message(
-                message.chat.id,
-                f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{target_user}.\n\n"
-                f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
-            )
-
-    @bot.message_handler(commands=['email'])
-    def handle_email_command(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-        notificar_uso_grupo_logs(message.from_user, "E-mail & Vazamentos (/email)")
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o e-mail após o comando /email.\nExemplo: /email alvo@gmail.com")
-            return
-
-        email_alvo = partes[1].strip()
-        if not e_email_valido(email_alvo):
-            responder_seguro(message, "⚠️ E-mail Inválido!\nUse o formato usuario@dominio.com.")
-            return
-
-        resultados = executar_varredura_osint(email_alvo, query_type="email")
-        hash_alvo = registrar_hash_alvo(email_alvo, "email", resultados)
-
-        status_gratis_txt = ""
-        if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-        texto_email = (
-            f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
-            f"👤 {email_alvo}\n"
-            f"───────────────────────────────\n\n"
-            f"Gere o Painel Web Interativo com os atalhos organizados para as principais plataformas de verificação:\n"
-            f"• Have I Been Pwned | DeHashed | IntelX | BreachDirectory | Scylla\n\n"
-            f"{status_gratis_txt}"
-            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Acompanhe alertas no canal: {CANAL_TAG_PUBLICO}"
-        )
-        markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto_email, reply_markup=markup)
-
-    @bot.message_handler(commands=['nome'])
-    def handle_nome_command(message):
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-        notificar_uso_grupo_logs(message.from_user, "Busca Judicial & Registros (/nome)")
-
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) < 2:
-            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o nome completo após o comando /nome.\nExemplo: /nome João da Silva")
-            return
-
-        nome_alvo = partes[1].strip()
-        if not e_nome_completo(nome_alvo):
-            responder_seguro(message, "⚠️ Nome Inválido!\nDigite nome e sobrenome completo.")
-            return
-
-        resultados = executar_varredura_osint(nome_alvo, query_type="fullname")
-        hash_alvo = registrar_hash_alvo(nome_alvo, "fullname", resultados)
-
-        status_gratis_txt = ""
-        if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-        texto_oferta = (
-            f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
-            f"👤 {nome_alvo.upper()}\n"
-            f"───────────────────────────────\n\n"
-            f"Gere o Painel Web Interativo com consultas configuradas para:\n"
-            f"• Jusbrasil | Escavador | Diários Oficiais | Portal Transparência\n\n"
-            f"{status_gratis_txt}"
-            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
-        )
-        markup = construir_markup_oferta(hash_alvo, user_id)
-        bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
+        db_execute("DELETE FROM rate_events WHERE user_id = ?", (user_id,), commit=True)
+        db_execute("DELETE FROM audit_log WHERE user_id = ?", (user_id,), commit=True)
+        bot.reply_to(message, "🗑️ Solicitação de Privacidade LGPD Concluída: Todos os seus registros foram expurgados permanentemente do sistema.")
 
     @bot.message_handler(commands=['stats', 'statistics'])
     def handle_stats_command(message):
-        if message.from_user.id != ADMIN_ID:
+        if message.from_user.id != CFG.ADMIN_ID:
             return
 
         res_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)
         total_users = res_users[0] if res_users else 0
-
         res_searches = db_execute("SELECT value FROM metrics WHERE key = 'total_searches'", fetchone=True)
         searches = res_searches[0] if res_searches else 0
-
         res_reports = db_execute("SELECT value FROM metrics WHERE key = 'total_reports'", fetchone=True)
         reports = res_reports[0] if res_reports else 0
-
         vendas = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'approved' AND amount > 0", fetchone=True)
         qtd_vendas = vendas[0] if (vendas and vendas[0] is not None) else 0
         faturamento = vendas[1] if (vendas and vendas[1] is not None) else 0.0
@@ -1956,7 +1477,7 @@ if bot:
         data_hora_solicitacao = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
 
         relatorio_financeiro = (
-            f"📊 RELATÓRIO FINANCEIRO E MÉTRICAS DE USO\n"
+            f"📊 RELATÓRIO FINANCEIRO E MÉTRICAS v35.0 VIP\n"
             f"───────────────────────────────\n"
             f"👤 Usuários Totais Registrados: {total_users}\n"
             f"🔎 Total de Buscas Executadas: {searches}\n"
@@ -1967,92 +1488,22 @@ if bot:
             f"📅 Solicitado em: {data_hora_solicitacao}"
         )
 
-        grupo_target = obter_grupo_logs_id()
         try:
-            bot.send_message(grupo_target, relatorio_financeiro)
+            bot.send_message(CFG.LOG_GROUP_ID, relatorio_financeiro)
             if message.chat.type == 'private':
-                bot.reply_to(message, "✅ Relatório de estatísticas enviado diretamente para o grupo de logs/financeiro.")
+                bot.reply_to(message, "✅ Relatório financeiro enviado ao grupo de logs.")
         except Exception as e:
-            logger.error("Falha ao enviar relatório para o grupo (%s): %s", grupo_target, str(e))
-            bot.reply_to(message, f"⚠️ Erro ao enviar para o grupo ({grupo_target}).")
-
-    @bot.message_handler(commands=['conceder'])
-    def handle_conceder_command(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-
-        partes = message.text.strip().split(maxsplit=2)
-        if len(partes) < 3:
-            responder_seguro(message, "⚠️ Uso incorreto!\nFormato correto: /conceder <user_id> <termo_alvo>")
-            return
-
-        try:
-            target_user_id = int(partes[1])
-            alvo = partes[2].strip()
-        except ValueError:
-            responder_seguro(message, "⚠️ ID de usuário inválido.")
-            return
-
-        qtype = "username"
-        if e_email_valido(alvo): qtype = "email"
-        elif e_nome_completo(alvo): qtype = "fullname"
-        elif RE_CNPJ.match(re.sub(r'\D', '', alvo)): qtype = "cnpj"
-        elif RE_FONE.match(re.sub(r'\D', '', alvo)): qtype = "fone"
-
-        resultados = executar_varredura_osint(alvo, query_type=qtype)
-        results_json = json.dumps(resultados)
-        token_relatorio = secrets.token_urlsafe(16)
-        pid_cortesia = f"cortesia_{secrets.token_hex(6)}"
-
-        db_execute(
-            "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
-            "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?) "
-            "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token, results_json=excluded.results_json",
-            (pid_cortesia, target_user_id, alvo, token_relatorio, qtype, results_json, datetime.now(TIMEZONE_BR).isoformat()),
-            commit=True
-        )
-        registrar_relatorio()
-
-        link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🌐 Acessar Seu Painel VIP Concedido", url=link_web))
-
-        try:
-            bot.send_message(
-                target_user_id,
-                f"🎁 VOCÊ RECEBEU UM ACESSO CORTESIA VIP!\n\n"
-                f"A sua consulta foi liberada gratuitamente pelo administrador.\n\n"
-                f"🔗 Clique no botão abaixo para acessar o painel:",
-                reply_markup=markup
-            )
-            responder_seguro(message, f"✅ Acesso cortesia concedido com sucesso para o ID {target_user_id}.")
-        except Exception as e:
-            responder_seguro(message, f"⚠️ Acesso gravado no banco. Link do painel: {link_web}")
+            logger.error("Falha ao enviar relatório para o grupo: %s", str(e))
 
     @bot.message_handler(func=lambda message: True)
-    def handle_search(message):
-        if not message.text:
-            return
-
-        user_id = message.from_user.id
-        if usuario_esta_banido(user_id):
-            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
-            return
-
-        registrar_acesso(user_id)
-
-        if message.chat.type in ['group', 'supergroup']:
+    def handle_catch_all(message):
+        if not message.text or message.chat.type in ['group', 'supergroup']:
             return
 
         texto = message.text.replace("\n", " ").strip()
         target = texto.replace("@", "").strip()
 
         if e_url(target) and not ("." in target and "/" not in target):
-            responder_seguro(message, "⚠️ Comando Inválido!\nUtilize os comandos específicos como /user, /email, /nome, /fone, /cnpj, /placa ou /dominio.")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -2076,35 +1527,7 @@ if bot:
             orientar_uso_correto(message.chat.id)
             return
 
-        notificar_uso_grupo_logs(message.from_user, f"Busca Automática ({qtype.upper()})")
-
-        resultados = executar_varredura_osint(target, query_type=qtype)
-        encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
-
-        if encontrados or qtype != "username":
-            hash_alvo = registrar_hash_alvo(target, qtype, resultados)
-            status_gratis_txt = ""
-            if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-            texto_resultado = (
-                f"🎯 CONSULTA OSINT DE ALVO ({qtype.upper()}):\n"
-                f"👤 {target}\n"
-                f"───────────────────────────────\n\n"
-                f"Gere o seu Painel Web Interativo completo para acessar todos os atalhos e resultados mapeados.\n\n"
-                f"{status_gratis_txt}"
-                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-                f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
-            )
-
-            markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_resultado, reply_markup=markup)
-        else:
-            bot.send_message(
-                message.chat.id,
-                f"ℹ️ Varredura concluída: Nenhum registro público localizado para @{target}.\n\n"
-                f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
-            )
+        _processar_busca_generica(message, target, qtype, f"Busca Direta ({qtype.upper()})")
 
     @bot.callback_query_handler(func=lambda call: True)
     def callback_listener(call):
@@ -2122,17 +1545,7 @@ if bot:
                 return
 
             if not usuario_e_membro_canal(user_id):
-                bot.answer_callback_query(call.id, "⚠️ Você precisa entrar no nosso canal oficial para liberar o teste grátis!", show_alert=True)
-                
-                msg_aviso = (
-                    f"🔒 RESGATE DO RELATÓRIO GRATUITO\n\n"
-                    f"Para liberar a sua consulta gratuita, você precisa estar inscrito no nosso canal oficial!\n\n"
-                    f"1. Clique no botão abaixo e entre no canal {CANAL_TAG_PUBLICO}.\n"
-                    f"2. Após entrar, volte aqui e clique novamente em RESGATAR RELATÓRIO GRATUITO."
-                )
-                markup = InlineKeyboardMarkup(row_width=1)
-                markup.add(InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}"))
-                bot.send_message(call.message.chat.id, msg_aviso, reply_markup=markup)
+                bot.answer_callback_query(call.id, "⚠️ Você precisa entrar no canal oficial para liberar o relatório grátis!", show_alert=True)
                 return
 
             ok = db_execute(
@@ -2143,105 +1556,63 @@ if bot:
                 bot.answer_callback_query(call.id, "⚠️ Você já utilizou o seu relatório gratuito!", show_alert=True)
                 return
 
-            bot.answer_callback_query(call.id, "🎉 Membro validado! Gerando seu relatório gratuito...")
+            bot.answer_callback_query(call.id, "🎉 Relatório gratuito gerado!")
             resultados = json.loads(results_json_str)
             link_web = gerar_painel_gratuito_membro(user_id, target, qtype, resultados)
 
             markup = InlineKeyboardMarkup(row_width=1)
             markup.add(InlineKeyboardButton("🌐 Acessar Seu Painel VIP (GRÁTIS)", url=link_web))
-
-            bot.send_message(
-                call.message.chat.id,
-                f"🎉 PARABÉNS! SEU RELATÓRIO GRATUITO FOI LIBERADO!\n\n"
-                f"Obrigado por fazer parte da comunidade Kronos Intel.\n"
-                f"Clique no botão abaixo para acessar o painel completo do alvo {target}:",
-                reply_markup=markup
-            )
+            bot.send_message(call.message.chat.id, f"🎉 RELATÓRIO LIBERADO PARA {target}:", reply_markup=markup)
 
         elif call.data.startswith("b_"):
             hash_curto = call.data.split("b_")[1]
             target, qtype, results_json_str = obter_alvo_por_hash(hash_curto)
-
             user_id = call.from_user.id
-            if usuario_esta_banido(user_id):
-                bot.answer_callback_query(call.id, "Acesso suspenso.", show_alert=True)
+
+            if usuario_esta_banido(user_id) or not target or not results_json_str:
+                bot.answer_callback_query(call.id, "Consulta indisponível.", show_alert=True)
                 return
 
-            if not target or not results_json_str:
-                bot.answer_callback_query(call.id, "Sessão expirada. Envie a busca novamente.", show_alert=True)
-                return
-
-            bot.answer_callback_query(call.id, f"Gerando Chave Pix de R$ {PRECO_PADRAO:.2f}...")
-            
-            qr_pix, qr_img_bytes, token = gerar_pix_mercadopago(
-                user_id, target, valor=PRECO_PADRAO, query_type=qtype, results_json_str=results_json_str
-            )
-
+            qr_pix, qr_img_bytes, token = gerar_pix_mercadopago(user_id, target, valor=CFG.PRECO_PADRAO, query_type=qtype, results_json_str=results_json_str)
             if qr_pix:
                 texto_oferta = (
-                    f"🔒 CONSULTA KRONOS INTEL VIP\n"
+                    f"🔒 CONSULTA KRONOS INTEL VIP ({qtype.upper()})\n"
                     f"───────────────────────────────\n"
-                    f"Você está liberando:\n"
-                    f"1. Painel Interativo Web Exclusivo ({qtype.upper()})\n"
-                    f"2. Relatório Executivo Profissional (.PDF)\n"
-                    f"3. Compilação Completa de Dados (.TXT)\n\n"
-                    f"💰 Valor: R$ {PRECO_PADRAO:.2f} no Pix (Válido por 30 minutos)\n\n"
-                    f"Copie a chave Pix abaixo:\n\n"
-                    f"{qr_pix}\n\n"
-                    f"⚡ O painel interativo será liberado automaticamente após a confirmação do pagamento.\n\n"
-                    f"👉 Acesse nosso canal oficial para dúvidas e avisos: {CANAL_TAG_PUBLICO}"
+                    f"💰 Valor: R$ {CFG.PRECO_PADRAO:.2f} no Pix\n\n"
+                    f"Copie a chave Pix abaixo:\n\n`{qr_pix}`"
                 )
-
                 markup = InlineKeyboardMarkup(row_width=1)
-                btn_copiar = InlineKeyboardButton("📋 Copiar Chave Pix (Texto)", callback_data=f"getkey_{token}")
-                btn_canal = InlineKeyboardButton("📢 Entrar no Grupo/Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}")
-                markup.add(btn_copiar, btn_canal)
-
-                if qr_img_bytes:
-                    bot.send_photo(call.message.chat.id, photo=qr_img_bytes, caption=texto_oferta, reply_markup=markup)
-                else:
-                    bot.send_message(call.message.chat.id, text=texto_oferta, reply_markup=markup)
-            else:
-                bot.send_message(call.message.chat.id, "⚠️ Não consegui gerar o Pix agora. Tente novamente.")
-
-        elif call.data == "final_cancel":
-            bot.answer_callback_query(call.id, "Consulta finalizada.")
-            bot.edit_message_text(
-                chat_id=call.message.chat.id, 
-                message_id=call.message.message_id, 
-                text=f"👍 Entendido! Digite um comando como /user, /email, /nome ou /fone para iniciar uma nova busca.\n\n👉 Acompanhe as novidades no canal: {CANAL_TAG_PUBLICO}"
-            )
+                markup.add(InlineKeyboardButton("📋 Copiar Chave Pix", callback_data=f"getkey_{token}"))
+                bot.send_message(call.message.chat.id, texto_oferta, reply_markup=markup, parse_mode="Markdown")
 
         elif call.data.startswith("getkey_"):
-            try:
-                token_pix = call.data.split("getkey_")[1]
-                row = db_execute("SELECT pix_code FROM payments WHERE token = ? AND status = 'pending'", (token_pix,), fetchone=True)
-                if row and row[0]:
-                    bot.answer_callback_query(call.id, "Enviando chave...")
-                    bot.send_message(call.message.chat.id, text=f"<code>{escapar_html(row[0])}</code>", parse_mode="HTML")
-                else:
-                    bot.answer_callback_query(call.id, "Chave Pix não encontrada ou já expirada.")
-            except Exception as e:
-                logger.error("Erro ao buscar pix_code no banco: %s", str(e))
-                bot.answer_callback_query(call.id, "Erro ao recuperar chave Pix.")
+            token_pix = call.data.split("getkey_")[1]
+            row = db_execute("SELECT pix_code FROM payments WHERE token = ? AND status = 'pending'", (token_pix,), fetchone=True)
+            if row and row[0]:
+                bot.send_message(call.message.chat.id, text=f"<code>{escapar_html(row[0])}</code>", parse_mode="HTML")
 
-@app.route(f"/telegram/{WEBHOOK_SECRET_PATH}", methods=["POST"])
+# --- ENDPOINTS FLASK DE WEBHOOKS E HEALTH CHECK ---
+@app.route(f"/telegram/{CFG.TELEGRAM_SECRET_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    if bot:
-        try:
-            data = request.get_json(force=True, silent=True)
-            if data:
-                update = Update.de_json(data)
-                bot.process_new_updates([update])
-                return jsonify({"status": "ok"}), 200
-        except Exception as err:
-            logger.exception("Erro ao processar update no webhook do Telegram: %s", str(err))
+    if not bot:
+        return jsonify({"error": "bot_disabled"}), 400
+
+    secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if not secret_header or not hmac.compare_digest(secret_header, CFG.TELEGRAM_SECRET_TOKEN):
+        return jsonify({"error": "unauthorized"}), 403
+
+    try:
+        data = request.get_json(force=True, silent=True)
+        if data:
+            update = Update.de_json(data)
+            bot.process_new_updates([update])
             return jsonify({"status": "ok"}), 200
-    return jsonify({"error": "unauthorized"}), 403
+    except Exception as err:
+        logger.exception("Erro no webhook do Telegram: %s", str(err))
+    return jsonify({"status": "ok"}), 200
 
 def validar_assinatura_mp(req, segredo: str, data_id: str) -> bool:
     if not segredo:
-        logger.error("MERCADOPAGO_WEBHOOK_SECRET ausente: webhook rejeitando por padrão")
         return False
     partes = dict(p.split("=", 1) for p in req.headers.get("x-signature", "").split(",") if "=" in p)
     ts, v1 = partes.get("ts"), partes.get("v1")
@@ -2250,7 +1621,6 @@ def validar_assinatura_mp(req, segredo: str, data_id: str) -> bool:
     manifest = f"id:{data_id};request-id:{req.headers.get('x-request-id','')};ts:{ts};"
     esperado = hmac.new(segredo.encode(), manifest.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(esperado, v1):
-        logger.warning("Assinatura MP inválida para %s", data_id)
         return False
     try:
         if abs(time.time() - int(ts) / 1000) > 600:
@@ -2261,139 +1631,90 @@ def validar_assinatura_mp(req, segredo: str, data_id: str) -> bool:
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    if request.method == "GET":
+        return jsonify({"status": "ok"}), 200
+
+    payment_id = request.args.get("id")
     try:
-        if request.method == "GET" or request.args.get("id") == "123456":
-            return jsonify({"status": "ok"}), 200
+        data = request.get_json(force=False, silent=True) or {}
+        if isinstance(data, dict):
+            if data.get("type") == "payment":
+                payment_id = data.get("data", {}).get("id")
+            elif "id" in data and not payment_id:
+                payment_id = data.get("id")
+    except Exception:
+        pass
 
-        payment_id = request.args.get("id")
+    if not payment_id or str(payment_id) == "123456":
+        return jsonify({"status": "ok"}), 200
+
+    pid_str = str(payment_id)
+
+    if CFG.MERCADOPAGO_WEBHOOK_SECRET and not validar_assinatura_mp(request, CFG.MERCADOPAGO_WEBHOOK_SECRET, pid_str):
+        return jsonify({"status": "error", "detail": "assinatura_invalida"}), 401
+
+    row = db_execute("SELECT user_id, target_username, query_type, token FROM payments WHERE payment_id = ? AND status = 'pending'", (pid_str,), fetchone=True)
+    if not row or row[1].startswith("("):
+        return jsonify({"status": "ok"}), 200
+
+    telegram_id, target, query_type, token_relatorio = row
+
+    if sdk:
         try:
-            data = request.get_json(force=False, silent=True) or {}
-            if isinstance(data, dict):
-                if data.get("type") == "payment":
-                    payment_id = data.get("data", {}).get("id")
-                elif "id" in data and not payment_id:
-                    payment_id = data.get("id")
-        except Exception:
-            pass
+            payment_info = sdk.payment().get(pid_str).get("response", {})
+            if payment_info.get("status") == "approved":
+                _valor = float(payment_info.get("transaction_amount") or 0.0)
+                _meta = payment_info.get("metadata") or {}
 
-        if str(payment_id) == "123456" or not payment_id:
-            return jsonify({"status": "ok"}), 200
+                if _valor + 1e-6 < CFG.PRECO_PADRAO or (_meta.get("telegram_user_id") and int(_meta.get("telegram_user_id")) != int(telegram_id)):
+                    return jsonify({"status": "ok"}), 200
 
-        pid_str = str(payment_id)
+                claimed = db_execute("UPDATE payments SET status='approved' WHERE payment_id=? AND status='pending' RETURNING payment_id", (pid_str,), fetchone=True, commit=True)
+                if not claimed:
+                    return jsonify({"status": "ok"}), 200
 
-        # Validação de Assinatura HMAC Mercado Pago
-        if MERCADOPAGO_WEBHOOK_SECRET:
-            if not validar_assinatura_mp(request, MERCADOPAGO_WEBHOOK_SECRET, pid_str):
-                return jsonify({"status": "error", "detail": "assinatura invalida"}), 401
-        else:
-            logger.warning("MERCADOPAGO_WEBHOOK_SECRET ausente: assinatura NÃO validada")
-        
-        row = db_execute(
-            "SELECT user_id, target_username, query_type, token FROM payments WHERE payment_id = ? AND status = 'pending'",
-            (pid_str,), fetchone=True
-        )
-
-        if not row or row[1].startswith("("):
-            with _orphan_lock:
-                if len(_orphan_alerts_sent) > 10000:
-                    _orphan_alerts_sent.clear()
-                    
-                if pid_str not in _orphan_alerts_sent:
-                    _orphan_alerts_sent.add(pid_str)
-                    existe = db_execute("SELECT 1 FROM payments WHERE payment_id = ?", (pid_str,), fetchone=True)
-                    if (not existe or row) and sdk:
-                        try:
-                            info = sdk.payment().get(pid_str).get("response", {})
-                            meta = info.get("metadata") or {}
-                            if info.get("status") == "approved" and meta.get("token"):
-                                grupo_logs_id = obter_grupo_logs_id()
-                                if bot and grupo_logs_id:
-                                    bot.send_message(
-                                        grupo_logs_id,
-                                        f"<b>⚠️ Pix aprovado SEM registro utilizável</b>\n"
-                                        f"• <b>Pagamento ID:</b> {pid_str}\n"
-                                        f"• <b>Comprador ID:</b> {meta.get('telegram_user_id')}\n"
-                                        f"• <b>Valor:</b> R$ {info.get('transaction_amount', 0.0):.2f}",
-                                        parse_mode="HTML"
-                                    )
-                        except Exception:
-                            logger.exception("Falha ao alertar pagamento órfão no grupo de logs")
-            return jsonify({"status": "ok"}), 200
-
-        telegram_id, target, query_type, token_relatorio = row
-
-        if payment_id and sdk:
-            try:
-                payment_info = sdk.payment().get(str(payment_id)).get("response", {})
-                if payment_info.get("status") == "approved":
-                    
-                    _valor = float(payment_info.get("transaction_amount") or 0.0)
-                    _meta = payment_info.get("metadata") or {}
-
-                    if _valor + 1e-6 < PRECO_PADRAO:
-                        logger.error("Pagamento %s rejeitado: valor pago R$ %.2f < R$ %.2f", pid_str, _valor, PRECO_PADRAO)
-                        return jsonify({"status": "ok"}), 200
-
-                    if _meta.get("telegram_user_id") and int(_meta.get("telegram_user_id")) != int(telegram_id):
-                        logger.error("Pagamento %s rejeitado: telegram_user_id divergente", pid_str)
-                        return jsonify({"status": "ok"}), 200
-
-                    claimed = db_execute(
-                        "UPDATE payments SET status='approved' WHERE payment_id=? AND status='pending' RETURNING payment_id",
-                        (pid_str,), fetchone=True, commit=True
+                link_web = f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
+                if telegram_id and bot:
+                    markup = InlineKeyboardMarkup(row_width=1)
+                    markup.add(
+                        InlineKeyboardButton("🌐 Acessar Painel Interativo Web", url=link_web),
+                        InlineKeyboardButton("📄 Baixar Relatório PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{token_relatorio}")
                     )
-
-                    if not claimed:
-                        return jsonify({"status": "ok"}), 200
-
-                    link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
-                    grupo_logs_id = obter_grupo_logs_id()
-
-                    if telegram_id and bot:
-                        markup = InlineKeyboardMarkup(row_width=1)
-                        markup.add(InlineKeyboardButton("🌐 Acessar Painel Interativo Web", url=link_web))
-                        markup.add(InlineKeyboardButton("📄 Baixar Relatório PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token_relatorio}"))
-                        markup.add(InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}") )
-
-                        try:
-                            bot.send_message(
-                                telegram_id,
-                                f"⚡ PAGAMENTO CONFIRMADO — KRONOS INTEL VIP\n\n"
-                                f"Sua consulta ({query_type.upper()}) foi liberada com sucesso!\n\n"
-                                f"🔗 Clique nos botões abaixo para acessar o painel e baixar o relatório executivo em PDF:\n\n"
-                                f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}",
-                                reply_markup=markup
-                            )
-                            registrar_relatorio()
-                        except Exception:
-                            logger.exception("Falha ao entregar relatório")
-
-                    if bot and grupo_logs_id:
-                        try:
-                            msg_venda_log = (
-                                f"<b>💰 NOVA VENDA APROVADA!</b>\n\n"
-                                f"• <b>Valor:</b> R$ {payment_info.get('transaction_amount', 0.0):.2f}\n"
-                                f"• <b>Módulo:</b> {escapar_html(query_type.upper())}\n"
-                                f"• <b>Comprador ID:</b> {telegram_id}"
-                            )
-                            bot.send_message(grupo_logs_id, msg_venda_log, parse_mode="HTML")
-                        except Exception as log_err:
-                            logger.error("Erro ao enviar log no grupo financeiro: %s", str(log_err))
-
-            except Exception as e:
-                logger.error("Erro no processamento do pagamento %s: %s", payment_id, str(e))
-
-    except Exception as general_err:
-        logger.error("Erro no webhook do Mercado Pago: %s", str(general_err))
+                    bot.send_message(telegram_id, f"⚡ PAGAMENTO CONFIRMADO!\n\nConsulta ({query_type.upper()}) liberada com sucesso:", reply_markup=markup)
+                    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_reports'", commit=True)
+        except Exception as e:
+            logger.error("Erro no webhook MP: %s", str(e))
 
     return jsonify({"status": "ok"}), 200
 
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "healthy"}), 200
+
+@app.route("/readyz")
+def readyz():
+    try:
+        db_execute("SELECT 1", fetchone=True)
+        return jsonify({"status": "ready", "database": "connected"}), 200
+    except Exception as e:
+        return jsonify({"status": "unready", "reason": str(e)}), 503
+
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v34.1 VIP Active.", 200
+    return f"Kronos Intel OSINT Service v35.0 VIP Active.", 200
+
+def setup_webhook_telegram():
+    if bot and CFG.TELEGRAM_TOKEN:
+        webhook_url = f"{CFG.WEB_BASE_URL}/telegram/{CFG.TELEGRAM_SECRET_TOKEN}"
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=webhook_url, secret_token=CFG.TELEGRAM_SECRET_TOKEN)
+            logger.info("Webhook Telegram v35.0 configurado com sucesso.")
+        except Exception as e:
+            logger.error("Erro ao registrar Webhook Telegram: %s", str(e))
 
 if __name__ == "__main__":
-    setup_webhook()
+    setup_webhook_telegram()
     Thread(target=worker_divulgacao_diaria, daemon=True).start()
     Thread(target=worker_background, daemon=True).start()
-    app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
+    app.run(debug=_env_bool("FLASK_DEBUG", False), host="0.0.0.0", port=CFG.PORT)
