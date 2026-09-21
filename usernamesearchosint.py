@@ -1,10 +1,9 @@
 """
-Kronos Intel OSINT Bot v30.1 VIP
-- Correção de Segurança e Renderização no Painel Web (/relatorio/<token>)
+Kronos Intel OSINT Bot v31.0 VIP
+- Registro de Logs em Tempo Real no Grupo (/start e Funções Utilizadas)
+- Preservação de Privacidade (Não revela o alvo consultado no log público/grupo)
 - Módulos Administrativos VIP: /admin, /admin_fone, /admin_cnpj, /admin_placa, /admin_dominio, /admin_user, /admin_email, /admin_nome
-- Etapa 2: Gerador de Relatório Executivo VIP em PDF (ReportLab)
-- Módulos Públicos: /user, /email, /nome, /fone, /cnpj, /placa e /dominio
-- Divulgação Diária Automática no Canal Principal
+- Gerador de Relatório Executivo VIP em PDF (ReportLab) e Painel Web
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -207,6 +206,30 @@ def obter_alvo_por_hash(hash_curto: str) -> tuple[str | None, str | None, str | 
 
 def obter_grupo_logs_id() -> int:
     return LOG_GROUP_ID
+
+def notificar_uso_grupo_logs(from_user, modulo_nome: str):
+    if not bot or not LOG_GROUP_ID or from_user.id == ADMIN_ID:
+        return
+    try:
+        raw_first = from_user.first_name or "Usuario"
+        raw_last = from_user.last_name or ""
+        nome_completo = f"{raw_first} {raw_last}".strip()
+        username_str = f"@{from_user.username}" if from_user.username else "Sem @username"
+        data_hora = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
+
+        msg_log = (
+            f"🔎 NOVA CONSULTA EXECUTADA\n"
+            f"───────────────────────────────\n"
+            f"• ID do Usuário: `{from_user.id}`\n"
+            f"• Nome: {nome_completo}\n"
+            f"• Username: {username_str}\n"
+            f"• Módulo Solicitado: {modulo_nome.upper()}\n"
+            f"• Termo Varrito: [PROTEGIDO POR PRIVACIDADE]\n"
+            f"• Data/Hora: {data_hora}"
+        )
+        bot.send_message(LOG_GROUP_ID, msg_log, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("Erro ao enviar log de uso para o grupo: %s", str(e))
 
 def setup_webhook():
     if bot and TELEGRAM_TOKEN:
@@ -611,7 +634,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {titulos_map.get(query_type, 'GERAL')}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v30.1
+SISTEMA: Kronos Engine v31.0
 ===================================================================
 """
     if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
@@ -1128,10 +1151,10 @@ if bot:
                     data_hora_acesso = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
                     msg_controle_logs = (
                         f"👤 NOVO USUÁRIO (/start)\n"
-                        f"ID: {user_id}\nNome: {nome_completo_tg}\nUsername: {username_tg}\n"
+                        f"ID: `{user_id}`\nNome: {nome_completo_tg}\nUsername: {username_tg}\n"
                         f"Chat: tg://user?id={user_id}\nData: {data_hora_acesso}"
                     )
-                    bot.send_message(grupo_logs_id, msg_controle_logs)
+                    bot.send_message(grupo_logs_id, msg_controle_logs, parse_mode="Markdown")
                 except Exception as ex_log:
                     logger.error("Erro ao enviar notificação de start no grupo de logs: %s", str(ex_log))
 
@@ -1142,7 +1165,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v30.1 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v31.0 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
@@ -1331,6 +1354,8 @@ if bot:
     def handle_fone_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+        notificar_uso_grupo_logs(message.from_user, "Telefone & WhatsApp (/fone)")
+
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o telefone após o comando /fone.\nExemplo: /fone 11999998888")
@@ -1365,6 +1390,8 @@ if bot:
     def handle_cnpj_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+        notificar_uso_grupo_logs(message.from_user, "CNPJ / Empresarial (/cnpj)")
+
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o CNPJ após o comando /cnpj.\nExemplo: /cnpj 00000000000191")
@@ -1399,6 +1426,8 @@ if bot:
     def handle_placa_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+        notificar_uso_grupo_logs(message.from_user, "Veículos / Placa (/placa)")
+
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie a placa após o comando /placa.\nExemplo: /placa ABC1D23")
@@ -1433,6 +1462,8 @@ if bot:
     def handle_dominio_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+        notificar_uso_grupo_logs(message.from_user, "Domínios & DNS (/dominio)")
+
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o domínio após o comando /dominio.\nExemplo: /dominio site.com")
@@ -1463,6 +1494,7 @@ if bot:
     def handle_user_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+        notificar_uso_grupo_logs(message.from_user, "Username / Redes Sociais (/user)")
 
         texto_limpo = message.text.replace("\n", " ").strip()
         partes = texto_limpo.split(maxsplit=1)
@@ -1523,6 +1555,8 @@ if bot:
     def handle_email_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+        notificar_uso_grupo_logs(message.from_user, "E-mail & Vazamentos (/email)")
+
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o e-mail após o comando /email.\nExemplo: /email alvo@gmail.com")
@@ -1557,6 +1591,8 @@ if bot:
     def handle_nome_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
+        notificar_uso_grupo_logs(message.from_user, "Busca Judicial & Registros (/nome)")
+
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o nome completo após o comando /nome.\nExemplo: /nome João da Silva")
@@ -1705,6 +1741,8 @@ if bot:
         elif RE_CNPJ.match(re.sub(r'\D', '', target)): qtype = "cnpj"
         elif RE_FONE.match(re.sub(r'\D', '', target)): qtype = "fone"
         elif RE_PLACA.match(target.upper().replace("-", "")): qtype = "placa"
+
+        notificar_uso_grupo_logs(message.from_user, f"Busca Automática ({qtype.upper()})")
 
         resultados = executar_varredura_osint(target, query_type=qtype)
         encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
@@ -1968,7 +2006,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v30.1 VIP Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v31.0 VIP Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
