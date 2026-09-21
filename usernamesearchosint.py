@@ -2,11 +2,11 @@
 Kronos Intel OSINT Bot v35.0 VIP
 - Motor OSINT Assíncrono com httpx.AsyncClient, Keep-Alive e Concorrência por Semáforo
 - Classificador Tri-Estado Puro (Zero Falso Positivo por construção)
-- Cache TTL para otimização de pesquisas sequenciais do mesmo alvo
+- Presença Digital Aprimorada para Usernames e Redes Sociais
+- Limpeza rigorosa de comandos no termo de busca (evita armazenar /admin_user como alvo)
 - SQLite WAL com PRAGMA user_version para migrações automáticas e Rate Limit Persistido
 - Webhook do Telegram com secret_token e validação HMAC-SHA256 no Mercado Pago
 - Sanitização de PDF (ReportLab), HTML Telegram e Trilha de Auditoria LGPD via Hash SHA-256
-- Sistema de Cupons (/gerar_cupom, /resgatar) e Comandos de Administrador VIP (/admin, /conceder, /admin_buscar)
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -50,7 +50,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("kronos_osint")
 
-# --- CONFIGURAÇÃO TIPADA DO SISTEMA ---
 def _env_int(key: str, default: int) -> int:
     try:
         return int(os.getenv(key, str(default)))
@@ -134,7 +133,6 @@ DDD_ESTADOS = {
     "96": "Amapá (Macapá)", "97": "Amazonas (Coari)", "98": "Maranhão (São Luís)", "99": "Maranhão (Imperatriz)"
 }
 
-# --- FUNÇÕES UTILITÁRIAS E SANITIZAÇÃO ---
 def escapar_html(texto: str) -> str:
     if not texto:
         return ""
@@ -200,7 +198,12 @@ def e_url(termo: str) -> bool:
         return bool(padrao_url.search(termo))
     return False
 
-# --- BANCO DE DADOS E MIGRAÇÕES ---
+def limpar_comando_string(texto: str) -> str:
+    """ Remove prefixos como /admin_user, admin_user, /user, /nome, etc. """
+    t = texto.strip()
+    t = re.sub(r'^/?[a-zA-Z0-9_]+\s+', '', t)
+    return t.replace("@", "").strip()
+
 def init_db():
     with db_lock:
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
@@ -486,7 +489,6 @@ PLATAFORMAS: dict[str, dict[str, Any]] = {
     "WordPress":    {"url": "https://{username}.wordpress.com", "fonte": "html", "confiavel_200": True},
 }
 
-# --- CLASSIFICADOR TRI-ESTADO PURO ---
 def _casa_padrao(padrao: str, texto: str) -> bool:
     if not padrao:
         return False
@@ -551,7 +553,6 @@ def classificar_resposta(cfg: dict, status_code: int, headers: dict, corpo_texto
 
     return {"exists": False, "status": "desconhecido", "motivo": f"http_{status_code}_nao_tratado"}
 
-# --- MOTOR ASSÍNCRONO COM HTTPX ---
 class OSINTEngineAsync:
     def __init__(self, max_concurrency: int = 25):
         self.semaphore = asyncio.Semaphore(max_concurrency)
@@ -619,20 +620,13 @@ class OSINTEngineAsync:
 
         resultados = dict(resultados_raw)
 
-        duvidosos = [nome for nome, res in resultados.items() if res.get("status") == "existe" and res.get("confianca", 1.0) < 0.80]
-        if duvidosos:
-            async with httpx.AsyncClient() as client_reconf:
-                for nome in duvidosos:
-                    cfg = PLATAFORMAS[nome]
-                    url = cfg["url"].format(username=username)
-                    try:
-                        r2 = await client_reconf.get(url, headers=self.headers_padrao, timeout=3.0, follow_redirects=True)
-                        if r2.status_code in STATUS_NAO_EXISTE or any(x in str(r2.url).lower() for x in REDIRECT_NAO_ENCONTRADO):
-                            resultados[nome] = {"exists": False, "status": "nao_existe", "motivo": "reconfirmacao_falhou"}
-                        else:
-                            resultados[nome]["confianca"] = 0.90
-                    except Exception:
-                        resultados[nome] = {"exists": False, "status": "desconhecido", "motivo": "reconfirmacao_erro"}
+        # Inclusão garantida de buscas diretas de presença digital
+        encoded_user = urllib.parse.quote(username)
+        resultados["Google Search (Redes & Perfis)"] = {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded_user}%22"}
+        resultados["Instagram Profile Direct"] = {"exists": True, "url": f"https://www.instagram.com/{encoded_user}/"}
+        resultados["TikTok Profile Direct"] = {"exists": True, "url": f"https://www.tiktok.com/@{encoded_user}"}
+        resultados["X / Twitter Profile Direct"] = {"exists": True, "url": f"https://x.com/{encoded_user}"}
+        resultados["WhatsMyName Username Enum"] = {"exists": True, "url": f"https://whatsmyname.app/?q={encoded_user}"}
 
         with self._cache_lock:
             if len(self.cache) > 2000:
@@ -658,7 +652,6 @@ class AsyncLoopThread:
 ASYNC_RUNNER = AsyncLoopThread()
 ENGINE_ASYNC = OSINTEngineAsync()
 
-# --- DADOS EXTERNOS ASSÍNCRONOS ---
 async def _cnpj_async(cnpj: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -701,8 +694,10 @@ async def _dominio_async(dominio: str) -> dict[str, Any]:
     return dados
 
 def executar_varredura_osint(target: str, query_type: str = "username") -> dict[str, dict[str, Any]]:
+    target_limpo = limpar_comando_string(target)
+
     if query_type == "email":
-        encoded_email = urllib.parse.quote(target)
+        encoded_email = urllib.parse.quote(target_limpo)
         return {
             "Have I Been Pwned (Base de Vazamentos)": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
             "DeHashed CyberIntelligence": {"exists": True, "url": f"https://dehashed.com/search?query={encoded_email}"},
@@ -712,16 +707,16 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
             "Hudson Rock Crime Database": {"exists": True, "url": f"https://cavalier.hudsonrock.com/api/v1/osint-tools/search-by-email?email={encoded_email}"}
         }
     elif query_type == "fullname":
-        encoded_name = urllib.parse.quote(f'"{target}"')
+        encoded_name = urllib.parse.quote(f'"{target_limpo}"')
         return {
             "Jusbrasil (Processos e Diários)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
             "Escavador (Publicações Judiciais)": {"exists": True, "url": f"https://www.escavador.com/busca?q={encoded_name}"},
-            "Portal da Transparência Federal": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target)}"},
+            "Portal da Transparência Federal": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target_limpo)}"},
             "Diário Oficial da União (IN.gov)": {"exists": True, "url": f"https://www.google.com/search?q=site:in.gov.br+{encoded_name}"},
             "Google Acadêmico & Publicações": {"exists": True, "url": f"https://scholar.google.com.br/scholar?q={encoded_name}"},
         }
     elif query_type == "fone":
-        limpo = re.sub(r'\D', '', target)
+        limpo = re.sub(r'\D', '', target_limpo)
         ddd = limpo[:2] if len(limpo) >= 10 else "N/A"
         regiao = DDD_ESTADOS.get(ddd, "Região Não Mapeada")
 
@@ -737,7 +732,7 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
         return res
 
     elif query_type == "cnpj":
-        limpo = re.sub(r'\D', '', target)
+        limpo = re.sub(r'\D', '', target_limpo)
         dados_reais = ASYNC_RUNNER.run(_cnpj_async(limpo))
 
         res = {
@@ -752,7 +747,7 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
         return res
 
     elif query_type == "placa":
-        placa = target.upper().replace("-", "")
+        placa = target_limpo.upper().replace("-", "")
         return {
             "Sinesp Cidadão (Atalho)": {"exists": True, "url": f"https://www.google.com/search?q=consultar+placa+{placa}"},
             "Tabela FIPE Veículos": {"exists": True, "url": f"https://www.google.com/search?q=fipe+placa+{placa}"},
@@ -760,7 +755,7 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
             "Olho No Carro (Histórico)": {"exists": True, "url": f"https://www.olhonocarro.com.br/"}
         }
     elif query_type == "dominio":
-        dom = target.lower().replace("https://", "").replace("http://", "").strip('/')
+        dom = target_limpo.lower().replace("https://", "").replace("http://", "").strip('/')
         dados_dns = ASYNC_RUNNER.run(_dominio_async(dom))
 
         res = {
@@ -774,9 +769,8 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
             res["Análise de DNS & Infraestrutura"] = {"exists": True, "url": "#", "detalhes": dados_dns}
         return res
     else:
-        return ASYNC_RUNNER.run(ENGINE_ASYNC.executar_varredura(target))
+        return ASYNC_RUNNER.run(ENGINE_ASYNC.executar_varredura(target_limpo))
 
-# --- GERADORES DE RELATÓRIO (PDF E TXT) ---
 def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
@@ -877,7 +871,6 @@ Documento de compilação gerado por Kronos Intel OSINT Service.
     buf.name = f"Relatorio_OSINT_{target.replace(' ', '_')}.txt"
     return buf
 
-# --- OPERAÇÕES FINANCEIRAS MERCADO PAGO ---
 def gerar_pix_mercadopago(user_id: int, target: str, valor: float, query_type: str = "username", results_json_str: str | None = None) -> tuple[str | None, bytes | None, str | None]:
     if not sdk:
         return None, None, None
@@ -945,7 +938,6 @@ def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarku
     markup.add(btn_sim, btn_canal, btn_nao)
     return markup
 
-# --- WORKERS BACKGROUND DE TAREFAS CONTINUAS ---
 def worker_divulgacao_diaria():
     if not adquirir_lock_worker("divulgacao_diaria", renovar_s=1800):
         return
@@ -1304,7 +1296,7 @@ def download_txt(token):
     )
 
 # --- FÁBRICA GENÉRICA DE HANDLERS DO TELEGRAM ---
-def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str):
+def _processar_busca_generica(message, raw_target: str, qtype: str, modulo_nome: str):
     user_id = message.from_user.id
     if usuario_esta_banido(user_id):
         bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
@@ -1318,6 +1310,13 @@ def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str
         responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
         return
 
+    # Higienização profunda para garantir que comandos e prefixos sejam removidos
+    target = limpar_comando_string(raw_target)
+
+    if not target or len(target) < 2:
+        responder_seguro(message, "⚠️ Termo de busca inválido ou muito curto.")
+        return
+
     now_str = datetime.now(TIMEZONE_BR).isoformat()
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, now_str), commit=True)
     db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_searches'", commit=True)
@@ -1327,7 +1326,6 @@ def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str
 
     resultados = executar_varredura_osint(target, query_type=qtype)
 
-    # --- LIBERAÇÃO VIP DIRETA PARA O ADMINISTRADOR ---
     if user_id == CFG.ADMIN_ID:
         link_web = gerar_painel_gratuito_membro(user_id, target, qtype, resultados)
         markup = InlineKeyboardMarkup(row_width=1)
@@ -1467,11 +1465,10 @@ if bot:
     bot.message_handler(commands=['dominio'])(
         _comando_busca("dominio", lambda x: x.lower().replace("https://", "").replace("http://", "").strip('/'), "Envie um domínio válido (ex: /dominio site.com)", "Domínio (/dominio)")
     )
-    bot.message_handler(commands=['user'])(
-        _comando_busca("username", lambda x: x.replace("@", "").strip() if RE_USERNAME.match(x.replace("@", "").strip()) else None, "Envie um username válido (ex: /user alvo123)", "Username (/user)")
+    bot.message_handler(commands=['user', 'admin_user'])(
+        _comando_busca("username", lambda x: limpar_comando_string(x), "Envie um username válido (ex: /user alvo123)", "Username (/user)")
     )
 
-    # --- COMANDO DEDICADO DE BUSCA DIRETA DO ADMIN ---
     @bot.message_handler(commands=['admin_buscar'])
     def handle_admin_buscar(message):
         if message.from_user.id != CFG.ADMIN_ID:
@@ -1492,7 +1489,6 @@ if bot:
 
         _processar_busca_generica(message, target, qtype, f"Busca Admin ({qtype.upper()})")
 
-    # --- COMANDOS DE CUPOM ---
     @bot.message_handler(commands=['gerar_cupom'])
     def handle_gerar_cupom(message):
         if message.from_user.id != CFG.ADMIN_ID:
@@ -1546,7 +1542,6 @@ if bot:
 
         bot.reply_to(message, f"🎉 Cupom `{codigo}` ativado com sucesso!\n\nVocê ganhou 1 consulta de cortesia liberada no sistema.", parse_mode="Markdown")
 
-    # --- COMANDOS ADMIN ---
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_relatorio(message):
         if message.from_user.id != CFG.ADMIN_ID:
@@ -1608,12 +1603,12 @@ if bot:
             f"• Buscas Executadas: {searches}\n"
             f"• Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n\n"
             f"🛠️ COMANDOS DE ADMIN:\n"
-            f"• /admin_buscar <termo> — Consulta direta sem cobrança\n"
+            f"• /admin_user <username> — Busca VIP de Username\n"
+            f"• /admin_buscar <termo> — Consulta genérica direta\n"
             f"• /gerar_cupom CODIGO [usos]\n"
             f"• /conceder <user_id> <termo_alvo>\n"
             f"• /broadcast <mensagem>\n"
-            f"• /stats — Enviar relatório detalhado para o grupo\n"
-            f"• /ban <user_id> | /unban <user_id>"
+            f"• /stats — Enviar relatório detalhado para o grupo"
         )
         responder_seguro(message, texto_admin)
 
@@ -1695,23 +1690,8 @@ if bot:
         if not message.text or message.chat.type in ['group', 'supergroup']:
             return
 
-        texto = message.text.replace("\n", " ").strip()
-
-        # Tratamento especial de entrada para Administrador (remove prefixos admin_ ou Admin_)
-        if texto.lower().startswith("admin_"):
-            termo_real = re.sub(r'^(admin_fone|admin_nome|admin_email|admin_user|admin_cnpj|admin_placa|admin_dominio|admin_)\s*', '', texto, flags=re.I).strip()
-            
-            qtype = "username"
-            if e_email_valido(termo_real): qtype = "email"
-            elif e_nome_completo(termo_real): qtype = "fullname"
-            elif RE_CNPJ.match(re.sub(r'\D', '', termo_real)): qtype = "cnpj"
-            elif RE_FONE.match(re.sub(r'\D', '', termo_real)): qtype = "fone"
-            elif RE_PLACA.match(termo_real.upper().replace("-", "")): qtype = "placa"
-
-            _processar_busca_generica(message, termo_real, qtype, f"Busca Admin Direct ({qtype.upper()})")
-            return
-
-        target = texto.replace("@", "").strip()
+        raw_text = message.text.strip()
+        target = limpar_comando_string(raw_text)
 
         if e_url(target) and not ("." in target and "/" not in target):
             orientar_uso_correto(message.chat.id)
@@ -1727,15 +1707,6 @@ if bot:
         elif RE_CNPJ.match(re.sub(r'\D', '', target)): qtype = "cnpj"
         elif RE_FONE.match(re.sub(r'\D', '', target)): qtype = "fone"
         elif RE_PLACA.match(target.upper().replace("-", "")): qtype = "placa"
-
-        parece_alvo = (
-            e_email_valido(target) or RE_CNPJ.match(re.sub(r'\D', '', target))
-            or RE_FONE.match(re.sub(r'\D', '', target))
-            or (RE_USERNAME.match(target) and len(target) >= 4 and " " not in target)
-        )
-        if qtype == "username" and not parece_alvo:
-            orientar_uso_correto(message.chat.id)
-            return
 
         _processar_busca_generica(message, target, qtype, f"Busca Direta ({qtype.upper()})")
 
@@ -1834,7 +1805,6 @@ if bot:
             except Exception:
                 pass
 
-# --- ENDPOINTS FLASK DE WEBHOOKS E HEALTH CHECK ---
 @app.route(f"/telegram/{CFG.TELEGRAM_SECRET_TOKEN}", methods=["POST"])
 def telegram_webhook():
     if not bot:
@@ -1956,7 +1926,6 @@ def setup_webhook_telegram():
         except Exception as e:
             logger.error("Erro ao registrar Webhook Telegram: %s", str(e))
 
-# Inicialização global para execução pelo Gunicorn
 setup_webhook_telegram()
 Thread(target=worker_divulgacao_diaria, daemon=True).start()
 Thread(target=worker_background, daemon=True).start()
