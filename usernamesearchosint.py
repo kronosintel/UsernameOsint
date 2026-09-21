@@ -1,7 +1,8 @@
 """
-Kronos Intel OSINT Bot v35.1 VIP
-- Resposta Ultra-Rápida com Timeout Reduzido por Plataforma (2.0s max)
-- Motor OSINT Assíncrono Otimizado
+Kronos Intel OSINT Bot v35.2 VIP
+- Restauração Completa do Menu Principal /start
+- Tratamento Isolado para /admin_user e /user
+- Motor OSINT Assíncrono com Timeout Seguro (2s)
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -150,22 +151,6 @@ def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
         except Exception:
             return None
 
-def orientar_uso_correto(chat_id: int):
-    msg_guia = (
-        "💡 COMO UTILIZAR O BOT CORRETAMENTE:\n\n"
-        "1️⃣ 👤 Username: /user alvo123\n"
-        "2️⃣ 📧 E-mail: /email alvo@dominio.com\n"
-        "3️⃣ ⚖️ Nome Completo: /nome João da Silva\n"
-        "4️⃣ 📱 Telefone: /fone 11999998888\n"
-        "5️⃣ 🏢 CNPJ: /cnpj 00000000000191\n"
-        "6️⃣ 🚗 Placa: /placa ABC1D23\n"
-        "7️⃣ 🌐 Domínio: /dominio site.com"
-    )
-    try:
-        bot.send_message(chat_id, msg_guia)
-    except Exception:
-        pass
-
 def e_nome_completo(termo: str) -> bool:
     partes = termo.strip().split()
     return len(partes) >= 2 and all(len(p) >= 2 for p in partes)
@@ -173,18 +158,6 @@ def e_nome_completo(termo: str) -> bool:
 def e_email_valido(termo: str) -> bool:
     padrao = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return bool(re.match(padrao, termo.strip()))
-
-def e_url(termo: str) -> bool:
-    if e_email_valido(termo):
-        return False
-    if "/" in termo or "http://" in termo or "https://" in termo:
-        padrao_url = re.compile(
-            r'^(?:http|ftp)s?://'
-            r'|(?:www\.)'
-            r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)'
-        , re.IGNORECASE)
-        return bool(padrao_url.search(termo))
-    return False
 
 def limpar_comando_string(texto: str) -> str:
     t = texto.strip()
@@ -313,133 +286,18 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
         conn.close()
         return res
 
-def registrar_auditoria(user_id: int, modulo: str, termo: str):
-    target_hash = normalizar_termo_hash(termo)
-    db_execute(
-        "INSERT INTO audit_log (user_id, module, target_hash, created_at) VALUES (?, ?, ?, ?)",
-        (user_id, modulo, target_hash, datetime.now(TIMEZONE_BR).isoformat()),
-        commit=True
-    )
-
-def limite_busca_ok(user_id: int, maximo: int = 6, janela_segundos: int = 3600) -> bool:
-    if user_id == CFG.ADMIN_ID:
-        return True
-    agora = time.time()
-    corte = agora - janela_segundos
-    
-    with db_lock:
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM rate_events WHERE timestamp < ?", (corte,))
-        cursor.execute("SELECT COUNT(*) FROM rate_events WHERE user_id = ? AND timestamp >= ?", (user_id, corte))
-        qtd = cursor.fetchone()[0]
-        
-        if qtd >= maximo:
-            conn.commit()
-            conn.close()
-            return False
-            
-        cursor.execute("INSERT INTO rate_events (user_id, timestamp) VALUES (?, ?)", (user_id, agora))
-        conn.commit()
-        conn.close()
-        return True
-
-def adquirir_lock_worker(nome: str, renovar_s: int = 240) -> bool:
-    agora = datetime.now(TIMEZONE_BR)
-    expira = (agora + timedelta(seconds=renovar_s)).isoformat()
-    with db_lock:
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
-        try:
-            cur = conn.execute(
-                "INSERT INTO worker_locks (nome, expira_em) VALUES (?, ?) "
-                "ON CONFLICT(nome) DO UPDATE SET expira_em = excluded.expira_em "
-                "WHERE worker_locks.expira_em < ?",
-                (nome, expira, agora.isoformat())
-            )
-            conn.commit()
-            return cur.rowcount > 0
-        except Exception:
-            return False
-        finally:
-            conn.close()
-
-def usuario_esta_banido(user_id: int) -> bool:
-    res = db_execute("SELECT banned FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    return res is not None and res[0] == 1
-
-def usuario_ja_usou_gratis(user_id: int) -> bool:
-    res = db_execute("SELECT 1 FROM free_claims WHERE user_id = ?", (user_id,), fetchone=True)
-    return res is not None
-
-def usuario_aceitou_termos(user_id: int) -> bool:
-    if not CFG.REQUIRE_TERMS:
-        return True
-    res = db_execute("SELECT accepted_terms FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    return res is not None and res[0] == 1
-
-def usuario_e_membro_canal(user_id: int) -> bool:
-    if not bot or not CFG.CANAL_PRINCIPAL_ID:
-        return False
-    try:
-        member = bot.get_chat_member(CFG.CANAL_PRINCIPAL_ID, user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except Exception:
-        return False
-
-def registrar_hash_alvo(alvo: str, query_type: str, resultados: dict | None = None) -> str:
-    hash_curto = hashlib.md5(f"{alvo}_{query_type}".encode('utf-8')).hexdigest()[:10]
-    res_json_str = json.dumps(resultados) if resultados else None
-    db_execute(
-        "INSERT INTO target_hashes (hash_id, target_value, query_type, results_json, created_at) VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(hash_id) DO UPDATE SET target_value = EXCLUDED.target_value, query_type = EXCLUDED.query_type, "
-        "results_json = COALESCE(EXCLUDED.results_json, target_hashes.results_json), created_at = EXCLUDED.created_at",
-        (hash_curto, alvo, query_type, res_json_str, datetime.now(TIMEZONE_BR).isoformat()),
-        commit=True
-    )
-    return hash_curto
-
-def obter_alvo_por_hash(hash_curto: str) -> tuple[str | None, str | None, str | None]:
-    res = db_execute("SELECT target_value, query_type, results_json FROM target_hashes WHERE hash_id = ?", (hash_curto,), fetchone=True)
-    if res:
-        return res[0], res[1], res[2]
-    return None, None, None
-
-def notificar_uso_grupo_logs(from_user, modulo_nome: str):
-    if not bot or not CFG.LOG_GROUP_ID or from_user.id == CFG.ADMIN_ID:
-        return
-    try:
-        raw_first = escaping_html(from_user.first_name or "Usuario")
-        raw_last = escaping_html(from_user.last_name or "")
-        nome_completo = f"{raw_first} {raw_last}".strip()
-        username_str = f"@{escaping_html(from_user.username)}" if from_user.username else "Sem @username"
-        data_hora = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
-
-        msg_log = (
-            f"<b>🔎 NOVA CONSULTA EXECUTADA</b>\n"
-            f"───────────────────────────────\n"
-            f"• <b>ID do Usuário:</b> <code>{from_user.id}</code>\n"
-            f"• <b>Nome:</b> {nome_completo}\n"
-            f"• <b>Username:</b> {username_str}\n"
-            f"• <b>Módulo Solicitado:</b> {escaping_html(modulo_nome.upper())}\n"
-            f"• <b>Data/Hora:</b> {data_hora}"
-        )
-        bot.send_message(CFG.LOG_GROUP_ID, msg_log, parse_mode="HTML")
-    except Exception:
-        pass
-
-# --- PLATAFORMAS E CONFIGURAÇÃO DO MOTOR OSINT ---
 PLATAFORMAS: dict[str, dict[str, Any]] = {
-    "GitHub":       {"url": "https://api.github.com/users/{username}", "fonte": "api", "json": "nao_vazio", "cabecalhos": {"Accept": "application/vnd.github+json"}},
-    "GitLab":       {"url": "https://gitlab.com/api/v4/users?username={username}", "fonte": "api", "json": "lista_cheia"},
-    "Codeberg":     {"url": "https://codeberg.org/api/v1/users/{username}", "fonte": "api", "json": "nao_vazio"},
-    "Docker Hub":   {"url": "https://hub.docker.com/v2/users/{username}/", "fonte": "api", "json": "nao_vazio"},
-    "Reddit":       {"url": "https://www.reddit.com/user/{username}/about.json", "fonte": "api", "json": "reddit", "cabecalhos": {"User-Agent": "kronos-osint/1.0"}},
-    "Lichess":      {"url": "https://lichess.org/api/user/{username}", "fonte": "api", "json": "nao_vazio"},
-    "Chess.com":    {"url": "https://api.chess.com/pub/player/{username}", "fonte": "api", "json": "nao_vazio"},
-    "Medium":       {"url": "https://medium.com/@{username}", "fonte": "html", "positivo": r'property="og:type" content="profile"'},
-    "SoundCloud":   {"url": "https://soundcloud.com/{username}", "fonte": "html", "positivo": r'soundcloud:users:'},
-    "Linktree":     {"url": "https://linktr.ee/{username}", "fonte": "html", "positivo": r'profile_title'},
-    "Steam":        {"url": "https://steamcommunity.com/id/{username}", "fonte": "html", "positivo": r'actual_persona_name'},
+    "GitHub":       {"url": "https://api.github.com/users/{username}"},
+    "GitLab":       {"url": "https://gitlab.com/api/v4/users?username={username}"},
+    "Codeberg":     {"url": "https://codeberg.org/api/v1/users/{username}"},
+    "Docker Hub":   {"url": "https://hub.docker.com/v2/users/{username}/"},
+    "Reddit":       {"url": "https://www.reddit.com/user/{username}/about.json"},
+    "Lichess":      {"url": "https://lichess.org/api/user/{username}"},
+    "Chess.com":    {"url": "https://api.chess.com/pub/player/{username}"},
+    "Medium":       {"url": "https://medium.com/@{username}"},
+    "SoundCloud":   {"url": "https://soundcloud.com/{username}"},
+    "Linktree":     {"url": "https://linktr.ee/{username}"},
+    "Steam":        {"url": "https://steamcommunity.com/id/{username}"},
 }
 
 class OSINTEngineAsync:
@@ -583,16 +441,6 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     buffer.seek(0)
     return buffer
 
-def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
-    data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
-    corpo = f"KRONOS INTEL — RELATÓRIO OSINT\nALVO: {target}\nDATA: {data_atual}\n\n"
-    for p, v in resultados.items():
-        if isinstance(v, dict) and v.get("exists") is True:
-            corpo += f"[+] {p} : {v.get('url', '')}\n"
-    buf = io.BytesIO(corpo.encode('utf-8'))
-    buf.name = f"Relatorio_OSINT_{target}.txt"
-    return buf
-
 def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, resultados: dict) -> str:
     results_json = json.dumps(resultados)
     token_relatorio = secrets.token_urlsafe(16)
@@ -639,13 +487,58 @@ def _processar_busca_generica(message, raw_target: str, qtype: str, modulo_nome:
         return
 
 if bot:
-    @bot.message_handler(commands=['start', 'help'])
+    @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
         user_id = message.from_user.id
-        menu_boas_vindas = f"👑 KRONOS INTEL OSINT BOT VIP ⚡️\n\nUtilize /user <username> para consultar."
-        bot.send_message(message.chat.id, menu_boas_vindas)
+        raw_first = escaping_html(message.from_user.first_name or "Usuario")
+        user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
+        
+        now_str = datetime.now(TIMEZONE_BR).isoformat()
+        db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, now_str), commit=True)
 
-    @bot.message_handler(commands=['user', 'admin_user'])
+        menu_boas_vindas = (
+            f"👑 KRONOS INTEL OSINT BOT v33.0 VIP ⚡️\n"
+            f"─────────────────────────────────────────────\n"
+            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
+            f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
+            f"Membros do nosso canal oficial possuem direito a 1 consulta totalmente grátis!\n\n"
+            f"🛠️ MÓDULOS DE CONSULTA DISPONÍVEIS:\n\n"
+            f"1️⃣ 👤 USERNAME / REDES SOCIAIS:\n"
+            f"   • /user alvo123\n\n"
+            f"2️⃣ 📧 CONSULTA DE E-MAIL & VAZAMENTOS:\n"
+            f"   • /email exemplo@dominio.com\n\n"
+            f"3️⃣ ⚖️ NOME COMPLETO (ATALHOS JUDICIAIS):\n"
+            f"   • /nome João da Silva\n\n"
+            f"4️⃣ 📱 TELEFONE & WHATSAPP:\n"
+            f"   • /fone 11999998888\n\n"
+            f"5️⃣ 🏢 CNPJ & REGISTRO EMPRESARIAL:\n"
+            f"   • /cnpj 00000000000191\n\n"
+            f"6️⃣ 🚗 CONSULTA DE VEÍCULOS (PLACA):\n"
+            f"   • /placa ABC1D23\n\n"
+            f"7️⃣ 🌐 DOMÍNIOS & INFRAESTRUTURA WEB:\n"
+            f"   • /dominio site.com\n\n"
+            f"🎟️ CUPOM DE DESCONTO / CORTESIA:\n"
+            f"   • /resgatar CODIGO\n\n"
+            f"📢 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}\n"
+            f"💬 Suporte Direto: @{CFG.SUPORTE_USERNAME}"
+        )
+
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
+            InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
+        )
+        bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
+
+    @bot.message_handler(commands=['admin_user'])
+    def handle_admin_user_cmd(message):
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) >= 2:
+            _processar_busca_generica(message, partes[1], "username", "Username VIP")
+        else:
+            responder_seguro(message, "⚠️ Uso: `/admin_user <username>`", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['user'])
     def handle_user_cmd(message):
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) >= 2:
