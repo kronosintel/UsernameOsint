@@ -1,9 +1,8 @@
 """
-Kronos Intel OSINT Bot v31.0 VIP
-- Registro de Logs em Tempo Real no Grupo (/start e Funções Utilizadas)
-- Preservação de Privacidade (Não revela o alvo consultado no log público/grupo)
-- Módulos Administrativos VIP: /admin, /admin_fone, /admin_cnpj, /admin_placa, /admin_dominio, /admin_user, /admin_email, /admin_nome
-- Gerador de Relatório Executivo VIP em PDF (ReportLab) e Painel Web
+Kronos Intel OSINT Bot v32.0 VIP
+- Etapa 4: Painel Admin Avançado (Ban/Unban, Cupons Promocionais, Broadcast, Userinfo)
+- Notificação de Logs em Tempo Real no Grupo de Logs (Preservando LGPD)
+- Módulos Administrativos VIP e Gerador de Relatórios em PDF (ReportLab) e Painel Web
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -100,7 +99,9 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                created_at TEXT
+                created_at TEXT,
+                banned INTEGER DEFAULT 0,
+                ban_reason TEXT
             )
         """)
         cursor.execute("""
@@ -139,14 +140,29 @@ def init_db():
                 claimed_at TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS coupons (
+                code TEXT PRIMARY KEY,
+                max_uses INTEGER,
+                uses_count INTEGER DEFAULT 0,
+                created_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS coupon_redemptions (
+                code TEXT,
+                user_id INTEGER,
+                redeemed_at TEXT,
+                PRIMARY KEY (code, user_id)
+            )
+        """)
         
         try:
-            cursor.execute("ALTER TABLE payments ADD COLUMN pix_code TEXT")
+            cursor.execute("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
-
         try:
-            cursor.execute("ALTER TABLE target_hashes ADD COLUMN results_json TEXT")
+            cursor.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -171,6 +187,10 @@ def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, c
             conn.commit()
         conn.close()
         return res
+
+def usuario_esta_banido(user_id: int) -> bool:
+    res = db_execute("SELECT banned FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    return res is not None and res[0] == 1
 
 def usuario_ja_usou_gratis(user_id: int) -> bool:
     res = db_execute("SELECT 1 FROM free_claims WHERE user_id = ?", (user_id,), fetchone=True)
@@ -634,7 +654,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {titulos_map.get(query_type, 'GERAL')}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v31.0
+SISTEMA: Kronos Engine v32.0
 ===================================================================
 """
     if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
@@ -1135,6 +1155,10 @@ if bot:
     def send_welcome(message):
         user_id = message.from_user.id
         
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         raw_first = message.from_user.first_name or "Usuario"
         raw_last = message.from_user.last_name or ""
         username_tg = f"@{message.from_user.username}" if message.from_user.username else "Sem @username"
@@ -1165,7 +1189,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v31.0 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v32.0 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
@@ -1185,6 +1209,8 @@ if bot:
             f"   • /placa ABC1D23\n\n"
             f"7️⃣ 🌐 DOMÍNIOS & INFRAESTRUTURA WEB:\n"
             f"   • /dominio site.com\n\n"
+            f"🎟️ CUMPOM DE DESCONTO / CORTESIA:\n"
+            f"   • /resgatar CODIGO\n\n"
             f"⚙️ PRIVACIDADE (LGPD):\n"
             f"   • Use /apagar para excluir seus registros.\n\n"
             f"📢 Canal Oficial: {CANAL_TAG_PUBLICO}\n"
@@ -1216,7 +1242,13 @@ if bot:
             f"• Usuários Totais: {total_users}\n"
             f"• Buscas Executadas: {searches}\n"
             f"• Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n\n"
-            f"🛠️ COMANDOS DE CONSULTA DIRETA (SEM COBRANÇA):\n"
+            f"🛠️ COMANDOS DE GESTÃO DE USUÁRIOS:\n"
+            f"• /ban <user_id> [motivo]\n"
+            f"• /unban <user_id>\n"
+            f"• /userinfo <user_id>\n"
+            f"• /broadcast <mensagem_massa>\n"
+            f"• /gerar_cupom <CODIGO> <limite_usos>\n\n"
+            f"🛠️ COMANDOS DE CONSULTA DIRETA (ADMIN):\n"
             f"📱 /admin_fone 11999998888\n"
             f"🏢 /admin_cnpj 00000000000191\n"
             f"🚗 /admin_placa ABC1D23\n"
@@ -1230,6 +1262,148 @@ if bot:
             f"• /stats"
         )
         responder_seguro(message, texto_admin)
+
+    @bot.message_handler(commands=['ban'])
+    def handle_ban_command(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=2)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /ban <user_id> [motivo]")
+            return
+        try:
+            target_id = int(partes[1])
+            motivo = partes[2] if len(partes) > 2 else "Violação dos Termos de Uso"
+            db_execute("UPDATE users SET banned = 1, ban_reason = ? WHERE user_id = ?", (motivo, target_id), commit=True)
+            responder_seguro(message, f"🚫 Utilizador `{target_id}` banido com sucesso.\nMotivo: {motivo}")
+        except ValueError:
+            responder_seguro(message, "⚠️ ID inválido.")
+
+    @bot.message_handler(commands=['unban'])
+    def handle_unban_command(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /unban <user_id>")
+            return
+        try:
+            target_id = int(partes[1])
+            db_execute("UPDATE users SET banned = 0, ban_reason = NULL WHERE user_id = ?", (target_id,), commit=True)
+            responder_seguro(message, f"✅ Utilizador `{target_id}` desbanido com sucesso.")
+        except ValueError:
+            responder_seguro(message, "⚠️ ID inválido.")
+
+    @bot.message_handler(commands=['userinfo'])
+    def handle_userinfo_command(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /userinfo <user_id>")
+            return
+        try:
+            target_id = int(partes[1])
+            u = db_execute("SELECT user_id, created_at, banned, ban_reason FROM users WHERE user_id = ?", (target_id,), fetchone=True)
+            if not u:
+                responder_seguro(message, "⚠️ Utilizador não encontrado na base de dados.")
+                return
+            gratis = usuario_ja_usou_gratis(target_id)
+            compras = db_execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE user_id = ? AND status = 'approved'", (target_id,), fetchone=True)
+            qtd_compras = compras[0] if compras else 0
+            val_compras = compras[1] if compras and compras[1] else 0.0
+
+            msg_info = (
+                f"👤 INFORMAÇÕES DO UTILIZADOR `{target_id}`\n"
+                f"───────────────────────────────\n"
+                f"• Registrado em: {u[1]}\n"
+                f"• Status de Ban: {'🔴 BANIDO (' + str(u[3]) + ')' if u[2] == 1 else '🟢 ATIVO'}\n"
+                f"• Usou Cortesia Grátis: {'SIM' if gratis else 'NÃO'}\n"
+                f"• Total de Compras Aprovadas: {qtd_compras} (R$ {val_compras:.2f})"
+            )
+            responder_seguro(message, msg_info)
+        except ValueError:
+            responder_seguro(message, "⚠️ ID inválido.")
+
+    @bot.message_handler(commands=['gerar_cupom'])
+    def handle_gerar_cupom(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=2)
+        if len(partes) < 3:
+            responder_seguro(message, "⚠️ Uso correto: /gerar_cupom <CODIGO> <limite_usos>")
+            return
+        codigo = partes[1].upper().strip()
+        try:
+            limite = int(partes[2])
+            db_execute(
+                "INSERT INTO coupons (code, max_uses, uses_count, created_at) VALUES (?, ?, 0, ?) "
+                "ON CONFLICT(code) DO UPDATE SET max_uses = excluded.max_uses",
+                (codigo, limite, datetime.now(TIMEZONE_BR).isoformat()), commit=True
+            )
+            responder_seguro(message, f"🎟️ Cupom `{codigo}` gerado com sucesso para {limite} utilizações!")
+        except ValueError:
+            responder_seguro(message, "⚠️ O limite deve ser um número inteiro.")
+
+    @bot.message_handler(commands=['broadcast'])
+    def handle_broadcast(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Uso correto: /broadcast <mensagem>")
+            return
+        msg_broadcast = partes[1].strip()
+        usuarios = db_execute("SELECT user_id FROM users WHERE banned = 0", fetchall=True)
+        if not usuarios:
+            responder_seguro(message, "Nenhum utilizador encontrado.")
+            return
+
+        responder_seguro(message, f"📢 A iniciar envio para {len(usuarios)} utilizadores...")
+        sucessos, falhas = 0, 0
+        for row in usuarios:
+            uid = row[0]
+            try:
+                bot.send_message(uid, f"📢 NOTIFICAÇÃO KRONOS INTEL:\n\n{msg_broadcast}")
+                sucessos += 1
+                time.sleep(0.05)
+            except Exception:
+                falhas += 1
+
+        responder_seguro(message, f"✅ Transmissão Concluída!\n• Entregues: {sucessos}\n• Falhas: {falhas}")
+
+    @bot.message_handler(commands=['resgatar'])
+    def handle_resgatar_cupom(message):
+        user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            return
+
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Digite o código do cupom após o comando.\nExemplo: /resgatar KRONOS100")
+            return
+
+        codigo = partes[1].upper().strip()
+        cupom = db_execute("SELECT max_uses, uses_count FROM coupons WHERE code = ?", (codigo,), fetchone=True)
+        if not cupom:
+            responder_seguro(message, "❌ Cupom inválido ou inexistente.")
+            return
+
+        max_uses, uses_count = cupom[0], cupom[1]
+        if uses_count >= max_uses:
+            responder_seguro(message, "❌ Este cupom já atingiu o limite máximo de utilizações.")
+            return
+
+        ja_usou = db_execute("SELECT 1 FROM coupon_redemptions WHERE code = ? AND user_id = ?", (codigo, user_id), fetchone=True)
+        if ja_usou:
+            responder_seguro(message, "⚠️ Você já resgatou este cupom anteriormente.")
+            return
+
+        db_execute("INSERT INTO coupon_redemptions (code, user_id, redeemed_at) VALUES (?, ?, ?)", (codigo, user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+        db_execute("UPDATE coupons SET uses_count = uses_count + 1 WHERE code = ?", (codigo,), commit=True)
+        db_execute("DELETE FROM free_claims WHERE user_id = ?", (user_id,), commit=True)
+
+        responder_seguro(message, f"🎉 CUPOM `{codigo}` RESGATADO COM SUCESSO!\n\nFoi-lhe concedida 1 consulta VIP gratuita no bot. Realize a sua busca utilizando um dos comandos disponíveis!")
 
     @bot.message_handler(commands=['admin_fone'])
     def handle_admin_fone(message):
@@ -1353,6 +1527,10 @@ if bot:
     @bot.message_handler(commands=['fone'])
     def handle_fone_command(message):
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Telefone & WhatsApp (/fone)")
 
@@ -1389,6 +1567,10 @@ if bot:
     @bot.message_handler(commands=['cnpj'])
     def handle_cnpj_command(message):
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "CNPJ / Empresarial (/cnpj)")
 
@@ -1425,6 +1607,10 @@ if bot:
     @bot.message_handler(commands=['placa'])
     def handle_placa_command(message):
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Veículos / Placa (/placa)")
 
@@ -1461,6 +1647,10 @@ if bot:
     @bot.message_handler(commands=['dominio'])
     def handle_dominio_command(message):
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Domínios & DNS (/dominio)")
 
@@ -1493,6 +1683,10 @@ if bot:
     @bot.message_handler(commands=['user'])
     def handle_user_command(message):
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Username / Redes Sociais (/user)")
 
@@ -1554,6 +1748,10 @@ if bot:
     @bot.message_handler(commands=['email'])
     def handle_email_command(message):
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "E-mail & Vazamentos (/email)")
 
@@ -1590,6 +1788,10 @@ if bot:
     @bot.message_handler(commands=['nome'])
     def handle_nome_command(message):
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
         notificar_uso_grupo_logs(message.from_user, "Busca Judicial & Registros (/nome)")
 
@@ -1718,6 +1920,10 @@ if bot:
             return
 
         user_id = message.from_user.id
+        if usuario_esta_banido(user_id):
+            bot.reply_to(message, "🚫 O seu acesso a esta plataforma foi suspenso temporariamente.")
+            return
+
         registrar_acesso(user_id)
 
         if message.chat.type in ['group', 'supergroup']:
@@ -1779,6 +1985,10 @@ if bot:
             target, qtype, results_json_str = obter_alvo_por_hash(hash_curto)
             user_id = call.from_user.id
 
+            if usuario_esta_banido(user_id):
+                bot.answer_callback_query(call.id, "Acesso suspenso.", show_alert=True)
+                return
+
             if not target or not results_json_str:
                 bot.answer_callback_query(call.id, "Sessão expirada. Envie a busca novamente.", show_alert=True)
                 return
@@ -1824,11 +2034,15 @@ if bot:
             hash_curto = call.data.split("b_")[1]
             target, qtype, results_json_str = obter_alvo_por_hash(hash_curto)
 
+            user_id = call.from_user.id
+            if usuario_esta_banido(user_id):
+                bot.answer_callback_query(call.id, "Acesso suspenso.", show_alert=True)
+                return
+
             if not target or not results_json_str:
                 bot.answer_callback_query(call.id, "Sessão expirada. Envie a busca novamente.", show_alert=True)
                 return
 
-            user_id = call.from_user.id
             bot.answer_callback_query(call.id, f"Gerando Chave Pix de R$ {PRECO_PADRAO:.2f}...")
             
             qr_pix, qr_img_bytes, token = gerar_pix_mercadopago(
@@ -2006,7 +2220,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v31.0 VIP Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v32.0 VIP Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
