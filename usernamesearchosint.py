@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import dataclass
-from dataclass import dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
 import html
@@ -154,6 +153,52 @@ def link_pdf(url: str) -> str:
 def normalizar_termo_hash(termo: str) -> str:
     limpo = termo.strip().lower()
     return hashlib.sha256(limpo.encode("utf-8")).hexdigest()
+
+def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
+    try:
+        return bot.reply_to(message, texto, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception:
+        try:
+            return bot.send_message(message.chat.id, texto, parse_mode=parse_mode, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error("Erro ao enviar mensagem para chat %s: %s", message.chat.id, str(e))
+            return None
+
+def orientar_uso_correto(chat_id: int):
+    msg_guia = (
+        "💡 COMO UTILIZAR O BOT CORRETAMENTE:\n\n"
+        "1️⃣ 👤 Username: /user alvo123\n"
+        "2️⃣ 📧 E-mail: /email alvo@dominio.com\n"
+        "3️⃣ ⚖️ Nome Completo: /nome João da Silva\n"
+        "4️⃣ 📱 Telefone: /fone 11999998888\n"
+        "5️⃣ 🏢 CNPJ: /cnpj 00000000000191\n"
+        "6️⃣ 🚗 Placa: /placa ABC1D23\n"
+        "7️⃣ 🌐 Domínio: /dominio site.com"
+    )
+    try:
+        bot.send_message(chat_id, msg_guia)
+    except Exception as e:
+        logger.error("Erro ao enviar orientação para %s: %s", chat_id, str(e))
+
+def e_nome_completo(termo: str) -> bool:
+    partes = termo.strip().split()
+    return len(partes) >= 2 and all(len(p) >= 2 for p in partes)
+
+def e_email_valido(termo: str) -> bool:
+    padrao = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(padrao, termo.strip()))
+
+def e_url(termo: str) -> bool:
+    if e_email_valido(termo):
+        return False
+    if "/" in termo or "http://" in termo or "https://" in termo:
+        padrao_url = re.compile(
+            r'^(?:http|ftp)s?://'
+            r'|(?:www\.)'
+            r'|[a-zA-Z0-9.-]+\.(?:com|org|net|gov|edu|io|br|me|dev|app|co|xyz)'
+        , re.IGNORECASE)
+        return bool(padrao_url.search(termo))
+    return False
 
 # --- BANCO DE DADOS E MIGRAÇÕES (WAL + USER_VERSION) ---
 def init_db():
