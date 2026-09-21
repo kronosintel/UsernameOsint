@@ -1,8 +1,7 @@
 """
-Kronos Intel OSINT Bot v35.7 VIP
-- Restauração Completa de Todos os Módulos no Menu /start
-- Handlers para /email, /nome, /fone, /cnpj, /placa, /dominio, /user e /admin_user
-- Processamento em Thread separada no Webhook (sem bloqueios)
+Kronos Intel OSINT Bot v35.8 VIP
+- Correção na extração de argumentos para /admin_user e /user
+- Prevenção do erro 'Termo de busca muito curto' em comandos com prefixo
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -103,10 +102,14 @@ def link_pdf(url: str) -> str:
         return sanitizar_pdf(url)
     return f'<a href="{sanitizar_pdf(seguro)}">{sanitizar_pdf(seguro)}</a>'
 
-def limpar_comando_string(texto: str) -> str:
-    t = texto.strip()
-    t = re.sub(r'^/?[a-zA-Z0-9_]+\s*', '', t)
-    return t.replace("@", "").strip()
+def extrair_alvo_limpo(texto: str) -> str:
+    """ Extrai o termo de busca ignorando comandos e o caractere @. """
+    partes = texto.strip().split(maxsplit=1)
+    if len(partes) > 1 and partes[0].startswith('/'):
+        alvo = partes[1].strip()
+    else:
+        alvo = texto.strip()
+    return alvo.replace("@", "").strip()
 
 def init_db():
     with db_lock:
@@ -161,7 +164,7 @@ PLATAFORMAS = {
 }
 
 async def consultar_alvo_async(username: str) -> dict[str, Any]:
-    username_limpo = limpar_comando_string(username)
+    username_limpo = extrair_alvo_limpo(username)
     resultados = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
@@ -183,7 +186,7 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
     return resultados
 
 def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
-    target_limpo = limpar_comando_string(target)
+    target_limpo = extrair_alvo_limpo(target)
 
     if query_type == "email":
         encoded_email = urllib.parse.quote(target_limpo)
@@ -292,7 +295,7 @@ def gerar_painel_gratuito(user_id: int, target: str, qtype: str, resultados: dic
 
 def processar_busca(message, raw_target: str, qtype: str = "username"):
     user_id = message.from_user.id
-    target = limpar_comando_string(raw_target)
+    target = extrair_alvo_limpo(raw_target)
 
     if not target or len(target) < 2:
         bot.reply_to(message, "⚠️ Termo de busca muito curto.")
@@ -339,7 +342,7 @@ if bot:
         db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
         menu_boas_vindas = (
-            f"👑 **KRONOS INTEL OSINT BOT v35.7 VIP** ⚡️\n"
+            f"👑 **KRONOS INTEL OSINT BOT v35.8 VIP** ⚡️\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central de inteligência cibernética!\n\n"
             f"🛠️ **MÓDULOS DE CONSULTA DISPONÍVEIS:**\n\n"
@@ -369,75 +372,37 @@ if bot:
         )
         bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup, parse_mode="Markdown")
 
-    @bot.message_handler(commands=['admin_user'])
-    def handle_admin_user_cmd(message):
+    @bot.message_handler(commands=['admin_user', 'user', 'email', 'nome', 'fone', 'cnpj', 'placa', 'dominio'])
+    def handle_commands(message):
+        cmd = message.text.split()[0].lower()
         partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "username")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/admin_user <username>`", parse_mode="Markdown")
+        
+        if len(partes) < 2:
+            bot.reply_to(message, f"⚠️ Por favor, insira o termo de busca após o comando `{cmd}`.", parse_mode="Markdown")
+            return
 
-    @bot.message_handler(commands=['user'])
-    def handle_user_cmd(message):
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "username")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/user <username>`", parse_mode="Markdown")
-
-    @bot.message_handler(commands=['email'])
-    def handle_email_cmd(message):
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "email")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/email exemplo@dominio.com`", parse_mode="Markdown")
-
-    @bot.message_handler(commands=['nome'])
-    def handle_nome_cmd(message):
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "fullname")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/nome João da Silva`", parse_mode="Markdown")
-
-    @bot.message_handler(commands=['fone'])
-    def handle_fone_cmd(message):
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "fone")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/fone 11999998888`", parse_mode="Markdown")
-
-    @bot.message_handler(commands=['cnpj'])
-    def handle_cnpj_cmd(message):
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "cnpj")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/cnpj 00000000000191`", parse_mode="Markdown")
-
-    @bot.message_handler(commands=['placa'])
-    def handle_placa_cmd(message):
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "placa")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/placa ABC1D23`", parse_mode="Markdown")
-
-    @bot.message_handler(commands=['dominio'])
-    def handle_dominio_cmd(message):
-        partes = message.text.strip().split(maxsplit=1)
-        if len(partes) >= 2:
-            processar_busca(message, partes[1], "dominio")
-        else:
-            bot.reply_to(message, "⚠️ Uso correto: `/dominio site.com`", parse_mode="Markdown")
+        alvo = partes[1]
+        
+        if 'admin_user' in cmd or 'user' in cmd:
+            processar_busca(message, alvo, "username")
+        elif 'email' in cmd:
+            processar_busca(message, alvo, "email")
+        elif 'nome' in cmd:
+            processar_busca(message, alvo, "fullname")
+        elif 'fone' in cmd:
+            processar_busca(message, alvo, "fone")
+        elif 'cnpj' in cmd:
+            processar_busca(message, alvo, "cnpj")
+        elif 'placa' in cmd:
+            processar_busca(message, alvo, "placa")
+        elif 'dominio' in cmd:
+            processar_busca(message, alvo, "dominio")
 
     @bot.message_handler(func=lambda message: True)
     def handle_catch_all(message):
-        if not message.text or message.chat.type in ['group', 'supergroup']:
+        if not message.text or message.chat.type in ['group', 'supergroup'] or message.text.startswith('/'):
             return
-        target = limpar_comando_string(message.text)
+        target = extrair_alvo_limpo(message.text)
         if len(target) >= 2:
             processar_busca(message, target, "username")
 
