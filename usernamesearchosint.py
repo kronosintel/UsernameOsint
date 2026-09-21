@@ -1,10 +1,8 @@
 """
-Kronos Intel OSINT Bot v28.0 — Plataforma VIP
-- Módulos Expandidos: Username (/user), E-mail (/email), Nome (/nome), Telefone (/fone), CNPJ (/cnpj), Placa (/placa) e Domínio (/dominio)
+Kronos Intel OSINT Bot v29.0 — Plataforma VIP
+- Etapa 2: Gerador de Relatório Executivo VIP em PDF (ReportLab)
+- Módulos Expandidos: /user, /email, /nome, /fone, /cnpj, /placa e /dominio
 - Divulgação Diária Automática no Canal Principal
-- Geração de Relatórios Web Interativos com visual renovado e botões interativos
-- Suporte a usernames e e-mails com "_" sem quebrar Markdown
-- Trava atômica SQLite para resgate único de relatório gratuito
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -31,6 +29,12 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 import mercadopago
 from flask import Flask, jsonify, request, render_template_string, send_file
+
+# Dependências do ReportLab para geração de PDF
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -421,7 +425,7 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
             "Sync.ME Caller ID": {"exists": True, "url": f"https://sync.me/search/?number=55{limpo}"},
             "Truecaller Directory": {"exists": True, "url": f"https://www.truecaller.com/search/br/{limpo}"},
             "QualEmpresa Operadora": {"exists": True, "url": f"https://www.qualempresa.com.br/telefone/{limpo}"},
-            "Google Search (Vazamentos/Anúncios)": {"exists": True, "url": f"https://www.google.com/search?q=%22{limpo}%22"}
+            "Google Search (Vazamentos)": {"exists": True, "url": f"https://www.google.com/search?q=%22{limpo}%22"}
         }
     elif query_type == "cnpj":
         limpo = re.sub(r'\D', '', target)
@@ -462,6 +466,128 @@ def obter_links_buscadores(termo: str) -> dict[str, str]:
         "DuckDuckGo (Presença Web)": f"https://duckduckgo.com/?q={encoded_term}"
     }
 
+def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
+    """Gera um PDF altamente estilizado e profissional com ReportLab."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    story = []
+
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle(
+        'TitleStyle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=20,
+        textColor=colors.HexColor('#38bdf8'),
+        spaceAfter=4
+    )
+    
+    subtitle_style = ParagraphStyle(
+        'SubTitleStyle',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=10,
+        textColor=colors.HexColor('#9ca3af'),
+        spaceAfter=15
+    )
+
+    header_table_style = ParagraphStyle(
+        'HeaderTableStyle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=9,
+        textColor=colors.HexColor('#ffffff')
+    )
+
+    cell_style = ParagraphStyle(
+        'CellStyle',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=9,
+        textColor=colors.HexColor('#374151')
+    )
+
+    cell_url_style = ParagraphStyle(
+        'CellUrlStyle',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=8,
+        textColor=colors.HexColor('#2563eb')
+    )
+
+    story.append(Paragraph("KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT", title_style))
+    story.append(Paragraph("SISTEMA DE INTELIGÊNCIA CIBERNÉTICA E AUDITORIA DIGITAL VIP", subtitle_style))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#38bdf8'), spaceAfter=15))
+
+    data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
+    titulos_map = {
+        "email": "CONSULTA DE E-MAIL & VAZAMENTOS",
+        "fullname": "BUSCA JUDICIAL & REGISTROS",
+        "fone": "TELEFONE & WHATSAPP",
+        "cnpj": "REGISTRO EMPRESARIAL (CNPJ)",
+        "placa": "REGISTRO DE VEÍCULOS (PLACA)",
+        "dominio": "INFRAESTRUTURA DE DOMÍNIO",
+        "username": "USERNAME / REDES SOCIAIS"
+    }
+
+    meta_data = [
+        [Paragraph("<b>ALVO ANALISADO:</b>", cell_style), Paragraph(f"<b>{target}</b>", cell_style)],
+        [Paragraph("<b>MÓDULO DE BUSCA:</b>", cell_style), Paragraph(titulos_map.get(query_type, "GERAL"), cell_style)],
+        [Paragraph("<b>DATA DA AUDITORIA:</b>", cell_style), Paragraph(data_atual, cell_style)],
+        [Paragraph("<b>INTEGRIDADE HASH SHA-256:</b>", cell_style), Paragraph(hashlib.sha256(f"{target}_{data_atual}".encode()).hexdigest()[:24] + "...", cell_style)],
+    ]
+    t_meta = Table(meta_data, colWidths=[160, 380])
+    t_meta.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#f3f4f6')),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#e5e7eb')),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    story.append(t_meta)
+    story.append(Spacer(1, 15))
+
+    story.append(Paragraph("<b>1. FONTE DE DADOS E PLATAFORMAS MAPEADAS</b>", styles['Heading2']))
+    story.append(Spacer(1, 6))
+
+    table_data = [[Paragraph("PLATAFORMA / FONTE", header_table_style), Paragraph("STATUS / LINK DIRETO", header_table_style)]]
+    
+    encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
+
+    if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
+        for p in resultados:
+            url_str = resultados[p].get('url', '')
+            table_data.append([
+                Paragraph(f"<b>{p}</b>", cell_style),
+                Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)
+            ])
+    else:
+        if encontrados:
+            for p in encontrados:
+                url_str = resultados[p].get("url", PLATFORM_URLS.get(p, "").format(username=target))
+                table_data.append([
+                    Paragraph(f"<b>{p}</b>", cell_style),
+                    Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)
+                ])
+        else:
+            table_data.append([Paragraph("Nenhum perfil público identificado", cell_style), Paragraph("-", cell_style)])
+
+    t_results = Table(table_data, colWidths=[180, 360])
+    t_results.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0f172a')),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
+        ('PADDING', (0,0), (-1,-1), 6),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    story.append(t_results)
+    story.append(Spacer(1, 20))
+
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#94a3b8'), spaceAfter=10))
+    story.append(Paragraph("<font size=8 color='#64748b'>Documento compilado de dados públicos abertos por Kronos Intel OSINT Service. Para suporte: @kronosintel</font>", styles['Normal']))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
 def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
@@ -482,7 +608,7 @@ def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]]
 ALVO ANALISADO: {target}
 TIPO DE CONSULTA: {titulos_map.get(query_type, 'GERAL')}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v28.0
+SISTEMA: Kronos Engine v29.0
 ===================================================================
 """
     if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
@@ -790,9 +916,12 @@ HTML_DASHBOARD_TEMPLATE = """
 </head>
 <body>
     <nav class="navbar navbar-dark sticky-top mb-4 py-3">
-        <div class="container">
+        <div class="container d-flex justify-content-between align-items-center">
             <span class="navbar-brand h1 mb-0"><i class="bi bi-shield-lock-fill me-2"></i>KRONOS_INTEL // OSINT VIP</span>
-            <a href="/download/txt/{{ token }}" class="btn btn-outline-info btn-sm rounded-3"><i class="bi bi-file-earmark-text me-1"></i> BAIXAR RELATÓRIO (.TXT)</a>
+            <div>
+                <a href="/download/pdf/{{ token }}" class="btn btn-info btn-sm rounded-3 me-2 text-white font-weight-bold"><i class="bi bi-file-earmark-pdf-fill me-1"></i> BAIXAR PDF VIP</a>
+                <a href="/download/txt/{{ token }}" class="btn btn-outline-secondary btn-sm rounded-3"><i class="bi bi-file-earmark-text me-1"></i> TXT</a>
+            </div>
         </div>
     </nav>
 
@@ -903,6 +1032,24 @@ def ver_relatorio_web(token):
         data_atual=data_formatada
     )
 
+@app.route("/download/pdf/<token>")
+def download_pdf(token):
+    p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ? AND status = 'approved' AND results_json IS NOT NULL", (token,), fetchone=True)
+    if not p:
+        return "Relatório não encontrado ou expirado.", 404
+
+    target, results_json_str, query_type = p[0], p[1], p[2]
+    results_json = json.loads(results_json_str)
+    
+    pdf_buf = gerar_pdf_osint(target, results_json, query_type=query_type)
+
+    return send_file(
+        pdf_buf,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"Relatorio_VIP_{target.replace(' ', '_')}.pdf"
+    )
+
 @app.route("/download/txt/<token>")
 def download_txt(token):
     p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ? AND status = 'approved' AND results_json IS NOT NULL", (token,), fetchone=True)
@@ -958,7 +1105,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v28.0 ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v29.0 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
@@ -1474,8 +1621,8 @@ if bot:
                     f"───────────────────────────────\n"
                     f"Você está liberando:\n"
                     f"1. Painel Interativo Web Exclusivo ({qtype.upper()})\n"
-                    f"2. Mapeamento Direto de Fontes e Dados\n"
-                    f"3. Relatório Executivo para Download (.TXT)\n\n"
+                    f"2. Relatório Executivo Profissional (.PDF)\n"
+                    f"3. Compilação Completa de Dados (.TXT)\n\n"
                     f"💰 Valor: R$ {PRECO_PADRAO:.2f} no Pix (Válido por 30 minutos)\n\n"
                     f"Copie a chave Pix abaixo:\n\n"
                     f"{qr_pix}\n\n"
@@ -1601,6 +1748,7 @@ def webhook():
                     if telegram_id and bot:
                         markup = InlineKeyboardMarkup(row_width=1)
                         markup.add(InlineKeyboardButton("🌐 Acessar Painel Interativo Web", url=link_web))
+                        markup.add(InlineKeyboardButton("📄 Baixar Relatório PDF VIP", url=f"{WEB_BASE_URL}/download/pdf/{token_relatorio}"))
                         markup.add(InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CANAL_TAG_PUBLICO.replace('@','')}") )
 
                         try:
@@ -1608,7 +1756,7 @@ def webhook():
                                 telegram_id,
                                 f"⚡ PAGAMENTO CONFIRMADO — KRONOS INTEL VIP\n\n"
                                 f"Sua consulta ({query_type.upper()}) foi liberada com sucesso!\n\n"
-                                f"🔗 Clique no botão abaixo para acessar o painel e baixar o relatório TXT.\n\n"
+                                f"🔗 Clique nos botões abaixo para acessar o painel e baixar o relatório executivo em PDF:\n\n"
                                 f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}",
                                 reply_markup=markup
                             )
@@ -1638,7 +1786,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v28.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v29.0 VIP Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
