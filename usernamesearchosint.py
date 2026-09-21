@@ -200,7 +200,7 @@ def e_url(termo: str) -> bool:
         return bool(padrao_url.search(termo))
     return False
 
-# --- BANCO DE DADOS E MIGRAÇÕES (WAL + USER_VERSION) ---
+# --- BANCO DE DADOS E MIGRAÇÕES ---
 def init_db():
     with db_lock:
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
@@ -253,22 +253,6 @@ def init_db():
             CREATE TABLE IF NOT EXISTS free_claims (
                 user_id INTEGER PRIMARY KEY,
                 claimed_at TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS coupons (
-                code TEXT PRIMARY KEY,
-                max_uses INTEGER,
-                uses_count INTEGER DEFAULT 0,
-                created_at TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS coupon_redemptions (
-                code TEXT,
-                user_id INTEGER,
-                redeemed_at TEXT,
-                PRIMARY KEY (code, user_id)
             )
         """)
         cursor.execute("""
@@ -396,7 +380,7 @@ def usuario_e_membro_canal(user_id: int) -> bool:
         member = bot.get_chat_member(CFG.CANAL_PRINCIPAL_ID, user_id)
         return member.status in ['member', 'administrator', 'creator']
     except Exception as e:
-        logger.error("Erro ao verificar membro no canal: %s", str(e))
+        logger.error("Erro ao verificar membro no canal %s: %s", CFG.CANAL_PRINCIPAL_ID, str(e))
         return False
 
 def registrar_hash_alvo(alvo: str, query_type: str, resultados: dict | None = None) -> str:
@@ -421,8 +405,8 @@ def notificar_uso_grupo_logs(from_user, modulo_nome: str):
     if not bot or not CFG.LOG_GROUP_ID or from_user.id == CFG.ADMIN_ID:
         return
     try:
-        raw_first = escaping_html = escapar_html(from_user.first_name or "Usuario")
-        raw_last = escaping_html = escapar_html(from_user.last_name or "")
+        raw_first = escapar_html(from_user.first_name or "Usuario")
+        raw_last = escapar_html(from_user.last_name or "")
         nome_completo = f"{raw_first} {raw_last}".strip()
         username_str = f"@{escapar_html(from_user.username)}" if from_user.username else "Sem @username"
         data_hora = datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M:%S')
@@ -434,7 +418,6 @@ def notificar_uso_grupo_logs(from_user, modulo_nome: str):
             f"• <b>Nome:</b> {nome_completo}\n"
             f"• <b>Username:</b> {username_str}\n"
             f"• <b>Módulo Solicitado:</b> {escapar_html(modulo_nome.upper())}\n"
-            f"• <b>Termo Varrito:</b> [PROTEGIDO POR PRIVACIDADE LGPD]\n"
             f"• <b>Data/Hora:</b> {data_hora}"
         )
         bot.send_message(CFG.LOG_GROUP_ID, msg_log, parse_mode="HTML")
@@ -552,7 +535,7 @@ def classificar_resposta(cfg: dict, status_code: int, headers: dict, corpo_texto
 
     return {"exists": False, "status": "desconhecido", "motivo": f"http_{status_code}_nao_tratado"}
 
-# --- MOTOR ASSÍNCRONO COM HTTPX E EVENT LOOP DEDICADO ---
+# --- MOTOR ASSÍNCRONO COM HTTPX ---
 class OSINTEngineAsync:
     def __init__(self, max_concurrency: int = 25):
         self.semaphore = asyncio.Semaphore(max_concurrency)
@@ -579,7 +562,6 @@ class OSINTEngineAsync:
                     follow_redirects=(fonte == "api")
                 )
                 
-                # Tratamento de Retry para 429/5xx
                 if resp.status_code in (429, 500, 502, 503, 504):
                     retry_after = resp.headers.get("Retry-After")
                     wait_s = float(retry_after) if retry_after and retry_after.isdigit() else 1.0
@@ -621,7 +603,6 @@ class OSINTEngineAsync:
 
         resultados = dict(resultados_raw)
 
-        # Segunda passada assíncrona para reconfirmação de baixa confiança
         duvidosos = [nome for nome, res in resultados.items() if res.get("status") == "existe" and res.get("confianca", 1.0) < 0.80]
         if duvidosos:
             async with httpx.AsyncClient() as client_reconf:
@@ -644,7 +625,6 @@ class OSINTEngineAsync:
 
         return resultados
 
-# Loop Async e Gerenciador
 class AsyncLoopThread:
     def __init__(self):
         self.loop = asyncio.new_event_loop()
@@ -662,7 +642,7 @@ class AsyncLoopThread:
 ASYNC_RUNNER = AsyncLoopThread()
 ENGINE_ASYNC = OSINTEngineAsync()
 
-# --- DADOS EXTERNOS ASSÍNCRONOS (CNPJ & DNS) ---
+# --- DADOS EXTERNOS ASSÍNCRONOS ---
 async def _cnpj_async(cnpj: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -1336,7 +1316,7 @@ def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str
         hash_alvo = registrar_hash_alvo(target, qtype, resultados)
         status_gratis_txt = ""
         if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
+            status_gratis_txt = "🎁 CORTESIA DISPONÍVEL: Entre no nosso canal e resgate 1 relatório GRATUITO!\n\n"
 
         texto_resultado = (
             f"🎯 CONSULTA OSINT DE ALVO ({qtype.upper()}):\n"
@@ -1345,7 +1325,7 @@ def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str
             f"Gere o seu Painel Web Interativo completo para acessar todos os atalhos e resultados mapeados.\n\n"
             f"{status_gratis_txt}"
             f"💳 Valor da consulta: R$ {CFG.PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Faça parte do nosso canal oficial: {CFG.CANAL_TAG_PUBLICO}"
+            f"👉 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}"
         )
 
         markup = construir_markup_oferta(hash_alvo, user_id)
@@ -1396,10 +1376,11 @@ if bot:
             f"• /cnpj <cnpj>\n"
             f"• /placa <placa_veiculo>\n"
             f"• /dominio <dominio_web>\n\n"
-            f"⚙️ COMANDOS DE PRIVACIDADE E TERMOS:\n"
+            f"🎁 PROMOÇÃO DE BOAS-VINDAS:\n"
+            f"Entre no nosso canal oficial ({CFG.CANAL_TAG_PUBLICO}) e ganhe 1 RELATÓRIO COMPLETO GRATUITO em qualquer modalidade de busca!\n\n"
+            f"⚙️ PRIVACIDADE E TERMOS:\n"
             f"• /termos — Visualizar políticas e aceitar uso\n"
             f"• /apagar — Excluir permanentemente seus registros (LGPD)\n\n"
-            f"📢 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}\n"
             f"💬 Suporte Direto: @{CFG.SUPORTE_USERNAME}"
         )
 
@@ -1448,6 +1429,7 @@ if bot:
     @bot.message_handler(commands=['admin'])
     def handle_admin_panel(message):
         if message.from_user.id != CFG.ADMIN_ID:
+            bot.reply_to(message, "🚫 Acesso restrito apenas para administradores.")
             return
 
         res_users = db_execute("SELECT COUNT(*) FROM users", fetchone=True)
@@ -1466,12 +1448,37 @@ if bot:
             f"• Buscas Executadas: {searches}\n"
             f"• Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n\n"
             f"🛠️ COMANDOS DE ADMIN:\n"
-            f"• /ban <user_id> [motivo] | /unban <user_id>\n"
-            f"• /broadcast <mensagem>\n"
-            f"• /stats\n"
-            f"• /conceder <user_id> <termo_alvo>"
+            f"• /broadcast <mensagem> — Enviar comunicado a todos\n"
+            f"• /stats — Enviar relatório detalhado para o grupo de logs\n"
+            f"• /ban <user_id> | /unban <user_id>"
         )
         responder_seguro(message, texto_admin)
+
+    @bot.message_handler(commands=['broadcast'])
+    def handle_broadcast(message):
+        if message.from_user.id != CFG.ADMIN_ID:
+            return
+
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            bot.reply_to(message, "⚠️ Uso correto: `/broadcast Sua mensagem aqui`", parse_mode="Markdown")
+            return
+
+        msg_envio = partes[1]
+        usuarios = db_execute("SELECT user_id FROM users WHERE banned = 0", fetchall=True)
+        
+        sucesso = 0
+        falha = 0
+        if usuarios:
+            for u in usuarios:
+                try:
+                    bot.send_message(u[0], f"📢 **COMUNICADO KRONOS INTEL**\n\n{msg_envio}", parse_mode="Markdown")
+                    sucesso += 1
+                    time.sleep(0.05)
+                except Exception:
+                    falha += 1
+
+        bot.reply_to(message, f"📢 Broadcast concluído!\n• Enviados com sucesso: {sucesso}\n• Falhas/Bloqueios: {falha}")
 
     @bot.message_handler(commands=['apagar'])
     def handle_apagar_dados(message):
@@ -1479,7 +1486,6 @@ if bot:
         db_execute("DELETE FROM users WHERE user_id = ?", (user_id,), commit=True)
         db_execute("UPDATE payments SET target_username='(apagado)', results_json=NULL, pix_code=NULL WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM free_claims WHERE user_id = ?", (user_id,), commit=True)
-        db_execute("DELETE FROM coupon_redemptions WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM rate_events WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM audit_log WHERE user_id = ?", (user_id,), commit=True)
         bot.reply_to(message, "🗑️ Solicitação de Privacidade LGPD Concluída: Todos os seus registros foram expurgados permanentemente do sistema.")
@@ -1566,28 +1572,55 @@ if bot:
                 return
 
             if not target or not results_json_str:
-                bot.answer_callback_query(call.id, "Sessão expirada. Envie a busca novamente.", show_alert=True)
+                bot.answer_callback_query(call.id, "Sessão expirada. Realize a consulta novamente.", show_alert=True)
+                return
+
+            if usuario_ja_usou_gratis(user_id):
+                bot.answer_callback_query(call.id, "⚠️ Você já resgatou o seu relatório gratuito de cortesia!", show_alert=True)
                 return
 
             if not usuario_e_membro_canal(user_id):
-                bot.answer_callback_query(call.id, "⚠️ Você precisa entrar no canal oficial para liberar o relatório grátis!", show_alert=True)
+                bot.answer_callback_query(call.id, "⚠️ Você precisa entrar no canal oficial para liberar a sua consulta grátis!", show_alert=True)
+                
+                msg_bloqueio = (
+                    f"⚠️ **ENTRADA NO CANAL NECESSÁRIA**\n\n"
+                    f"Para liberar o seu **Relatório Gratuito de Cortesia**, você precisa entrar no nosso canal oficial:\n"
+                    f"👉 {CFG.CANAL_TAG_PUBLICO}\n\n"
+                    f"Após entrar, clique novamente no botão de resgate."
+                )
+                markup = InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
+                    InlineKeyboardButton("🔄 Tentar Resgatar Novamente", callback_data=f"claimfree_{hash_curto}")
+                )
+                bot.send_message(call.message.chat.id, msg_bloqueio, reply_markup=markup, parse_mode="Markdown")
                 return
 
-            ok = db_execute(
-                "INSERT INTO free_claims (user_id, claimed_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING RETURNING user_id",
-                (user_id, datetime.now(TIMEZONE_BR).isoformat()), fetchone=True, commit=True
+            # Registrar a cortesia para impedir novo uso no futuro
+            db_execute(
+                "INSERT INTO free_claims (user_id, claimed_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
+                (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True
             )
-            if not ok:
-                bot.answer_callback_query(call.id, "⚠️ Você já utilizou o seu relatório gratuito!", show_alert=True)
-                return
 
-            bot.answer_callback_query(call.id, "🎉 Relatório gratuito gerado!")
+            bot.answer_callback_query(call.id, "🎉 Relatório gratuito gerado com sucesso!")
             resultados = json.loads(results_json_str)
             link_web = gerar_painel_gratuito_membro(user_id, target, qtype, resultados)
 
             markup = InlineKeyboardMarkup(row_width=1)
-            markup.add(InlineKeyboardButton("🌐 Acessar Seu Painel VIP (GRÁTIS)", url=link_web))
-            bot.send_message(call.message.chat.id, f"🎉 RELATÓRIO LIBERADO PARA {target}:", reply_markup=markup)
+            markup.add(
+                InlineKeyboardButton("🌐 Acessar Seu Painel VIP (GRÁTIS)", url=link_web),
+                InlineKeyboardButton("📄 Baixar Relatório PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
+            )
+            
+            bot.send_message(
+                call.message.chat.id,
+                f"🎉 **RELATÓRIO GRATUITO LIBERADO COM SUCESSO!**\n\n"
+                f"• **Alvo:** `{target}`\n"
+                f"• **Modalidade:** {qtype.upper()}\n\n"
+                f"Clique no botão abaixo para abrir o seu painel interativo completo:",
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
 
         elif call.data.startswith("b_"):
             hash_curto = call.data.split("b_")[1]
@@ -1615,6 +1648,13 @@ if bot:
             row = db_execute("SELECT pix_code FROM payments WHERE token = ? AND status = 'pending'", (token_pix,), fetchone=True)
             if row and row[0]:
                 bot.send_message(call.message.chat.id, text=f"<code>{escapar_html(row[0])}</code>", parse_mode="HTML")
+
+        elif call.data == "final_cancel":
+            bot.answer_callback_query(call.id, "Operação cancelada.")
+            try:
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+            except Exception:
+                pass
 
 # --- ENDPOINTS FLASK DE WEBHOOKS E HEALTH CHECK ---
 @app.route(f"/telegram/{CFG.TELEGRAM_SECRET_TOKEN}", methods=["POST"])
@@ -1738,7 +1778,7 @@ def setup_webhook_telegram():
         except Exception as e:
             logger.error("Erro ao registrar Webhook Telegram: %s", str(e))
 
-# Inicialização global do Webhook e Workers para execução no Gunicorn
+# Inicialização global para execução pelo Gunicorn
 setup_webhook_telegram()
 Thread(target=worker_divulgacao_diaria, daemon=True).start()
 Thread(target=worker_background, daemon=True).start()
