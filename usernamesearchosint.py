@@ -1,8 +1,9 @@
 """
-Kronos Intel OSINT Bot v35.2 VIP
-- Restauração Completa do Menu Principal /start
-- Tratamento Isolado para /admin_user e /user
-- Motor OSINT Assíncrono com Timeout Seguro (2s)
+Kronos Intel OSINT Bot v35.5 VIP
+- Correção Crítica do Webhook (Processamento Não-Bloqueante)
+- Resposta Instantânea para /start, /user e /admin_user
+- Motor OSINT Assíncrono com Timeout Seguro
+- Painel Web e Download de PDF VIP Ativo
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -20,13 +21,12 @@ import logging
 import os
 import re
 import secrets
-import socket
 import sqlite3
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 import urllib.parse
 from zoneinfo import ZoneInfo
-from threading import Lock, Thread
+from threading import Lock
 
 import httpx
 import mercadopago
@@ -57,73 +57,35 @@ def _env_float(key: str, default: float) -> float:
     except ValueError:
         return default
 
-def _env_bool(key: str, default: bool) -> bool:
-    val = os.getenv(key, str(default)).lower()
-    return val in ("1", "true", "yes", "on")
-
 @dataclass
 class Config:
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
     ADMIN_ID: int = _env_int("ADMIN_ID", 5041637922)
     CANAL_PRINCIPAL_ID: int = _env_int("CANAL_PRINCIPAL_ID", -1003802363624)
-    LOG_GROUP_ID: int = _env_int("GRUPO_LOGS_ID", _env_int("LOG_GROUP_ID", -1003986408630))
+    LOG_GROUP_ID: int = _env_int("GRUPO_LOGS_ID", -1003986408630)
     CANAL_TAG_PUBLICO: str = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     BOT_USERNAME: str = os.getenv("BOT_USERNAME", "KronosSearchbot")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
     
     MERCADOPAGO_TOKEN: str = os.getenv("MERCADOPAGO_TOKEN", "")
-    MERCADOPAGO_WEBHOOK_SECRET: str = os.getenv("MERCADOPAGO_WEBHOOK_SECRET", "").strip()
-    
     PRECO_PADRAO: float = _env_float("PRECO_PADRAO", 3.90)
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
     PORT: int = _env_int("PORT", 5000)
-    
     CACHE_TTL_SECONDS: int = _env_int("CACHE_TTL_SECONDS", 900)
-    RETENTION_DAYS: int = _env_int("RETENTION_DAYS", 30)
-    REQUIRE_TERMS: bool = _env_bool("REQUIRE_TERMS", False)
-    
-    TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", hashlib.sha256((os.getenv("TELEGRAM_TOKEN", "") + "secret_token").encode()).hexdigest()[:32])
+    TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "secret_token_kronos")
 
 CFG = Config()
 
 app = Flask(__name__)
-app.config.update(
-    SECRET_KEY=os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32),
-    MAX_CONTENT_LENGTH=1024 * 1024,
-)
+app.config['SECRET_KEY'] = secrets.token_hex(16)
 
 TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 db_lock = Lock()
 
-RE_USERNAME = re.compile(r"^(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{2,40}$")
-RE_CNPJ = re.compile(r"^\d{14}$")
-RE_PLACA = re.compile(r"^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$")
-RE_FONE = re.compile(r"^\d{10,11}$")
-
 sdk = mercadopago.SDK(CFG.MERCADOPAGO_TOKEN) if CFG.MERCADOPAGO_TOKEN else None
-bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=False) if CFG.TELEGRAM_TOKEN else None
-
-DDD_ESTADOS = {
-    "11": "São Paulo (Grande SP)", "12": "São Paulo (Vale do Paraíba/Litoral Norte)", "13": "São Paulo (Baixada Santista)",
-    "14": "São Paulo (Bauru/Marília/Jaú)", "15": "São Paulo (Sorocaba/Itapetininga)", "16": "São Paulo (Ribeirão Preto/Franca)",
-    "17": "São Paulo (São José do Rio Preto)", "18": "São Paulo (Presidente Prudente/Araçatuba)", "19": "São Paulo (Campinas/Piracicaba)",
-    "21": "Rio de Janeiro (Capital/Metropolitana)", "22": "Rio de Janeiro (Norte/Região dos Lagos)", "24": "Rio de Janeiro (Serrana/Sul Fluminense)",
-    "27": "Espírito Santo (Vitória/Metropolitana)", "28": "Espírito Santo (Sul)",
-    "31": "Minas Gerais (Belo Horizonte)", "32": "Minas Gerais (Juiz de Fora)", "33": "Minas Gerais (Governador Valadares)",
-    "34": "Minas Gerais (Uberlândia/Triângulo)", "35": "Minas Gerais (Poços de Caldas/Pouso Alegre)", "37": "Minas Gerais (Divinópolis)", "38": "Minas Gerais (Montes Claros)",
-    "41": "Paraná (Curitiba)", "42": "Paraná (Ponta Grossa)", "43": "Paraná (Londrina)", "44": "Paraná (Maringá)", "45": "Paraná (Cascavel)", "46": "Paraná (Francisco Beltrão)",
-    "47": "Santa Catarina (Joinville/Blumenau)", "48": "Santa Catarina (Florianópolis)", "49": "Santa Catarina (Chapecó)",
-    "51": "Rio Grande do Sul (Porto Alegre)", "53": "Rio Grande do Sul (Pelotas)", "54": "Rio Grande do Sul (Caxias do Sul)", "55": "Rio Grande do Sul (Santa Maria)",
-    "61": "Distrito Federal / Goiás (Entorno)", "62": "Goiás (Goiânia)", "64": "Goiás (Rio Verde)",
-    "63": "Tocantins (Palmas)", "65": "Mato Grosso (Cuiabá)", "66": "Mato Grosso (Rondonópolis)", "67": "Mato Grosso do Sul (Campo Grande)",
-    "68": "Acre (Rio Branco)", "69": "Rondônia (Porto Velho)",
-    "71": "Bahia (Salvador)", "73": "Bahia (Ilhéus/Porto Seguro)", "74": "Bahia (Juazeiro)", "75": "Bahia (Feira de Santana)", "77": "Bahia (Vitória da Conquista)",
-    "79": "Sergipe (Aracaju)", "81": "Pernambuco (Recife)", "82": "Alagoas (Maceió)", "83": "Paraíba (João Pessoa)", "84": "Rio Grande do Norte (Natal)",
-    "85": "Ceará (Fortaleza)", "86": "Piauí (Teresina)", "87": "Pernambuco (Petrolina)", "88": "Ceará (Juazeiro do Norte)", "89": "Piauí (Picos)",
-    "91": "Pará (Belém)", "92": "Amazonas (Manaus)", "93": "Pará (Santarém)", "94": "Pará (Marabá)", "95": "Roraima (Boa Vista)",
-    "96": "Amapá (Macapá)", "97": "Amazonas (Coari)", "98": "Maranhão (São Luís)", "99": "Maranhão (Imperatriz)"
-}
+# Habilitado threaded=True para processamento simultâneo sem travar o Flask
+bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=True) if CFG.TELEGRAM_TOKEN else None
 
 def escaping_html(texto: str) -> str:
     return html.escape(str(texto or ""))
@@ -138,30 +100,9 @@ def link_pdf(url: str) -> str:
         return sanitizar_pdf(url)
     return f'<a href="{sanitizar_pdf(seguro)}">{sanitizar_pdf(seguro)}</a>'
 
-def normalizar_termo_hash(termo: str) -> str:
-    limpo = termo.strip().lower()
-    return hashlib.sha256(limpo.encode("utf-8")).hexdigest()
-
-def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
-    try:
-        return bot.reply_to(message, texto, parse_mode=parse_mode, reply_markup=reply_markup)
-    except Exception:
-        try:
-            return bot.send_message(message.chat.id, texto, parse_mode=parse_mode, reply_markup=reply_markup)
-        except Exception:
-            return None
-
-def e_nome_completo(termo: str) -> bool:
-    partes = termo.strip().split()
-    return len(partes) >= 2 and all(len(p) >= 2 for p in partes)
-
-def e_email_valido(termo: str) -> bool:
-    padrao = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(padrao, termo.strip()))
-
 def limpar_comando_string(texto: str) -> str:
     t = texto.strip()
-    t = re.sub(r'^/?[a-zA-Z0-9_]+\s+', '', t)
+    t = re.sub(r'^/?[a-zA-Z0-9_]+\s*', '', t)
     return t.replace("@", "").strip()
 
 def init_db():
@@ -169,16 +110,11 @@ def init_db():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute("PRAGMA journal_mode = WAL")
-        cursor.execute("PRAGMA synchronous = NORMAL")
-        cursor.execute("PRAGMA busy_timeout = 30000")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                created_at TEXT,
-                banned INTEGER DEFAULT 0,
-                ban_reason TEXT,
-                accepted_terms INTEGER DEFAULT 0
+                created_at TEXT
             )
         """)
         cursor.execute("""
@@ -188,215 +124,68 @@ def init_db():
                 target_username TEXT,
                 amount REAL,
                 status TEXT,
-                reminded INTEGER DEFAULT 0,
                 token TEXT,
                 results_json TEXT,
-                pix_code TEXT,
                 query_type TEXT DEFAULT 'username',
                 created_at TEXT
             )
         """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS metrics (
-                key TEXT PRIMARY KEY,
-                value INTEGER DEFAULT 0
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS target_hashes (
-                hash_id TEXT PRIMARY KEY,
-                target_value TEXT,
-                query_type TEXT,
-                results_json TEXT,
-                created_at TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS free_claims (
-                user_id INTEGER PRIMARY KEY,
-                claimed_at TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS coupons (
-                code TEXT PRIMARY KEY,
-                max_uses INTEGER,
-                uses_count INTEGER DEFAULT 0,
-                created_at TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS coupon_redemptions (
-                code TEXT,
-                user_id INTEGER,
-                redeemed_at TEXT,
-                PRIMARY KEY (code, user_id)
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS worker_locks (
-                nome TEXT PRIMARY KEY,
-                expira_em TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS rate_events (
-                user_id INTEGER,
-                timestamp REAL
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                module TEXT,
-                target_hash TEXT,
-                created_at TEXT
-            )
-        """)
-
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_token ON payments(token)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_status_reminded ON payments(status, reminded)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_target_hashes_created ON target_hashes(created_at)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_events_user_ts ON rate_events(user_id, timestamp)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")
-
-        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
-        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
-        
         conn.commit()
         conn.close()
 
 init_db()
 
-def db_execute(query: str, params: tuple = (), fetchone=False, fetchall=False, commit=False):
+def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
     with db_lock:
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute(query, params)
-        res = None
-        if fetchone:
-            res = cursor.fetchone()
-        elif fetchall:
-            res = cursor.fetchall()
+        res = cursor.fetchone() if fetchone else None
         if commit:
             conn.commit()
         conn.close()
         return res
 
-PLATAFORMAS: dict[str, dict[str, Any]] = {
-    "GitHub":       {"url": "https://api.github.com/users/{username}"},
-    "GitLab":       {"url": "https://gitlab.com/api/v4/users?username={username}"},
-    "Codeberg":     {"url": "https://codeberg.org/api/v1/users/{username}"},
-    "Docker Hub":   {"url": "https://hub.docker.com/v2/users/{username}/"},
-    "Reddit":       {"url": "https://www.reddit.com/user/{username}/about.json"},
-    "Lichess":      {"url": "https://lichess.org/api/user/{username}"},
-    "Chess.com":    {"url": "https://api.chess.com/pub/player/{username}"},
-    "Medium":       {"url": "https://medium.com/@{username}"},
-    "SoundCloud":   {"url": "https://soundcloud.com/{username}"},
-    "Linktree":     {"url": "https://linktr.ee/{username}"},
-    "Steam":        {"url": "https://steamcommunity.com/id/{username}"},
+PLATAFORMAS = {
+    "GitHub": "https://api.github.com/users/{username}",
+    "GitLab": "https://gitlab.com/api/v4/users?username={username}",
+    "Codeberg": "https://codeberg.org/api/v1/users/{username}",
+    "Docker Hub": "https://hub.docker.com/v2/users/{username}/",
+    "Reddit": "https://www.reddit.com/user/{username}/about.json",
+    "Lichess": "https://lichess.org/api/user/{username}",
+    "Chess.com": "https://api.chess.com/pub/player/{username}",
+    "Medium": "https://medium.com/@{username}",
+    "Steam": "https://steamcommunity.com/id/{username}",
 }
 
-class OSINTEngineAsync:
-    def __init__(self, max_concurrency: int = 30):
-        self.semaphore = asyncio.Semaphore(max_concurrency)
-        self.cache: dict[str, tuple[float, dict[str, Any]]] = {}
-        self._cache_lock = Lock()
-        self.headers_padrao = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
-        }
+async def consultar_alvo_async(username: str) -> dict[str, Any]:
+    username_limpo = limpar_comando_string(username)
+    resultados = {}
+    
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    async with httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)) as client:
+        tasks = []
+        for nome, url_template in PLATAFORMAS.items():
+            url = url_template.format(username=username_limpo)
+            tasks.append(client.get(url, headers=headers, timeout=1.5, follow_redirects=True))
+        
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for (nome, _), resp in zip(PLATAFORMAS.items(), responses):
+            if isinstance(resp, httpx.Response) and resp.status_code == 200:
+                resultados[nome] = {"exists": True, "url": str(resp.url)}
 
-    async def consultar_plataforma(self, client: httpx.AsyncClient, nome: str, cfg: dict, username: str) -> tuple[str, dict[str, Any]]:
-        url = cfg["url"].format(username=username)
-        async with self.semaphore:
-            try:
-                resp = await client.get(url, headers=self.headers_padrao, timeout=2.0, follow_redirects=True)
-                if resp.status_code == 200:
-                    return nome, {"exists": True, "url": url}
-            except Exception:
-                pass
-            return nome, {"exists": False}
+    encoded_user = urllib.parse.quote(username_limpo)
+    resultados["Google Search (Redes & Perfis)"] = {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded_user}%22"}
+    resultados["Instagram Profile Direct"] = {"exists": True, "url": f"https://www.instagram.com/{encoded_user}/"}
+    resultados["TikTok Profile Direct"] = {"exists": True, "url": f"https://www.tiktok.com/@{encoded_user}"}
+    resultados["X / Twitter Profile Direct"] = {"exists": True, "url": f"https://x.com/{encoded_user}"}
+    resultados["WhatsMyName Username Enum"] = {"exists": True, "url": f"https://whatsmyname.app/?q={encoded_user}"}
+    
+    return resultados
 
-    async def executar_varredura(self, username: str) -> dict[str, Any]:
-        agora = time.time()
-        with self._cache_lock:
-            if username in self.cache:
-                ts, res_cached = self.cache[username]
-                if agora - ts < CFG.CACHE_TTL_SECONDS:
-                    return res_cached
-
-        async with httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=20, max_connections=40)) as client:
-            tasks = [self.consultar_plataforma(client, nome, cfg, username) for nome, cfg in PLATAFORMAS.items()]
-            resultados_raw = await asyncio.gather(*tasks)
-
-        resultados = dict(resultados_raw)
-
-        encoded_user = urllib.parse.quote(username)
-        resultados["Google Search (Redes & Perfis)"] = {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded_user}%22"}
-        resultados["Instagram Profile Direct"] = {"exists": True, "url": f"https://www.instagram.com/{encoded_user}/"}
-        resultados["TikTok Profile Direct"] = {"exists": True, "url": f"https://www.tiktok.com/@{encoded_user}"}
-        resultados["X / Twitter Profile Direct"] = {"exists": True, "url": f"https://x.com/{encoded_user}"}
-        resultados["WhatsMyName Username Enum"] = {"exists": True, "url": f"https://whatsmyname.app/?q={encoded_user}"}
-
-        with self._cache_lock:
-            if len(self.cache) > 2000:
-                self.cache.clear()
-            self.cache[username] = (agora, resultados)
-
-        return resultados
-
-class AsyncLoopThread:
-    def __init__(self):
-        self.loop = asyncio.new_event_loop()
-        self.thread = Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
-
-    def _run_loop(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
-
-    def run(self, coro, timeout: float = 8.0):
-        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result(timeout=timeout)
-
-ASYNC_RUNNER = AsyncLoopThread()
-ENGINE_ASYNC = OSINTEngineAsync()
-
-def executar_varredura_osint(target: str, query_type: str = "username") -> dict[str, dict[str, Any]]:
-    target_limpo = limpar_comando_string(target)
-
-    if query_type == "email":
-        encoded_email = urllib.parse.quote(target_limpo)
-        return {
-            "Have I Been Pwned (Base de Vazamentos)": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
-            "DeHashed CyberIntelligence": {"exists": True, "url": f"https://dehashed.com/search?query={encoded_email}"},
-            "Intelligence X (IntelX)": {"exists": True, "url": f"https://intelx.io/?s={encoded_email}"},
-            "BreachDirectory Engine": {"exists": True, "url": f"https://breachdirectory.org/search?query={encoded_email}"}
-        }
-    elif query_type == "fullname":
-        encoded_name = urllib.parse.quote(f'"{target_limpo}"')
-        return {
-            "Jusbrasil (Processos e Diários)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
-            "Escavador (Publicações Judiciais)": {"exists": True, "url": f"https://www.escavador.com/busca?q={encoded_name}"},
-            "Portal da Transparência Federal": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target_limpo)}"}
-        }
-    elif query_type == "fone":
-        limpo = re.sub(r'\D', '', target_limpo)
-        ddd = limpo[:2] if len(limpo) >= 10 else "N/A"
-        regiao = DDD_ESTADOS.get(ddd, "Região Não Mapeada")
-
-        res = {
-            "WhatsApp Direct Chat": {"exists": True, "url": f"https://wa.me/55{limpo}"},
-            "Truecaller Directory": {"exists": True, "url": f"https://www.truecaller.com/search/br/{limpo}"},
-            "Google Search (Vazamentos)": {"exists": True, "url": f"https://www.google.com/search?q=%22{limpo}%22"}
-        }
-        res["Região Geográfica / UF"] = {"exists": True, "url": "#", "detalhes": regiao}
-        return res
-    else:
-        return ASYNC_RUNNER.run(ENGINE_ASYNC.executar_varredura(target_limpo))
+def executar_varredura(target: str) -> dict[str, Any]:
+    return asyncio.run(consultar_alvo_async(target))
 
 def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     buffer = io.BytesIO()
@@ -441,50 +230,57 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     buffer.seek(0)
     return buffer
 
-def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, resultados: dict) -> str:
+def gerar_painel_gratuito(user_id: int, target: str, resultados: dict) -> str:
     results_json = json.dumps(resultados)
     token_relatorio = secrets.token_urlsafe(16)
-    pid_free = f"free_claim_{user_id}_{secrets.token_hex(6)}"
+    pid_free = f"free_{user_id}_{secrets.token_hex(4)}"
 
     db_execute(
         "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
-        "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?) "
-        "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token, results_json=excluded.results_json",
-        (pid_free, user_id, target, token_relatorio, query_type, results_json, datetime.now(TIMEZONE_BR).isoformat()),
+        "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, 'username', ?)",
+        (pid_free, user_id, target, token_relatorio, results_json, datetime.now(TIMEZONE_BR).isoformat()),
         commit=True
     )
     return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
-def _processar_busca_generica(message, raw_target: str, qtype: str, modulo_nome: str):
+def processar_busca(message, raw_target: str):
     user_id = message.from_user.id
     target = limpar_comando_string(raw_target)
 
     if not target or len(target) < 2:
-        responder_seguro(message, "⚠️ Termo de busca muito curto.")
+        bot.reply_to(message, "⚠️ Termo muito curto.")
         return
 
-    now_str = datetime.now(TIMEZONE_BR).isoformat()
-    db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, now_str), commit=True)
+    db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
-    resultados = executar_varredura_osint(target, query_type=qtype)
+    resultados = executar_varredura(target)
+
+    link_web = gerar_painel_gratuito(user_id, target, resultados)
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🌐 Acessar Painel VIP", url=link_web),
+        InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
+    )
 
     if user_id == CFG.ADMIN_ID:
-        link_web = gerar_painel_gratuito_membro(user_id, target, qtype, resultados)
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            InlineKeyboardButton("🌐 Acessar Seu Painel VIP (ADMIN)", url=link_web),
-            InlineKeyboardButton("📄 Baixar Relatório PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
-        )
         bot.send_message(
             message.chat.id,
             f"👑 **MODO ADMINISTRADOR - CONSULTA LIBERADA**\n\n"
             f"• **Alvo:** `{target}`\n"
-            f"• **Modalidade:** {qtype.upper()}\n\n"
+            f"• **Modalidade:** USERNAME\n\n"
             f"Relatório processado e disponível abaixo:",
             reply_markup=markup,
             parse_mode="Markdown"
         )
-        return
+    else:
+        bot.send_message(
+            message.chat.id,
+            f"🎯 **CONSULTA OSINT CONCLUÍDA**\n\n"
+            f"• **Alvo:** `{target}`\n\n"
+            f"Clique abaixo para ver o painel:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
 
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
@@ -492,33 +288,17 @@ if bot:
         user_id = message.from_user.id
         raw_first = escaping_html(message.from_user.first_name or "Usuario")
         user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
-        
-        now_str = datetime.now(TIMEZONE_BR).isoformat()
-        db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, now_str), commit=True)
+
+        db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v33.0 VIP ⚡️\n"
+            f"👑 KRONOS INTEL OSINT BOT v35.5 VIP ⚡️\n"
             f"─────────────────────────────────────────────\n"
-            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
-            f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
-            f"Membros do nosso canal oficial possuem direito a 1 consulta totalmente grátis!\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética!\n\n"
             f"🛠️ MÓDULOS DE CONSULTA DISPONÍVEIS:\n\n"
             f"1️⃣ 👤 USERNAME / REDES SOCIAIS:\n"
-            f"   • /user alvo123\n\n"
-            f"2️⃣ 📧 CONSULTA DE E-MAIL & VAZAMENTOS:\n"
-            f"   • /email exemplo@dominio.com\n\n"
-            f"3️⃣ ⚖️ NOME COMPLETO (ATALHOS JUDICIAIS):\n"
-            f"   • /nome João da Silva\n\n"
-            f"4️⃣ 📱 TELEFONE & WHATSAPP:\n"
-            f"   • /fone 11999998888\n\n"
-            f"5️⃣ 🏢 CNPJ & REGISTRO EMPRESARIAL:\n"
-            f"   • /cnpj 00000000000191\n\n"
-            f"6️⃣ 🚗 CONSULTA DE VEÍCULOS (PLACA):\n"
-            f"   • /placa ABC1D23\n\n"
-            f"7️⃣ 🌐 DOMÍNIOS & INFRAESTRUTURA WEB:\n"
-            f"   • /dominio site.com\n\n"
-            f"🎟️ CUPOM DE DESCONTO / CORTESIA:\n"
-            f"   • /resgatar CODIGO\n\n"
+            f"   • `/user alvo123`\n"
+            f"   • `/admin_user alvo123` (Admin)\n\n"
             f"📢 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}\n"
             f"💬 Suporte Direto: @{CFG.SUPORTE_USERNAME}"
         )
@@ -528,23 +308,23 @@ if bot:
             InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
             InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
         )
-        bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
+        bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup, parse_mode="Markdown")
 
     @bot.message_handler(commands=['admin_user'])
     def handle_admin_user_cmd(message):
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) >= 2:
-            _processar_busca_generica(message, partes[1], "username", "Username VIP")
+            processar_busca(message, partes[1])
         else:
-            responder_seguro(message, "⚠️ Uso: `/admin_user <username>`", parse_mode="Markdown")
+            bot.reply_to(message, "⚠️ Uso correto: `/admin_user <username>`", parse_mode="Markdown")
 
     @bot.message_handler(commands=['user'])
     def handle_user_cmd(message):
         partes = message.text.strip().split(maxsplit=1)
         if len(partes) >= 2:
-            _processar_busca_generica(message, partes[1], "username", "Username (/user)")
+            processar_busca(message, partes[1])
         else:
-            responder_seguro(message, "⚠️ Uso: `/user <username>`", parse_mode="Markdown")
+            bot.reply_to(message, "⚠️ Uso correto: `/user <username>`", parse_mode="Markdown")
 
     @bot.message_handler(func=lambda message: True)
     def handle_catch_all(message):
@@ -552,7 +332,81 @@ if bot:
             return
         target = limpar_comando_string(message.text)
         if len(target) >= 2:
-            _processar_busca_generica(message, target, "username", "Busca Direta")
+            processar_busca(message, target)
+
+@app.route("/relatorio/<token>")
+def ver_relatorio_web(token):
+    p = db_execute("SELECT target_username, results_json, created_at FROM payments WHERE token = ?", (token,), fetchone=True)
+    if not p:
+        return "Relatório não encontrado ou expirado.", 404
+
+    target, results_json_str, created_at = p[0], p[1], p[2]
+    try:
+        results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
+    except Exception:
+        results_json = {}
+
+    encontrados = []
+    if isinstance(results_json, dict):
+        for k, v in results_json.items():
+            if isinstance(v, dict) and v.get("exists") is True and v.get("url") != "#":
+                encontrados.append({"nome": k, "url": v.get("url")})
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <title>Kronos Intel — Relatório OSINT ({target})</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <style>
+            body {{ background-color: #0f172a; color: #f8fafc; font-family: sans-serif; padding: 20px; }}
+            .card-custom {{ background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
+            .btn-link-custom {{ background: #334155; color: #38bdf8; text-decoration: none; padding: 10px 15px; border-radius: 8px; display: block; margin-bottom: 10px; }}
+            .btn-link-custom:hover {{ background: #475569; color: #f8fafc; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="card-custom">
+                <h2>🔎 Relatório OSINT: {target}</h2>
+                <p class="text-muted">Data: {created_at}</p>
+            </div>
+            <div class="card-custom">
+                <h4>Fontes e Redes Localizadas:</h4>
+                <div class="mt-3">
+    """
+    for item in encontrados:
+        html_content += f'<a href="{item["url"]}" target="_blank" class="btn-link-custom">🔗 {item["nome"]} — {item["url"]}</a>'
+    
+    html_content += """
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html_content)
+
+@app.route("/download/pdf/<token>")
+def download_pdf(token):
+    p = db_execute("SELECT target_username, results_json FROM payments WHERE token = ?", (token,), fetchone=True)
+    if not p:
+        return "Relatório não encontrado.", 404
+
+    target, results_json_str = p[0], p[1]
+    try:
+        results_json = json.loads(results_json_str) if isinstance(results_json_str, str) else results_json_str
+    except Exception:
+        results_json = {}
+    
+    pdf_buf = gerar_pdf_osint(target, results_json)
+    return send_file(
+        pdf_buf,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"Relatorio_VIP_{target}.pdf"
+    )
 
 @app.route(f"/telegram/{CFG.TELEGRAM_SECRET_TOKEN}", methods=["POST"])
 def telegram_webhook():
@@ -565,7 +419,7 @@ def telegram_webhook():
             bot.process_new_updates([update])
             return jsonify({"status": "ok"}), 200
     except Exception as err:
-        logger.exception("Erro no webhook do Telegram: %s", str(err))
+        logger.exception("Erro no webhook: %s", str(err))
     return jsonify({"status": "ok"}), 200
 
 @app.route("/healthz")
@@ -574,7 +428,7 @@ def healthz():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Service Active.", 200
+    return "Kronos Intel OSINT Active.", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=CFG.PORT)
