@@ -1,9 +1,7 @@
 """
-Kronos Intel OSINT Bot v35.5 VIP
-- Correção Crítica do Webhook (Processamento Não-Bloqueante)
-- Resposta Instantânea para /start, /user e /admin_user
-- Motor OSINT Assíncrono com Timeout Seguro
-- Painel Web e Download de PDF VIP Ativo
+Kronos Intel OSINT Bot v35.6 VIP
+- Processamento assíncrono em Thread separada (não trava o Flask/Render)
+- Resposta instantânea de Webhook 200 OK
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -11,10 +9,9 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import hashlib
 import html
-import hmac
 import io
 import json
 import logging
@@ -23,13 +20,12 @@ import re
 import secrets
 import sqlite3
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 import urllib.parse
 from zoneinfo import ZoneInfo
-from threading import Lock
+from threading import Lock, Thread
 
 import httpx
-import mercadopago
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from flask import Flask, jsonify, request, render_template_string, send_file
@@ -51,28 +47,15 @@ def _env_int(key: str, default: int) -> int:
     except ValueError:
         return default
 
-def _env_float(key: str, default: float) -> float:
-    try:
-        return float(os.getenv(key, str(default)))
-    except ValueError:
-        return default
-
 @dataclass
 class Config:
-    TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
+    TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wlA")
     ADMIN_ID: int = _env_int("ADMIN_ID", 5041637922)
-    CANAL_PRINCIPAL_ID: int = _env_int("CANAL_PRINCIPAL_ID", -1003802363624)
-    LOG_GROUP_ID: int = _env_int("GRUPO_LOGS_ID", -1003986408630)
     CANAL_TAG_PUBLICO: str = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
-    BOT_USERNAME: str = os.getenv("BOT_USERNAME", "KronosSearchbot")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
-    
-    MERCADOPAGO_TOKEN: str = os.getenv("MERCADOPAGO_TOKEN", "")
-    PRECO_PADRAO: float = _env_float("PRECO_PADRAO", 3.90)
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
     PORT: int = _env_int("PORT", 5000)
-    CACHE_TTL_SECONDS: int = _env_int("CACHE_TTL_SECONDS", 900)
     TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "secret_token_kronos")
 
 CFG = Config()
@@ -83,9 +66,7 @@ app.config['SECRET_KEY'] = secrets.token_hex(16)
 TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 db_lock = Lock()
 
-sdk = mercadopago.SDK(CFG.MERCADOPAGO_TOKEN) if CFG.MERCADOPAGO_TOKEN else None
-# Habilitado threaded=True para processamento simultâneo sem travar o Flask
-bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=True) if CFG.TELEGRAM_TOKEN else None
+bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=False) if CFG.TELEGRAM_TOKEN else None
 
 def escaping_html(texto: str) -> str:
     return html.escape(str(texto or ""))
@@ -110,7 +91,6 @@ def init_db():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute("PRAGMA journal_mode = WAL")
-
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -161,14 +141,10 @@ PLATAFORMAS = {
 async def consultar_alvo_async(username: str) -> dict[str, Any]:
     username_limpo = limpar_comando_string(username)
     resultados = {}
-    
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
     async with httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)) as client:
-        tasks = []
-        for nome, url_template in PLATAFORMAS.items():
-            url = url_template.format(username=username_limpo)
-            tasks.append(client.get(url, headers=headers, timeout=1.5, follow_redirects=True))
-        
+        tasks = [client.get(url_template.format(username=username_limpo), headers=headers, timeout=1.5, follow_redirects=True) for nome, url_template in PLATAFORMAS.items()]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
         
         for (nome, _), resp in zip(PLATAFORMAS.items(), responses):
@@ -187,7 +163,7 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
 def executar_varredura(target: str) -> dict[str, Any]:
     return asyncio.run(consultar_alvo_async(target))
 
-def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
+def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]]) -> io.BytesIO:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     story = []
@@ -207,7 +183,6 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
 
     meta_data = [
         [Paragraph("<b>ALVO ANALISADO:</b>", cell_style), Paragraph(f"<b>{sanitizar_pdf(target)}</b>", cell_style)],
-        [Paragraph("<b>MÓDULO DE BUSCA:</b>", cell_style), Paragraph(query_type.upper(), cell_style)],
         [Paragraph("<b>DATA DA AUDITORIA:</b>", cell_style), Paragraph(data_atual, cell_style)]
     ]
     t_meta = Table(meta_data, colWidths=[160, 380])
@@ -248,7 +223,7 @@ def processar_busca(message, raw_target: str):
     target = limpar_comando_string(raw_target)
 
     if not target or len(target) < 2:
-        bot.reply_to(message, "⚠️ Termo muito curto.")
+        bot.reply_to(message, "⚠️ Termo de busca muito curto.")
         return
 
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
@@ -292,9 +267,9 @@ if bot:
         db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v35.5 VIP ⚡️\n"
+            f"👑 KRONOS INTEL OSINT BOT v35.6 VIP ⚡️\n"
             f"─────────────────────────────────────────────\n"
-            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética!\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo à sua central de inteligência cibernética!\n\n"
             f"🛠️ MÓDULOS DE CONSULTA DISPONÍVEIS:\n\n"
             f"1️⃣ 👤 USERNAME / REDES SOCIAIS:\n"
             f"   • `/user alvo123`\n"
@@ -408,6 +383,14 @@ def download_pdf(token):
         download_name=f"Relatorio_VIP_{target}.pdf"
     )
 
+def _processar_update_async(update_json):
+    try:
+        update = Update.de_json(update_json)
+        if bot:
+            bot.process_new_updates([update])
+    except Exception as e:
+        logger.error(f"Erro ao processar mensagem do Telegram: {e}")
+
 @app.route(f"/telegram/{CFG.TELEGRAM_SECRET_TOKEN}", methods=["POST"])
 def telegram_webhook():
     if not bot:
@@ -415,9 +398,7 @@ def telegram_webhook():
     try:
         data = request.get_json(force=True, silent=True)
         if data:
-            update = Update.de_json(data)
-            bot.process_new_updates([update])
-            return jsonify({"status": "ok"}), 200
+            Thread(target=_processar_update_async, args=(data,), daemon=True).start()
     except Exception as err:
         logger.exception("Erro no webhook: %s", str(err))
     return jsonify({"status": "ok"}), 200
