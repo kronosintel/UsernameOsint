@@ -1,8 +1,9 @@
 """
-Kronos Intel OSINT Bot v32.0 VIP
+Kronos Intel OSINT Bot v33.0 VIP
+- Etapa 5: Análise Enriquecida & Conteúdo Denso (BrasilAPI para CNPJ, DNS/MX para Domínios, Anatel/DDD para Telefones)
 - Etapa 4: Painel Admin Avançado (Ban/Unban, Cupons Promocionais, Broadcast, Userinfo)
 - Notificação de Logs em Tempo Real no Grupo de Logs (Preservando LGPD)
-- Módulos Administrativos VIP e Gerador de Relatórios em PDF (ReportLab) e Painel Web
+- Gerador de Relatórios Executivos em PDF (ReportLab) e Painel Web Interativo
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import time
 import urllib.parse
@@ -48,7 +50,7 @@ app.config.update(
     MAX_CONTENT_LENGTH=1024 * 1024,  # 1 MB
 )
 
-DEFAULT_TIMEOUT = 3.0
+DEFAULT_TIMEOUT = 4.0
 PORT = int(os.getenv("PORT", "5000"))
 PRECO_PADRAO = 3.90
 DB_FILE = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
@@ -78,6 +80,27 @@ _hist_rate_limit: dict[int, list[float]] = {}
 _rate_limit_lock = Lock()
 _orphan_alerts_sent: set[str] = set()
 _orphan_lock = Lock()
+
+DDD_ESTADOS = {
+    "11": "São Paulo (Grande SP)", "12": "São Paulo (Vale do Paraíba/Litoral Norte)", "13": "São Paulo (Baixada Santista)",
+    "14": "São Paulo (Bauru/Marília/Jaú)", "15": "São Paulo (Sorocaba/Itapetininga)", "16": "São Paulo (Ribeirão Preto/Franca)",
+    "17": "São Paulo (São José do Rio Preto)", "18": "São Paulo (Presidente Prudente/Araçatuba)", "19": "São Paulo (Campinas/Piracicaba)",
+    "21": "Rio de Janeiro (Capital/Metropolitana)", "22": "Rio de Janeiro (Norte/Região dos Lagos)", "24": "Rio de Janeiro (Serrana/Sul Fluminense)",
+    "27": "Espírito Santo (Vitória/Metropolitana)", "28": "Espírito Santo (Sul)",
+    "31": "Minas Gerais (Belo Horizonte)", "32": "Minas Gerais (Juiz de Fora)", "33": "Minas Gerais (Governador Valadares)",
+    "34": "Minas Gerais (Uberlândia/Triângulo)", "35": "Minas Gerais (Poços de Caldas/Pouso Alegre)", "37": "Minas Gerais (Divinópolis)", "38": "Minas Gerais (Montes Claros)",
+    "41": "Paraná (Curitiba)", "42": "Paraná (Ponta Grossa)", "43": "Paraná (Londrina)", "44": "Paraná (Maringá)", "45": "Paraná (Cascavel)", "46": "Paraná (Francisco Beltrão)",
+    "47": "Santa Catarina (Joinville/Blumenau)", "48": "Santa Catarina (Florianópolis)", "49": "Santa Catarina (Chapecó)",
+    "51": "Rio Grande do Sul (Porto Alegre)", "53": "Rio Grande do Sul (Pelotas)", "54": "Rio Grande do Sul (Caxias do Sul)", "55": "Rio Grande do Sul (Santa Maria)",
+    "61": "Distrito Federal / Goiás (Entorno)", "62": "Goiás (Goiânia)", "64": "Goiás (Rio Verde)",
+    "63": "Tocantins (Palmas)", "65": "Mato Grosso (Cuiabá)", "66": "Mato Grosso (Rondonópolis)", "67": "Mato Grosso do Sul (Campo Grande)",
+    "68": "Acre (Rio Branco)", "69": "Rondônia (Porto Velho)",
+    "71": "Bahia (Salvador)", "73": "Bahia (Ilhéus/Porto Seguro)", "74": "Bahia (Juazeiro)", "75": "Bahia (Feira de Santana)", "77": "Bahia (Vitória da Conquista)",
+    "79": "Sergipe (Aracaju)", "81": "Pernambuco (Recife)", "82": "Alagoas (Maceió)", "83": "Paraíba (João Pessoa)", "84": "Rio Grande do Norte (Natal)",
+    "85": "Ceará (Fortaleza)", "86": "Piauí (Teresina)", "87": "Pernambuco (Petrolina)", "88": "Ceará (Juazeiro do Norte)", "89": "Piauí (Picos)",
+    "91": "Pará (Belém)", "92": "Amazonas (Manaus)", "93": "Pará (Santarém)", "94": "Pará (Marabá)", "95": "Roraima (Boa Vista)",
+    "96": "Amapá (Macapá)", "97": "Amazonas (Coari)", "98": "Maranhão (São Luís)", "99": "Maranhão (Imperatriz)"
+}
 
 def limite_busca_ok(user_id: int, maximo: int = 6, janela_segundos: int = 3600) -> bool:
     if user_id == ADMIN_ID:
@@ -156,18 +179,6 @@ def init_db():
                 PRIMARY KEY (code, user_id)
             )
         """)
-        
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_searches', 0)")
-        cursor.execute("INSERT OR IGNORE INTO metrics (key, value) VALUES ('total_reports', 0)")
         conn.commit()
         conn.close()
 
@@ -439,48 +450,96 @@ class FastOSINTChecker:
                     pass
         return self.results
 
+def buscar_dados_cnpj_brasilapi(cnpj: str) -> dict[str, Any]:
+    try:
+        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
+        resp = requests.get(url, timeout=5.0)
+        if resp.status_code == 200:
+            d = resp.json()
+            qsa_list = [f"{s.get('nome_socio', '')} ({s.get('qualificacao_socio', '')})" for s in d.get("qsa", [])]
+            return {
+                "Razão Social": d.get("razao_social"),
+                "Nome Fantasia": d.get("nome_fantasia") or "Não Informado",
+                "Situação Cadastral": d.get("descricao_situacao_cadastral"),
+                "Data de Abertura": d.get("data_inicio_atividade"),
+                "Capital Social": f"R$ {d.get('capital_social', 0):,.2f}",
+                "Atividade Principal": d.get("cnae_fiscal_descricao"),
+                "Endereço": f"{d.get('logradouro')}, {d.get('numero')} - {d.get('bairro')}, {d.get('municipio')}/{d.get('uf')} (CEP: {d.get('cep')})",
+                "Quadro Societário (QSA)": ", ".join(qsa_list) if qsa_list else "Sem sócios declarados"
+            }
+    except Exception as e:
+        logger.error("Erro na BrasilAPI CNPJ: %s", str(e))
+    return {}
+
+def analisar_infraestrutura_dominio(dominio: str) -> dict[str, Any]:
+    dados = {}
+    try:
+        ip = socket.gethostbyname(dominio)
+        dados["Endereço IP Servidor"] = ip
+    except Exception:
+        dados["Endereço IP Servidor"] = "Indisponível"
+
+    try:
+        resp = requests.get(f"https://dns.google/resolve?name={dominio}&type=MX", timeout=4.0)
+        if resp.status_code == 200:
+            mxs = [item.get("data") for item in resp.json().get("Answer", []) if "data" in item]
+            dados["Servidores de E-mail (MX)"] = ", ".join(mxs) if mxs else "Nenhum registro MX localizado"
+    except Exception:
+        dados["Servidores de E-mail (MX)"] = "Consulta Falhou"
+
+    return dados
+
 def executar_varredura_osint(target: str, query_type: str = "username") -> dict[str, dict[str, Any]]:
     if query_type == "email":
         encoded_email = urllib.parse.quote(target)
         return {
-            "Have I Been Pwned": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
-            "DeHashed Base": {"exists": True, "url": f"https://dehashed.com/search?query={encoded_email}"},
+            "Have I Been Pwned (Base de Vazamentos)": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
+            "DeHashed CyberIntelligence": {"exists": True, "url": f"https://dehashed.com/search?query={encoded_email}"},
             "Intelligence X (IntelX)": {"exists": True, "url": f"https://intelx.io/?s={encoded_email}"},
-            "BreachDirectory": {"exists": True, "url": f"https://breachdirectory.org/search?query={encoded_email}"},
-            "Leak-Lookup Engine": {"exists": True, "url": f"https://leak-lookup.com/search?type=email&query={encoded_email}"},
+            "BreachDirectory Engine": {"exists": True, "url": f"https://breachdirectory.org/search?query={encoded_email}"},
             "Scylla.sh Data Leak": {"exists": True, "url": f"https://scylla.sh/search?q=email:{encoded_email}"},
-            "Hudson Rock Cybercrime": {"exists": True, "url": f"https://cavalier.hudsonrock.com/api/v1/osint-tools/search-by-email?email={encoded_email}"}
+            "Hudson Rock Crime Database": {"exists": True, "url": f"https://cavalier.hudsonrock.com/api/v1/osint-tools/search-by-email?email={encoded_email}"}
         }
     elif query_type == "fullname":
         encoded_name = urllib.parse.quote(f'"{target}"')
         return {
-            "Jusbrasil (Processos)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
-            "Escavador (Diários)": {"exists": True, "url": f"https://www.escavador.com/busca?q={encoded_name}"},
-            "Jusfy / Diários Judiciais": {"exists": True, "url": f"https://www.google.com/search?q=site:jusbrasil.com.br+OR+site:escavador.com+{encoded_name}"},
-            "Portal Transparência": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target)}"},
-            "Diário Oficial União": {"exists": True, "url": f"https://www.google.com/search?q=site:in.gov.br+{encoded_name}"},
-            "Certidões e Registros": {"exists": True, "url": f"https://www.google.com/search?q=%22certidao%22+{encoded_name}"},
-            "Google Acadêmico": {"exists": True, "url": f"https://scholar.google.com.br/scholar?q={encoded_name}"},
-            "Notícias / Citações": {"exists": True, "url": f"https://www.google.com/search?q={encoded_name}&tbm=nws"},
+            "Jusbrasil (Processos e Diários)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
+            "Escavador (Publicações Judiciais)": {"exists": True, "url": f"https://www.escavador.com/busca?q={encoded_name}"},
+            "Portal da Transparência Federal": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target)}"},
+            "Diário Oficial da União (IN.gov)": {"exists": True, "url": f"https://www.google.com/search?q=site:in.gov.br+{encoded_name}"},
+            "Google Acadêmico & Publicações": {"exists": True, "url": f"https://scholar.google.com.br/scholar?q={encoded_name}"},
         }
     elif query_type == "fone":
         limpo = re.sub(r'\D', '', target)
-        return {
+        ddd = limpo[:2] if len(limpo) >= 10 else "N/A"
+        regiao = DDD_ESTADOS.get(ddd, "Região Não Mapeada")
+
+        res = {
+            "Região & DDD": {"exists": True, "url": f"https://www.google.com/search?q=DDD+{ddd}"},
             "WhatsApp Direct Chat": {"exists": True, "url": f"https://wa.me/55{limpo}"},
             "Sync.ME Caller ID": {"exists": True, "url": f"https://sync.me/search/?number=55{limpo}"},
             "Truecaller Directory": {"exists": True, "url": f"https://www.truecaller.com/search/br/{limpo}"},
             "QualEmpresa Operadora": {"exists": True, "url": f"https://www.qualempresa.com.br/telefone/{limpo}"},
             "Google Search (Vazamentos)": {"exists": True, "url": f"https://www.google.com/search?q=%22{limpo}%22"}
         }
+        res["Região Geográfica / UF"] = {"exists": True, "url": "#", "detalhes": regiao}
+        return res
+
     elif query_type == "cnpj":
         limpo = re.sub(r'\D', '', target)
-        return {
+        dados_reais = buscar_dados_cnpj_brasilapi(limpo)
+
+        res = {
             "Receita Federal (Comprovante)": {"exists": True, "url": f"https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp?cnpj={limpo}"},
             "CNPJ.biz Consultas": {"exists": True, "url": f"https://cnpj.biz/{limpo}"},
             "Casa dos Dados (QSA)": {"exists": True, "url": f"https://casadosdados.com.br/solucao/cnpj/{limpo}"},
             "Transparência CC Empresa": {"exists": True, "url": f"https://transparencia.cc/cnpj/{limpo}"},
             "Jusbrasil Societário": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={limpo}"}
         }
+        if dados_reais:
+            res["Dados Oficiais Receita Federal"] = {"exists": True, "url": "#", "detalhes": dados_reais}
+        return res
+
     elif query_type == "placa":
         placa = target.upper().replace("-", "")
         return {
@@ -491,13 +550,18 @@ def executar_varredura_osint(target: str, query_type: str = "username") -> dict[
         }
     elif query_type == "dominio":
         dom = target.lower().replace("https://", "").replace("http://", "").strip('/')
-        return {
-            "Whois Registro.br / ICANN": {"exists": True, "url": f"https://whois.domaintools.com/{dom}"},
+        dados_dns = analisar_infraestrutura_dominio(dom)
+
+        res = {
+            "Whois ICANN / DomainTools": {"exists": True, "url": f"https://whois.domaintools.com/{dom}"},
             "DNS Dumpster Infra": {"exists": True, "url": f"https://dnsdumpster.com/"},
-            "SecurityTrails History": {"exists": True, "url": f"https://securitytrails.com/domain/{dom}/dns"},
+            "SecurityTrails DNS History": {"exists": True, "url": f"https://securitytrails.com/domain/{dom}/dns"},
             "Shodan Host Search": {"exists": True, "url": f"https://www.shodan.io/search?query={dom}"},
             "Wayback Machine Archive": {"exists": True, "url": f"https://web.archive.org/web/*/{dom}"}
         }
+        if dados_dns:
+            res["Análise de DNS & Infraestrutura"] = {"exists": True, "url": "#", "detalhes": dados_dns}
+        return res
     else:
         return FastOSINTChecker(target).run()
 
@@ -517,48 +581,11 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     story = []
 
     styles = getSampleStyleSheet()
-    
-    title_style = ParagraphStyle(
-        'TitleStyle',
-        parent=styles['Heading1'],
-        fontName='Helvetica-Bold',
-        fontSize=20,
-        textColor=colors.HexColor('#38bdf8'),
-        spaceAfter=4
-    )
-    
-    subtitle_style = ParagraphStyle(
-        'SubTitleStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=10,
-        textColor=colors.HexColor('#9ca3af'),
-        spaceAfter=15
-    )
-
-    header_table_style = ParagraphStyle(
-        'HeaderTableStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=9,
-        textColor=colors.HexColor('#ffffff')
-    )
-
-    cell_style = ParagraphStyle(
-        'CellStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        textColor=colors.HexColor('#374151')
-    )
-
-    cell_url_style = ParagraphStyle(
-        'CellUrlStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=8,
-        textColor=colors.HexColor('#2563eb')
-    )
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=20, textColor=colors.HexColor('#38bdf8'), spaceAfter=4)
+    subtitle_style = ParagraphStyle('SubTitleStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#9ca3af'), spaceAfter=15)
+    header_table_style = ParagraphStyle('HeaderTableStyle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, textColor=colors.HexColor('#ffffff'))
+    cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#374151'))
+    cell_url_style = ParagraphStyle('CellUrlStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=8, textColor=colors.HexColor('#2563eb'))
 
     story.append(Paragraph("KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT", title_style))
     story.append(Paragraph("SISTEMA DE INTELIGÊNCIA CIBERNÉTICA E AUDITORIA DIGITAL VIP", subtitle_style))
@@ -566,13 +593,8 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
 
     data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
     titulos_map = {
-        "email": "CONSULTA DE E-MAIL & VAZAMENTOS",
-        "fullname": "BUSCA JUDICIAL & REGISTROS",
-        "fone": "TELEFONE & WHATSAPP",
-        "cnpj": "REGISTRO EMPRESARIAL (CNPJ)",
-        "placa": "REGISTRO DE VEÍCULOS (PLACA)",
-        "dominio": "INFRAESTRUTURA DE DOMÍNIO",
-        "username": "USERNAME / REDES SOCIAIS"
+        "email": "CONSULTA DE E-MAIL & VAZAMENTOS", "fullname": "BUSCA JUDICIAL & REGISTROS", "fone": "TELEFONE & WHATSAPP",
+        "cnpj": "REGISTRO EMPRESARIAL (CNPJ)", "placa": "REGISTRO DE VEÍCULOS (PLACA)", "dominio": "INFRAESTRUTURA DE DOMÍNIO", "username": "USERNAME / REDES SOCIAIS"
     }
 
     meta_data = [
@@ -582,40 +604,25 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
         [Paragraph("<b>INTEGRIDADE HASH SHA-256:</b>", cell_style), Paragraph(hashlib.sha256(f"{target}_{data_atual}".encode()).hexdigest()[:24] + "...", cell_style)],
     ]
     t_meta = Table(meta_data, colWidths=[160, 380])
-    t_meta.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#f3f4f6')),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#e5e7eb')),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
+    t_meta.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#f3f4f6')), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#e5e7eb')), ('PADDING', (0,0), (-1,-1), 6)]))
     story.append(t_meta)
     story.append(Spacer(1, 15))
 
-    story.append(Paragraph("<b>1. FONTE DE DADOS E PLATAFORMAS MAPEADAS</b>", styles['Heading2']))
+    story.append(Paragraph("<b>1. DADOS DE INTELIGÊNCIA EXTRAÍDOS</b>", styles['Heading2']))
     story.append(Spacer(1, 6))
 
-    table_data = [[Paragraph("PLATAFORMA / FONTE", header_table_style), Paragraph("STATUS / LINK DIRETO", header_table_style)]]
-    
-    encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
+    table_data = [[Paragraph("PLATAFORMA / CAMPO", header_table_style), Paragraph("INFORMAÇÃO / LINK DIRETO", header_table_style)]]
 
-    if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
-        for p in resultados:
-            v = resultados[p]
-            url_str = v.get('url', '') if isinstance(v, dict) else str(v)
-            table_data.append([
-                Paragraph(f"<b>{p}</b>", cell_style),
-                Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)
-            ])
-    else:
-        if encontrados:
-            for p in encontrados:
-                v = resultados[p]
-                url_str = v.get("url", PLATFORM_URLS.get(p, "").format(username=target)) if isinstance(v, dict) else str(v)
-                table_data.append([
-                    Paragraph(f"<b>{p}</b>", cell_style),
-                    Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)
-                ])
-        else:
-            table_data.append([Paragraph("Nenhum perfil público identificado", cell_style), Paragraph("-", cell_style)])
+    for p, v in resultados.items():
+        if isinstance(v, dict):
+            if "detalhes" in v and isinstance(v["detalhes"], dict):
+                for sub_k, sub_v in v["detalhes"].items():
+                    table_data.append([Paragraph(f"<b>{sub_k}</b>", cell_style), Paragraph(str(sub_v), cell_style)])
+            elif "detalhes" in v:
+                table_data.append([Paragraph(f"<b>{p}</b>", cell_style), Paragraph(str(v["detalhes"]), cell_style)])
+            elif v.get("exists") is True:
+                url_str = v.get('url', '')
+                table_data.append([Paragraph(f"<b>{p}</b>", cell_style), Paragraph(f"<a href='{url_str}'>{url_str}</a>", cell_url_style)])
 
     t_results = Table(table_data, colWidths=[180, 360])
     t_results.setStyle(TableStyle([
@@ -635,56 +642,29 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     return buffer
 
 def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
-    encontrados = [p for p, data in resultados.items() if isinstance(data, dict) and data.get("exists") is True]
     data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
-
-    titulos_map = {
-        "email": "CONSULTA DE E-MAIL",
-        "fullname": "BUSCA JUDICIAL / NOME",
-        "fone": "TELEFONE & WHATSAPP",
-        "cnpj": "REGISTRO EMPRESARIAL (CNPJ)",
-        "placa": "REGISTRO DE VEÍCULOS (PLACA)",
-        "dominio": "INFRAESTRUTURA DE DOMÍNIO",
-        "username": "USERNAME / REDES SOCIAIS"
-    }
-
     corpo = f"""===================================================================
                    KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT
 ===================================================================
 ALVO ANALISADO: {target}
-TIPO DE CONSULTA: {titulos_map.get(query_type, 'GERAL')}
+TIPO DE CONSULTA: {query_type.upper()}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v32.0
+SISTEMA: Kronos Engine v33.0 VIP
 ===================================================================
-"""
-    if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
-        corpo += f"""1. BASES DE CONSULTA E ATALHOS MAPEADOS
+1. DADOS DE INTELIGÊNCIA E BASES MAPEADAS
 -------------------------------------------------------------------
 """
-        for p in resultados:
-            v = resultados[p]
-            url_str = v.get('url', '') if isinstance(v, dict) else str(v)
-            corpo += f"[+] {p.ljust(28)} : {url_str}\n"
-
-    else:
-        corpo += f"""1. PERFIS E PLATAFORMAS LOCALIZADAS
--------------------------------------------------------------------
-"""
-        if encontrados:
-            for p in encontrados:
-                v = resultados[p]
-                url = v.get("url", PLATFORM_URLS.get(p, "").format(username=target)) if isinstance(v, dict) else str(v)
-                corpo += f"[+] {p.ljust(25)} : {url}\n"
-        else:
-            corpo += "[-] Nenhuma rede social pública identificada para este nome de usuário.\n"
-
-        buscadores = obter_links_buscadores(target)
-        corpo += f"""
-2. PRESENÇA DIGITAL E MENÇÕES EM BUSCADORES
--------------------------------------------------------------------
-"""
-        for nome_b, url_b in buscadores.items():
-            corpo += f"[+] {nome_b.ljust(28)} : {url_b}\n"
+    for p, v in resultados.items():
+        if isinstance(v, dict):
+            if "detalhes" in v and isinstance(v["detalhes"], dict):
+                corpo += f"\n[+] --- {p.upper()} ---\n"
+                for sub_k, sub_v in v["detalhes"].items():
+                    corpo += f"    • {sub_k.ljust(25)} : {sub_v}\n"
+            elif "detalhes" in v:
+                corpo += f"[+] {p.ljust(28)} : {v['detalhes']}\n"
+            elif v.get("exists") is True:
+                url_str = v.get('url', '')
+                corpo += f"[+] {p.ljust(28)} : {url_str}\n"
 
     corpo += """
 ===================================================================
@@ -951,23 +931,6 @@ HTML_DASHBOARD_TEMPLATE = """
             transform: translateY(-2px);
         }
 
-        .btn-dork {
-            background: rgba(56, 189, 248, 0.06);
-            border: 1px solid rgba(56, 189, 248, 0.2);
-            color: var(--accent-cyan);
-            padding: 12px 18px;
-            border-radius: 10px;
-            text-decoration: none;
-            display: flex;
-            align-items: center;
-            transition: all 0.2s ease;
-        }
-
-        .btn-dork:hover {
-            background: rgba(56, 189, 248, 0.25);
-            color: #fff;
-        }
-
         .code-tag {
             font-family: monospace;
             color: var(--accent-cyan);
@@ -977,6 +940,18 @@ HTML_DASHBOARD_TEMPLATE = """
             background-color: rgba(52, 211, 153, 0.2);
             color: var(--accent-green);
             border: 1px solid var(--accent-green);
+        }
+
+        .info-label {
+            color: #9ca3af;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .info-value {
+            color: #f9fafb;
+            font-weight: 600;
         }
     </style>
 </head>
@@ -1003,46 +978,48 @@ HTML_DASHBOARD_TEMPLATE = """
             </div>
         </div>
 
-        <div class="row">
-            <div class="col-lg-{% if is_direct %}12{% else %}7{% endif %}">
-                <div class="card-custom">
-                    <div class="card-header-custom text-uppercase">
-                        <i class="bi bi-check-circle-fill me-2 text-success"></i>
-                        Bases, Fontes e Atalhos Mapeados
-                    </div>
-                    <div class="card-body p-4">
-                        {% if encontrados %}
-                        <div class="row g-3">
-                            {% for p in encontrados %}
-                            <div class="col-md-6">
-                                <a href="{{ p.url }}" target="_blank" class="btn-platform">
-                                    <span><i class="bi bi-box-arrow-up-right me-2 code-tag"></i>{{ p.nome }}</span>
-                                    <i class="bi bi-chevron-right small"></i>
-                                </a>
-                            </div>
-                            {% endfor %}
+        {% if detalhes_extra %}
+        <div class="card-custom">
+            <div class="card-header-custom text-uppercase">
+                <i class="bi bi-database-check me-2 text-info"></i>
+                Dados Estruturados Oficiais
+            </div>
+            <div class="card-body p-4">
+                <div class="row g-3">
+                    {% for k, v in detalhes_extra.items() %}
+                    <div class="col-md-6 col-lg-4">
+                        <div class="p-3 border rounded-3 bg-dark bg-opacity-50 h-100">
+                            <div class="info-label mb-1">{{ k }}</div>
+                            <div class="info-value text-break">{{ v }}</div>
                         </div>
-                        {% else %}
-                        <p class="text-muted mb-0">Nenhum registro público direto localizado para este termo.</p>
-                        {% endif %}
                     </div>
+                    {% endfor %}
                 </div>
             </div>
+        </div>
+        {% endif %}
 
-            {% if not is_direct %}
-            <div class="col-lg-5">
-                <div class="card-custom">
-                    <div class="card-header-custom text-uppercase text-info">
-                        <i class="bi bi-globe me-2"></i>Presença Digital & Menções
-                    </div>
-                    <div class="card-body p-4 d-grid gap-2">
-                        {% for nome_b, url_b in buscadores.items() %}
-                        <a href="{{ url_b }}" target="_blank" class="btn-dork"><i class="bi bi-search me-2"></i>{{ nome_b }}</a>
-                        {% endfor %}
-                    </div>
-                </div>
+        <div class="card-custom">
+            <div class="card-header-custom text-uppercase">
+                <i class="bi bi-check-circle-fill me-2 text-success"></i>
+                Bases, Fontes e Atalhos Mapeados
             </div>
-            {% endif %}
+            <div class="card-body p-4">
+                {% if encontrados %}
+                <div class="row g-3">
+                    {% for p in encontrados %}
+                    <div class="col-md-6">
+                        <a href="{{ p.url }}" target="_blank" class="btn-platform">
+                            <span><i class="bi bi-box-arrow-up-right me-2 code-tag"></i>{{ p.nome }}</span>
+                            <i class="bi bi-chevron-right small"></i>
+                        </a>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted mb-0">Nenhum registro público direto localizado para este termo.</p>
+                {% endif %}
+            </div>
         </div>
     </div>
 </body>
@@ -1062,21 +1039,19 @@ def ver_relatorio_web(token):
     except Exception:
         results_json = {}
 
-    is_direct = (query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"])
     encontrados = []
-    
-    if is_direct and isinstance(results_json, dict):
-        for k, v in results_json.items():
-            url_item = v.get("url") if isinstance(v, dict) else str(v)
-            encontrados.append({"nome": k, "url": url_item})
-    elif isinstance(results_json, dict):
-        for plat, data in results_json.items():
-            if isinstance(data, dict) and data.get("exists") is True:
-                url = data.get("url", PLATFORM_URLS.get(plat, "").format(username=target))
-                encontrados.append({"nome": plat, "url": url})
+    detalhes_extra = {}
 
-    buscadores = obter_links_buscadores(target) if not is_direct else {}
-    
+    if isinstance(results_json, dict):
+        for k, v in results_json.items():
+            if isinstance(v, dict):
+                if "detalhes" in v and isinstance(v["detalhes"], dict):
+                    detalhes_extra.update(v["detalhes"])
+                elif "detalhes" in v:
+                    detalhes_extra[k] = v["detalhes"]
+                elif v.get("exists") is True and v.get("url") != "#":
+                    encontrados.append({"nome": k, "url": v.get("url")})
+
     try:
         dt_obj = datetime.fromisoformat(created_at)
         if dt_obj.tzinfo is None:
@@ -1086,13 +1061,8 @@ def ver_relatorio_web(token):
         data_formatada = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
     titulos_map = {
-        "email": "CONSULTA DE E-MAIL",
-        "fullname": "BUSCA JUDICIAL",
-        "fone": "TELEFONE & WHATSAPP",
-        "cnpj": "REGISTRO CNPJ",
-        "placa": "VEÍCULOS (PLACA)",
-        "dominio": "DOMÍNIOS & DNS",
-        "username": "USERNAME / REDES SOCIAIS"
+        "email": "CONSULTA DE E-MAIL", "fullname": "BUSCA JUDICIAL", "fone": "TELEFONE & WHATSAPP",
+        "cnpj": "REGISTRO CNPJ", "placa": "VEÍCULOS (PLACA)", "dominio": "DOMÍNIOS & DNS", "username": "USERNAME / REDES SOCIAIS"
     }
 
     return render_template_string(
@@ -1100,9 +1070,8 @@ def ver_relatorio_web(token):
         target=target,
         token=token,
         encontrados=encontrados,
-        buscadores=buscadores,
+        detalhes_extra=detalhes_extra,
         modulo_titulo=titulos_map.get(query_type, "GERAL"),
-        is_direct=is_direct,
         data_atual=data_formatada
     )
 
@@ -1189,7 +1158,7 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v32.0 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v33.0 VIP ⚡\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
@@ -1209,7 +1178,7 @@ if bot:
             f"   • /placa ABC1D23\n\n"
             f"7️⃣ 🌐 DOMÍNIOS & INFRAESTRUTURA WEB:\n"
             f"   • /dominio site.com\n\n"
-            f"🎟️ CUMPOM DE DESCONTO / CORTESIA:\n"
+            f"🎟️ CUPOM DE DESCONTO / CORTESIA:\n"
             f"   • /resgatar CODIGO\n\n"
             f"⚙️ PRIVACIDADE (LGPD):\n"
             f"   • Use /apagar para excluir seus registros.\n\n"
@@ -2220,7 +2189,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v32.0 VIP Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v33.0 VIP Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
