@@ -293,7 +293,6 @@ def init_db():
             )
         """)
 
-        # Índices de performance
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_token ON payments(token)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_status_reminded ON payments(status, reminded)")
@@ -936,23 +935,6 @@ def gerar_painel_gratuito_membro(user_id: int, target: str, query_type: str, res
 
     return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
-def executar_consulta_admin_direta(admin_id: int, target: str, query_type: str) -> tuple[str, str]:
-    resultados = executar_varredura_osint(target, query_type=query_type)
-    results_json = json.dumps(resultados)
-    token_relatorio = secrets.token_urlsafe(16)
-    pid_admin = f"admin_exec_{admin_id}_{secrets.token_hex(6)}"
-
-    db_execute(
-        "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
-        "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?) "
-        "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token, results_json=excluded.results_json",
-        (pid_admin, admin_id, target, token_relatorio, query_type, results_json, datetime.now(TIMEZONE_BR).isoformat()),
-        commit=True
-    )
-    db_execute("UPDATE metrics SET value = value + 1 WHERE key = 'total_reports'", commit=True)
-    link_web = f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
-    return link_web, token_relatorio
-
 def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     
@@ -1050,7 +1032,6 @@ def worker_background():
                     except Exception as ex:
                         logger.error("Erro no remarketing: %s", str(ex))
 
-            # Expurgo LGPD e Limpeza de hashes antigas
             lim_hashes = (now - timedelta(days=1)).isoformat()
             db_execute("DELETE FROM target_hashes WHERE created_at < ?", (lim_hashes,), commit=True)
             
@@ -1442,7 +1423,6 @@ if bot:
         )
         responder_seguro(message, texto)
 
-    # Registro dinâmico de Handlers via Fábrica
     bot.message_handler(commands=['fone'])(
         _comando_busca("fone", lambda x: re.sub(r'\D', '', x) if RE_FONE.match(re.sub(r'\D', '', x)) else None, "Envie o DDD + Número (ex: /fone 11999998888)", "Telefone (/fone)")
     )
@@ -1754,12 +1734,14 @@ def setup_webhook_telegram():
         try:
             bot.remove_webhook()
             bot.set_webhook(url=webhook_url, secret_token=CFG.TELEGRAM_SECRET_TOKEN)
-            logger.info("Webhook Telegram v35.0 configurado com sucesso.")
+            logger.info("Webhook Telegram v35.0 configurado com sucesso para URL: %s", webhook_url)
         except Exception as e:
             logger.error("Erro ao registrar Webhook Telegram: %s", str(e))
 
+# Inicialização global do Webhook e Workers para execução no Gunicorn
+setup_webhook_telegram()
+Thread(target=worker_divulgacao_diaria, daemon=True).start()
+Thread(target=worker_background, daemon=True).start()
+
 if __name__ == "__main__":
-    setup_webhook_telegram()
-    Thread(target=worker_divulgacao_diaria, daemon=True).start()
-    Thread(target=worker_background, daemon=True).start()
     app.run(debug=_env_bool("FLASK_DEBUG", False), host="0.0.0.0", port=CFG.PORT)
