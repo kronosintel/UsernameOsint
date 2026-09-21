@@ -6,7 +6,7 @@ Kronos Intel OSINT Bot v35.0 VIP
 - SQLite WAL com PRAGMA user_version para migrações automáticas e Rate Limit Persistido
 - Webhook do Telegram com secret_token e validação HMAC-SHA256 no Mercado Pago
 - Sanitização de PDF (ReportLab), HTML Telegram e Trilha de Auditoria LGPD via Hash SHA-256
-- Fábrica genérica de Handlers Telegram e Endpoints de Liveness/Readiness
+- Sistema de Cupons (/gerar_cupom, /resgatar) e Comandos de Administrador (/admin, /conceder)
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -253,6 +253,22 @@ def init_db():
             CREATE TABLE IF NOT EXISTS free_claims (
                 user_id INTEGER PRIMARY KEY,
                 claimed_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS coupons (
+                code TEXT PRIMARY KEY,
+                max_uses INTEGER,
+                uses_count INTEGER DEFAULT 0,
+                created_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS coupon_redemptions (
+                code TEXT,
+                user_id INTEGER,
+                redeemed_at TEXT,
+                PRIMARY KEY (code, user_id)
             )
         """)
         cursor.execute("""
@@ -1316,7 +1332,7 @@ def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str
         hash_alvo = registrar_hash_alvo(target, qtype, resultados)
         status_gratis_txt = ""
         if not usuario_ja_usou_gratis(user_id):
-            status_gratis_txt = "🎁 CORTESIA DISPONÍVEL: Entre no nosso canal e resgate 1 relatório GRATUITO!\n\n"
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
 
         texto_resultado = (
             f"🎯 CONSULTA OSINT DE ALVO ({qtype.upper()}):\n"
@@ -1325,7 +1341,7 @@ def _processar_busca_generica(message, target: str, qtype: str, modulo_nome: str
             f"Gere o seu Painel Web Interativo completo para acessar todos os atalhos e resultados mapeados.\n\n"
             f"{status_gratis_txt}"
             f"💳 Valor da consulta: R$ {CFG.PRECO_PADRAO:.2f} no Pix\n\n"
-            f"👉 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}"
+            f"👉 Faça parte do nosso canal oficial: {CFG.CANAL_TAG_PUBLICO}"
         )
 
         markup = construir_markup_oferta(hash_alvo, user_id)
@@ -1365,22 +1381,31 @@ if bot:
         db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, now_str), commit=True)
 
         menu_boas_vindas = (
-            f"👑 KRONOS INTEL OSINT BOT v35.0 VIP ⚡\n"
+            f"👑 KRONOS INTEL OSINT BOT v33.0 VIP ⚡️\n"
             f"─────────────────────────────────────────────\n"
-            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética!\n\n"
-            f"🛠️ MÓDULOS DISPONÍVEIS:\n"
-            f"• /user <username>\n"
-            f"• /email <email>\n"
-            f"• /nome <Nome Completo>\n"
-            f"• /fone <telefone_ddd>\n"
-            f"• /cnpj <cnpj>\n"
-            f"• /placa <placa_veiculo>\n"
-            f"• /dominio <dominio_web>\n\n"
-            f"🎁 PROMOÇÃO DE BOAS-VINDAS:\n"
-            f"Entre no nosso canal oficial ({CFG.CANAL_TAG_PUBLICO}) e ganhe 1 RELATÓRIO COMPLETO GRATUITO em qualquer modalidade de busca!\n\n"
-            f"⚙️ PRIVACIDADE E TERMOS:\n"
-            f"• /termos — Visualizar políticas e aceitar uso\n"
-            f"• /apagar — Excluir permanentemente seus registros (LGPD)\n\n"
+            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
+            f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
+            f"Membros do nosso canal oficial possuem direito a 1 consulta totalmente grátis!\n\n"
+            f"🛠️ MÓDULOS DE CONSULTA DISPONÍVEIS:\n\n"
+            f"1️⃣ 👤 USERNAME / REDES SOCIAIS:\n"
+            f"   • /user alvo123\n\n"
+            f"2️⃣ 📧 CONSULTA DE E-MAIL & VAZAMENTOS:\n"
+            f"   • /email exemplo@dominio.com\n\n"
+            f"3️⃣ ⚖️ NOME COMPLETO (ATALHOS JUDICIAIS):\n"
+            f"   • /nome João da Silva\n\n"
+            f"4️⃣ 📱 TELEFONE & WHATSAPP:\n"
+            f"   • /fone 11999998888\n\n"
+            f"5️⃣ 🏢 CNPJ & REGISTRO EMPRESARIAL:\n"
+            f"   • /cnpj 00000000000191\n\n"
+            f"6️⃣ 🚗 CONSULTA DE VEÍCULOS (PLACA):\n"
+            f"   • /placa ABC1D23\n\n"
+            f"7️⃣ 🌐 DOMÍNIOS & INFRAESTRUTURA WEB:\n"
+            f"   • /dominio site.com\n\n"
+            f"🎟️ CUPOM DE DESCONTO / CORTESIA:\n"
+            f"   • /resgatar CODIGO\n\n"
+            f"⚙️ PRIVACIDADE (LGPD):\n"
+            f"   • Use /apagar para excluir seus registros.\n\n"
+            f"📢 Canal Oficial: {CFG.CANAL_TAG_PUBLICO}\n"
             f"💬 Suporte Direto: @{CFG.SUPORTE_USERNAME}"
         )
 
@@ -1426,6 +1451,100 @@ if bot:
         _comando_busca("username", lambda x: x.replace("@", "").strip() if RE_USERNAME.match(x.replace("@", "").strip()) else None, "Envie um username válido (ex: /user alvo123)", "Username (/user)")
     )
 
+    # --- COMANDOS DE CUPOM ---
+    @bot.message_handler(commands=['gerar_cupom'])
+    def handle_gerar_cupom(message):
+        if message.from_user.id != CFG.ADMIN_ID:
+            return
+
+        partes = message.text.strip().split()
+        if len(partes) < 2:
+            bot.reply_to(message, "⚠️ Uso: `/gerar_cupom CODIGO [usos_maximos]`", parse_mode="Markdown")
+            return
+
+        codigo = partes[1].upper()
+        max_uses = int(partes[2]) if len(partes) >= 3 and partes[2].isdigit() else 1
+
+        db_execute(
+            "INSERT INTO coupons (code, max_uses, uses_count, created_at) VALUES (?, ?, 0, ?) "
+            "ON CONFLICT(code) DO UPDATE SET max_uses = excluded.max_uses",
+            (codigo, max_uses, datetime.now(TIMEZONE_BR).isoformat()),
+            commit=True
+        )
+        bot.reply_to(message, f"🎟️ Cupom criado com sucesso:\n• **Código:** `{codigo}`\n• **Limite de Usos:** {max_uses}", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['resgatar'])
+    def handle_resgatar_cupom(message):
+        user_id = message.from_user.id
+        partes = message.text.strip().split()
+
+        if len(partes) < 2:
+            bot.reply_to(message, "⚠️ Uso: `/resgatar CODIGO`", parse_mode="Markdown")
+            return
+
+        codigo = partes[1].upper()
+        cupom = db_execute("SELECT max_uses, uses_count FROM coupons WHERE code = ?", (codigo,), fetchone=True)
+
+        if not cupom:
+            bot.reply_to(message, "❌ Cupom inválido ou inexistente.")
+            return
+
+        max_uses, uses_count = cupom[0], cupom[1]
+        if uses_count >= max_uses:
+            bot.reply_to(message, "❌ Este cupom já atingiu o limite máximo de resgates.")
+            return
+
+        ja_usou = db_execute("SELECT 1 FROM coupon_redemptions WHERE code = ? AND user_id = ?", (codigo, user_id), fetchone=True)
+        if ja_usou:
+            bot.reply_to(message, "⚠️ Você já resgatou este cupom anteriormente!")
+            return
+
+        db_execute("INSERT INTO coupon_redemptions (code, user_id, redeemed_at) VALUES (?, ?, ?)", (codigo, user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+        db_execute("UPDATE coupons SET uses_count = uses_count + 1 WHERE code = ?", (codigo,), commit=True)
+        db_execute("DELETE FROM free_claims WHERE user_id = ?", (user_id,), commit=True)
+
+        bot.reply_to(message, f"🎉 Cupom `{codigo}` ativado com sucesso!\n\nVocê ganhou 1 consulta de cortesia liberada no sistema.", parse_mode="Markdown")
+
+    # --- COMANDOS ADMIN ---
+    @bot.message_handler(commands=['conceder'])
+    def handle_conceder_relatorio(message):
+        if message.from_user.id != CFG.ADMIN_ID:
+            return
+
+        partes = message.text.strip().split(maxsplit=2)
+        if len(partes) < 3:
+            bot.reply_to(message, "⚠️ Uso correto: `/conceder <user_id> <termo_alvo>`", parse_mode="Markdown")
+            return
+
+        try:
+            target_uid = int(partes[1])
+            alvo = partes[2].strip()
+        except ValueError:
+            bot.reply_to(message, "❌ ID de usuário inválido.")
+            return
+
+        qtype = "username"
+        if e_email_valido(alvo): qtype = "email"
+        elif e_nome_completo(alvo): qtype = "fullname"
+        elif RE_CNPJ.match(re.sub(r'\D', '', alvo)): qtype = "cnpj"
+        elif RE_FONE.match(re.sub(r'\D', '', alvo)): qtype = "fone"
+        elif RE_PLACA.match(alvo.upper().replace("-", "")): qtype = "placa"
+
+        resultados = executar_varredura_osint(alvo, query_type=qtype)
+        link_web = gerar_painel_gratuito_membro(target_uid, alvo, qtype, resultados)
+
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🌐 Acessar Painel Interativo Web", url=link_web),
+            InlineKeyboardButton("📄 Baixar Relatório PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
+        )
+
+        try:
+            bot.send_message(target_uid, f"🎁 **CORTESIA DE ADMINISTRADOR CONCEDIDA!**\n\nO seu relatório para o alvo `{alvo}` foi liberado:", reply_markup=markup, parse_mode="Markdown")
+            bot.reply_to(message, f"✅ Relatório concedido com sucesso para o ID `{target_uid}`.", parse_mode="Markdown")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Erro ao enviar mensagem para o usuário: {str(e)}")
+
     @bot.message_handler(commands=['admin'])
     def handle_admin_panel(message):
         if message.from_user.id != CFG.ADMIN_ID:
@@ -1448,8 +1567,10 @@ if bot:
             f"• Buscas Executadas: {searches}\n"
             f"• Vendas Aprovadas: {qtd_vendas} (R$ {faturamento:.2f})\n\n"
             f"🛠️ COMANDOS DE ADMIN:\n"
-            f"• /broadcast <mensagem> — Enviar comunicado a todos\n"
-            f"• /stats — Enviar relatório detalhado para o grupo de logs\n"
+            f"• /gerar_cupom CODIGO [usos]\n"
+            f"• /conceder <user_id> <termo_alvo>\n"
+            f"• /broadcast <mensagem>\n"
+            f"• /stats — Enviar relatório detalhado para o grupo\n"
             f"• /ban <user_id> | /unban <user_id>"
         )
         responder_seguro(message, texto_admin)
@@ -1486,6 +1607,7 @@ if bot:
         db_execute("DELETE FROM users WHERE user_id = ?", (user_id,), commit=True)
         db_execute("UPDATE payments SET target_username='(apagado)', results_json=NULL, pix_code=NULL WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM free_claims WHERE user_id = ?", (user_id,), commit=True)
+        db_execute("DELETE FROM coupon_redemptions WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM rate_events WHERE user_id = ?", (user_id,), commit=True)
         db_execute("DELETE FROM audit_log WHERE user_id = ?", (user_id,), commit=True)
         bot.reply_to(message, "🗑️ Solicitação de Privacidade LGPD Concluída: Todos os seus registros foram expurgados permanentemente do sistema.")
@@ -1532,6 +1654,11 @@ if bot:
             return
 
         texto = message.text.replace("\n", " ").strip()
+
+        # Proteção para ignorar mensagens administrativas como "admin_fone 91996289106" ou comandos inválidos
+        if message.from_user.id == CFG.ADMIN_ID and (texto.startswith("admin_") or texto.startswith("/")):
+            return
+
         target = texto.replace("@", "").strip()
 
         if e_url(target) and not ("." in target and "/" not in target):
@@ -1596,7 +1723,6 @@ if bot:
                 bot.send_message(call.message.chat.id, msg_bloqueio, reply_markup=markup, parse_mode="Markdown")
                 return
 
-            # Registrar a cortesia para impedir novo uso no futuro
             db_execute(
                 "INSERT INTO free_claims (user_id, claimed_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
                 (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True
