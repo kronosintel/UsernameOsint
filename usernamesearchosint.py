@@ -1,10 +1,10 @@
 """
-Kronos Intel OSINT Bot v27.0
-- Mensagem automática diária de divulgação/tutorial enviada no Canal Principal
-- Atualização dos usernames oficiais: @kronosinteloficial (Canal) e @kronosintel (Suporte)
-- Suporte a usernames e e-mails com "_" sem quebras de formatação
-- Prevenção de spam e vazamento de privacidade no /start
-- Trava atômica no banco SQLite para resgate único de relatório gratuito
+Kronos Intel OSINT Bot v28.0 — Plataforma VIP
+- Módulos Expandidos: Username (/user), E-mail (/email), Nome (/nome), Telefone (/fone), CNPJ (/cnpj), Placa (/placa) e Domínio (/dominio)
+- Divulgação Diária Automática no Canal Principal
+- Geração de Relatórios Web Interativos com visual renovado e botões interativos
+- Suporte a usernames e e-mails com "_" sem quebrar Markdown
+- Trava atômica SQLite para resgate único de relatório gratuito
 - Suporte Oficial: @kronosintel
 """
 from __future__ import annotations
@@ -52,6 +52,9 @@ db_lock = Lock()
 TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 
 RE_USERNAME = re.compile(r"^(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{2,40}$")
+RE_CNPJ = re.compile(r"^\d{14}$")
+RE_PLACA = re.compile(r"^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$")
+RE_FONE = re.compile(r"^\d{10,11}$")
 
 CANAL_PRINCIPAL_ID = int(os.getenv("CANAL_PRINCIPAL_ID", "-1003802363624"))
 LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "-1003986408630"))
@@ -328,13 +331,13 @@ def responder_seguro(message, texto, parse_mode=None, reply_markup=None):
 def orientar_uso_correto(chat_id: int):
     msg_guia = (
         "💡 COMO UTILIZAR O BOT CORRETAMENTE:\n\n"
-        "1️⃣ Para buscar por Username (Redes Sociais):\n"
-        "• Use: /user alvo123\n"
-        "*(Apenas o nome de usuário sem espaços, links ou @)*\n\n"
-        "2️⃣ Para buscar por E-mail (Fontes de Verificação):\n"
-        "• Use: /email exemplo@dominio.com\n\n"
-        "3️⃣ Para buscar por Nome Completo (Atalhos Judiciais):\n"
-        "• Use: /nome João da Silva"
+        "1️⃣ 👤 Username: /user alvo123\n"
+        "2️⃣ 📧 E-mail: /email alvo@dominio.com\n"
+        "3️⃣ ⚖️ Nome Completo: /nome João da Silva\n"
+        "4️⃣ 📱 Telefone: /fone 11999998888\n"
+        "5️⃣ 🏢 CNPJ: /cnpj 00000000000191\n"
+        "6️⃣ 🚗 Placa: /placa ABC1D23\n"
+        "7️⃣ 🌐 Domínio: /dominio site.com"
     )
     try:
         bot.send_message(chat_id, msg_guia)
@@ -387,8 +390,8 @@ class FastOSINTChecker:
                     pass
         return self.results
 
-def executar_varredura_osint(target: str, is_fullname: bool = False, is_email: bool = False) -> dict[str, dict[str, Any]]:
-    if is_email:
+def executar_varredura_osint(target: str, query_type: str = "username") -> dict[str, dict[str, Any]]:
+    if query_type == "email":
         encoded_email = urllib.parse.quote(target)
         return {
             "Have I Been Pwned": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
@@ -399,7 +402,7 @@ def executar_varredura_osint(target: str, is_fullname: bool = False, is_email: b
             "Scylla.sh Data Leak": {"exists": True, "url": f"https://scylla.sh/search?q=email:{encoded_email}"},
             "Hudson Rock Cybercrime": {"exists": True, "url": f"https://cavalier.hudsonrock.com/api/v1/osint-tools/search-by-email?email={encoded_email}"}
         }
-    elif is_fullname:
+    elif query_type == "fullname":
         encoded_name = urllib.parse.quote(f'"{target}"')
         return {
             "Jusbrasil (Processos)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
@@ -410,6 +413,41 @@ def executar_varredura_osint(target: str, is_fullname: bool = False, is_email: b
             "Certidões e Registros": {"exists": True, "url": f"https://www.google.com/search?q=%22certidao%22+{encoded_name}"},
             "Google Acadêmico": {"exists": True, "url": f"https://scholar.google.com.br/scholar?q={encoded_name}"},
             "Notícias / Citações": {"exists": True, "url": f"https://www.google.com/search?q={encoded_name}&tbm=nws"},
+        }
+    elif query_type == "fone":
+        limpo = re.sub(r'\D', '', target)
+        return {
+            "WhatsApp Direct Chat": {"exists": True, "url": f"https://wa.me/55{limpo}"},
+            "Sync.ME Caller ID": {"exists": True, "url": f"https://sync.me/search/?number=55{limpo}"},
+            "Truecaller Directory": {"exists": True, "url": f"https://www.truecaller.com/search/br/{limpo}"},
+            "QualEmpresa Operadora": {"exists": True, "url": f"https://www.qualempresa.com.br/telefone/{limpo}"},
+            "Google Search (Vazamentos/Anúncios)": {"exists": True, "url": f"https://www.google.com/search?q=%22{limpo}%22"}
+        }
+    elif query_type == "cnpj":
+        limpo = re.sub(r'\D', '', target)
+        return {
+            "Receita Federal (Comprovante)": {"exists": True, "url": f"https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp?cnpj={limpo}"},
+            "CNPJ.biz Consultas": {"exists": True, "url": f"https://cnpj.biz/{limpo}"},
+            "Casa dos Dados (QSA)": {"exists": True, "url": f"https://casadosdados.com.br/solucao/cnpj/{limpo}"},
+            "Transparência CC Empresa": {"exists": True, "url": f"https://transparencia.cc/cnpj/{limpo}"},
+            "Jusbrasil Societário": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={limpo}"}
+        }
+    elif query_type == "placa":
+        placa = target.upper().replace("-", "")
+        return {
+            "Sinesp Cidadão (Atalho)": {"exists": True, "url": f"https://www.google.com/search?q=consultar+placa+{placa}"},
+            "Tabela FIPE Veículos": {"exists": True, "url": f"https://www.google.com/search?q=fipe+placa+{placa}"},
+            "QualVeiculo Registro": {"exists": True, "url": f"https://www.qualveiculo.net/?placa={placa}"},
+            "Olho No Carro (Histórico)": {"exists": True, "url": f"https://www.olhonocarro.com.br/"}
+        }
+    elif query_type == "dominio":
+        dom = target.lower().replace("https://", "").replace("http://", "").strip('/')
+        return {
+            "Whois Registro.br / ICANN": {"exists": True, "url": f"https://whois.domaintools.com/{dom}"},
+            "DNS Dumpster Infra": {"exists": True, "url": f"https://dnsdumpster.com/"},
+            "SecurityTrails History": {"exists": True, "url": f"https://securitytrails.com/domain/{dom}/dns"},
+            "Shodan Host Search": {"exists": True, "url": f"https://www.shodan.io/search?query={dom}"},
+            "Wayback Machine Archive": {"exists": True, "url": f"https://web.archive.org/web/*/{dom}"}
         }
     else:
         return FastOSINTChecker(target).run()
@@ -424,29 +462,37 @@ def obter_links_buscadores(termo: str) -> dict[str, str]:
         "DuckDuckGo (Presença Web)": f"https://duckduckgo.com/?q={encoded_term}"
     }
 
-def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], is_fullname: bool = False, is_email: bool = False) -> io.BytesIO:
+def construir_relatorio_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
     data_atual = datetime.now(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
-    tipo_txt = "CONSULTA DE E-MAIL" if is_email else ("BUSCA JUDICIAL" if is_fullname else "USERNAME / REDES SOCIAIS")
+    titulos_map = {
+        "email": "CONSULTA DE E-MAIL",
+        "fullname": "BUSCA JUDICIAL / NOME",
+        "fone": "TELEFONE & WHATSAPP",
+        "cnpj": "REGISTRO EMPRESARIAL (CNPJ)",
+        "placa": "REGISTRO DE VEÍCULOS (PLACA)",
+        "dominio": "INFRAESTRUTURA DE DOMÍNIO",
+        "username": "USERNAME / REDES SOCIAIS"
+    }
 
     corpo = f"""===================================================================
                    KRONOS INTEL — RELATÓRIO EXECUTIVO OSINT
 ===================================================================
 ALVO ANALISADO: {target}
-TIPO DE CONSULTA: {tipo_txt}
+TIPO DE CONSULTA: {titulos_map.get(query_type, 'GERAL')}
 DATA DA CONSULTA: {data_atual}
-SISTEMA: Kronos Engine v27.0
+SISTEMA: Kronos Engine v28.0
 ===================================================================
 """
-    if is_email:
-        corpo += f"""1. BASES DE CONSULTA DE E-MAIL E FONTES
+    if query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"]:
+        corpo += f"""1. BASES DE CONSULTA E ATALHOS MAPEADOS
 -------------------------------------------------------------------
 """
         for p in resultados:
-            corpo += f"[+] {p.ljust(25)} : {resultados[p].get('url')}\n"
+            corpo += f"[+] {p.ljust(28)} : {resultados[p].get('url')}\n"
 
-    elif not is_fullname:
+    else:
         corpo += f"""1. PERFIS E PLATAFORMAS LOCALIZADAS
 -------------------------------------------------------------------
 """
@@ -464,13 +510,6 @@ SISTEMA: Kronos Engine v27.0
 """
         for nome_b, url_b in buscadores.items():
             corpo += f"[+] {nome_b.ljust(28)} : {url_b}\n"
-
-    else:
-        corpo += f"""1. ATALHOS DE BUSCA JUDICIAL E DIÁRIOS OFICIAIS
--------------------------------------------------------------------
-"""
-        for p in resultados:
-            corpo += f"[+] {p.ljust(25)} : {resultados[p].get('url')}\n"
 
     corpo += """
 ===================================================================
@@ -549,36 +588,32 @@ def construir_markup_oferta(hash_alvo: str, user_id: int) -> InlineKeyboardMarku
     return markup
 
 def worker_divulgacao_diaria():
-    """Envia uma mensagem de tutorial e incentivo no canal principal 1x por dia."""
     ultimo_envio = None
     while True:
         try:
-            time.sleep(300)  # Verifica a cada 5 minutos
+            time.sleep(300)
             now = datetime.now(TIMEZONE_BR)
 
-            # Define o envio diário para as 10:00 da manhã
             if now.hour == 10 and (ultimo_envio is None or ultimo_envio.date() < now.date()):
                 if bot and CANAL_PRINCIPAL_ID:
                     msg_divulgacao = (
-                        "🔍 COMO UTILIZAR O BOT DE INVESTIGAÇÃO OSINT KRONOS INTEL ⚡\n\n"
-                        "Quer localizar perfis em redes sociais, checar vazamentos de e-mail ou consultar atalhos judiciais em segundos?\n\n"
-                        "💡 VEJA COMO É SIMPLES USAR:\n\n"
-                        "1️⃣ Busca por Username (Redes Sociais):\n"
-                        "   👉 Digite /user seguido do nome do perfil.\n"
-                        "   Exemplo: /user joaodesilva\n\n"
-                        "2️⃣ Busca por E-mail (Verificação de Bases):\n"
-                        "   👉 Digite /email seguido do e-mail do alvo.\n"
-                        "   Exemplo: /email contato@empresa.com\n\n"
-                        "3️⃣ Busca por Nome Completo (Atalhos Judiciais):\n"
-                        "   👉 Digite /nome seguido do nome completo.\n"
-                        "   Exemplo: /nome Carlos Eduardo Souza\n\n"
-                        "🎁 MEMBROS DO CANAL GANHAM 1 CONSULTE GRATUITA!\n"
-                        "Se você é novo no canal, acesse o bot agora mesmo e resgate o seu relatório cortesia totalmente grátis!\n\n"
-                        "👇 Clique no botão abaixo para iniciar suas consultas no chat privado:"
+                        "👑 KRONOS INTEL — CENTRAL DE INVESTIGAÇÃO OSINT ⚡\n\n"
+                        "Quer localizar dados públicos, perfis de redes sociais, vazamentos de e-mail ou consultas empresariais em segundos?\n\n"
+                        "🛠️ VEJA COMO É FÁCIL USAR O NOSSO BOT:\n\n"
+                        "1️⃣ 👤 Username: /user alvo123\n"
+                        "2️⃣ 📧 E-mail: /email exemplo@dominio.com\n"
+                        "3️⃣ ⚖️ Nome Completo: /nome Carlos Eduardo\n"
+                        "4️⃣ 📱 Telefone: /fone 11999998888\n"
+                        "5️⃣ 🏢 CNPJ / Empresas: /cnpj 00000000000191\n"
+                        "6️⃣ 🚗 Veículos (Placa): /placa ABC1D23\n"
+                        "7️⃣ 🌐 Domínios & DNS: /dominio site.com\n\n"
+                        "🎁 NOVO NO CANAL? GANHE 1 CONSULTA GRATUITA!\n"
+                        "Todos os membros do nosso canal oficial ganham 1 relatório VIP completo de cortesia.\n\n"
+                        "👇 Clique abaixo para iniciar suas buscas agora mesmo:"
                     )
 
                     markup = InlineKeyboardMarkup(row_width=1)
-                    btn_usar = InlineKeyboardButton("🚀 Iniciar Bot de Consultas Agora", url=f"https://t.me/{BOT_USERNAME}")
+                    btn_usar = InlineKeyboardButton("🚀 Abrir Bot de Consultas Agora", url=f"https://t.me/{BOT_USERNAME}")
                     markup.add(btn_usar)
 
                     bot.send_message(CANAL_PRINCIPAL_ID, msg_divulgacao, reply_markup=markup)
@@ -774,17 +809,11 @@ HTML_DASHBOARD_TEMPLATE = """
         </div>
 
         <div class="row">
-            <div class="col-lg-{% if is_fullname or is_email %}12{% else %}7{% endif %}">
+            <div class="col-lg-{% if is_direct %}12{% else %}7{% endif %}">
                 <div class="card-custom">
                     <div class="card-header-custom text-uppercase">
                         <i class="bi bi-check-circle-fill me-2 text-success"></i>
-                        {% if is_email %}
-                            Bases e Fontes de Consulta de E-mail Mapeadas
-                        {% elif is_fullname %}
-                            Atalhos Mapeados para Tribunais e Diários Oficiais
-                        {% else %}
-                            Possíveis Perfis Localizados
-                        {% endif %}
+                        Bases, Fontes e Atalhos Mapeados
                     </div>
                     <div class="card-body p-4">
                         {% if encontrados %}
@@ -805,7 +834,7 @@ HTML_DASHBOARD_TEMPLATE = """
                 </div>
             </div>
 
-            {% if not is_fullname and not is_email %}
+            {% if not is_direct %}
             <div class="col-lg-5">
                 <div class="card-custom">
                     <div class="card-header-custom text-uppercase text-info">
@@ -834,11 +863,10 @@ def ver_relatorio_web(token):
     target, results_json_str, query_type, created_at = p[0], p[1], p[2], p[3]
     results_json = json.loads(results_json_str)
     
-    is_fullname = (query_type == "fullname")
-    is_email = (query_type == "email")
+    is_direct = (query_type in ["email", "fullname", "fone", "cnpj", "placa", "dominio"])
     encontrados = []
     
-    if is_email or is_fullname:
+    if is_direct:
         for k, v in results_json.items():
             encontrados.append({"nome": k, "url": v.get("url")})
     else:
@@ -847,14 +875,22 @@ def ver_relatorio_web(token):
                 url = data.get("url", PLATFORM_URLS.get(plat, "").format(username=target))
                 encontrados.append({"nome": plat, "url": url})
 
-    buscadores = obter_links_buscadores(target) if (not is_fullname and not is_email) else {}
+    buscadores = obter_links_buscadores(target) if not is_direct else {}
     
     dt_obj = datetime.fromisoformat(created_at)
     if dt_obj.tzinfo is None:
         dt_obj = dt_obj.replace(tzinfo=TIMEZONE_BR)
     data_formatada = dt_obj.astimezone(TIMEZONE_BR).strftime("%d/%m/%Y %H:%M:%S")
 
-    modulo_titulo = "CONSULTA DE E-MAIL" if is_email else ("BUSCA JUDICIAL" if is_fullname else "REDES SOCIAIS & USERNAME")
+    titulos_map = {
+        "email": "CONSULTA DE E-MAIL",
+        "fullname": "BUSCA JUDICIAL",
+        "fone": "TELEFONE & WHATSAPP",
+        "cnpj": "REGISTRO CNPJ",
+        "placa": "VEÍCULOS (PLACA)",
+        "dominio": "DOMÍNIOS & DNS",
+        "username": "USERNAME / REDES SOCIAIS"
+    }
 
     return render_template_string(
         HTML_DASHBOARD_TEMPLATE,
@@ -862,9 +898,8 @@ def ver_relatorio_web(token):
         token=token,
         encontrados=encontrados,
         buscadores=buscadores,
-        modulo_titulo=modulo_titulo,
-        is_fullname=is_fullname,
-        is_email=is_email,
+        modulo_titulo=titulos_map.get(query_type, "GERAL"),
+        is_direct=is_direct,
         data_atual=data_formatada
     )
 
@@ -877,12 +912,7 @@ def download_txt(token):
     target, results_json_str, query_type = p[0], p[1], p[2]
     results_json = json.loads(results_json_str)
     
-    txt_buf = construir_relatorio_osint(
-        target, 
-        results_json, 
-        is_fullname=(query_type == "fullname"),
-        is_email=(query_type == "email")
-    )
+    txt_buf = construir_relatorio_osint(target, results_json, query_type=query_type)
     txt_buf.seek(0)
 
     return send_file(
@@ -907,7 +937,6 @@ if bot:
         novo = db_execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,), fetchone=True) is None
         registrar_acesso(user_id)
 
-        # NOTIFICAÇÕES APENAS SE FOR PRIMEIRO ACESSO DE USUÁRIO COMUM
         if message.chat.type == 'private' and novo and user_id != ADMIN_ID:
             grupo_logs_id = obter_grupo_logs_id()
             if grupo_logs_id:
@@ -929,19 +958,28 @@ if bot:
                     logger.error("Erro ao notificar no canal principal: %s", str(ex_canal))
 
         menu_boas_vindas = (
-            f"👋 Olá, {user_name}! Bem-vindo ao Kronos Intel OSINT Bot v27.0.\n\n"
-            f"Sua plataforma avançada para investigação digital e inteligência cibernética.\n\n"
+            f"👑 KRONOS INTEL OSINT BOT v28.0 ⚡\n"
+            f"─────────────────────────────────────────────\n"
+            f"👋 Olá, {user_name}! Bem-vindo à sua central avançada de inteligência cibernética e investigação digital!\n\n"
             f"🎁 GANHE 1 RELATÓRIO COMPLETO GRATUITO!\n"
-            f"Basta fazer parte do nosso canal oficial! Ao entrar, você ganha o direito de gerar 1 consulta gratuita (Username, E-mail ou Nome Completo).\n\n"
-            f"🛠 MÓDULOS DISPONÍVEIS:\n\n"
-            f"1️⃣ BUSCA POR USERNAME / REDES SOCIAIS:\n"
-            f"• Use /user alvo123\n\n"
-            f"2️⃣ BUSCA POR E-MAIL (FONTES DE VERIFICAÇÃO):\n"
-            f"• Use /email alvo@gmail.com\n\n"
-            f"3️⃣ BUSCA POR NOME COMPLETO (ATALHOS JUDICIAIS):\n"
-            f"• Use /nome João da Silva\n\n"
+            f"Membros do nosso canal oficial possuem direito a 1 consulta totalmente grátis!\n\n"
+            f"🛠️ MÓDULOS DE CONSULTA DISPONÍVEIS:\n\n"
+            f"1️⃣ 👤 USERNAME / REDES SOCIAIS:\n"
+            f"   • /user alvo123\n\n"
+            f"2️⃣ 📧 CONSULTA DE E-MAIL & VAZAMENTOS:\n"
+            f"   • /email exemplo@dominio.com\n\n"
+            f"3️⃣ ⚖️ NOME COMPLETO (ATALHOS JUDICIAIS):\n"
+            f"   • /nome João da Silva\n\n"
+            f"4️⃣ 📱 TELEFONE & WHATSAPP:\n"
+            f"   • /fone 11999998888\n\n"
+            f"5️⃣ 🏢 CNPJ & REGISTRO EMPRESARIAL:\n"
+            f"   • /cnpj 00000000000191\n\n"
+            f"6️⃣ 🚗 CONSULTA DE VEÍCULOS (PLACA):\n"
+            f"   • /placa ABC1D23\n\n"
+            f"7️⃣ 🌐 DOMÍNIOS & INFRAESTRUTURA WEB:\n"
+            f"   • /dominio site.com\n\n"
             f"⚙️ PRIVACIDADE (LGPD):\n"
-            f"• Use /apagar para excluir instantaneamente todos os seus registros.\n\n"
+            f"   • Use /apagar para excluir seus registros.\n\n"
             f"📢 Canal Oficial: {CANAL_TAG_PUBLICO}\n"
             f"💬 Suporte Direto: @{SUPORTE_USERNAME}"
         )
@@ -960,12 +998,137 @@ if bot:
         db_execute("UPDATE payments SET target_username='(apagado)', results_json=NULL, pix_code=NULL WHERE user_id = ?", (user_id,), commit=True)
         bot.reply_to(message, "🗑️ Solicitação de Privacidade LGPD Concluída: Seus dados de acesso e pesquisas associados foram apagados permanentemente do sistema.")
 
-    @bot.message_handler(content_types=['document', 'photo', 'audio', 'video', 'voice', 'sticker'])
-    def handle_invalid_media(message):
-        if message.chat.type in ['group', 'supergroup']:
+    @bot.message_handler(commands=['fone'])
+    def handle_fone_command(message):
+        user_id = message.from_user.id
+        registrar_acesso(user_id)
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o telefone após o comando /fone.\nExemplo: /fone 11999998888")
             return
-        responder_seguro(message, "⚠️ Comando Inválido!\nEnvio de arquivos, PDFs, imagens ou mídias não são aceitos.")
-        orientar_uso_correto(message.chat.id)
+
+        target = re.sub(r'\D', '', partes[1])
+        if not RE_FONE.match(target):
+            responder_seguro(message, "⚠️ Telefone Inválido!\nDigite o DDD + Número sem espaços ou traços (ex: 11999998888).")
+            return
+
+        resultados = executar_varredura_osint(target, query_type="fone")
+        hash_alvo = registrar_hash_alvo(target, "fone", resultados)
+
+        status_gratis_txt = ""
+        if not usuario_ja_usou_gratis(user_id):
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
+
+        texto = (
+            f"📱 MÓDULO DE CONSULTA DE TELEFONE:\n"
+            f"👤 +55 {target}\n"
+            f"───────────────────────────────\n\n"
+            f"Gere o Painel Web Interativo com consultas configuradas para:\n"
+            f"• WhatsApp Direct | Sync.ME | Truecaller | QualEmpresa | Google\n\n"
+            f"{status_gratis_txt}"
+            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
+        )
+        markup = construir_markup_oferta(hash_alvo, user_id)
+        bot.send_message(message.chat.id, texto, reply_markup=markup)
+
+    @bot.message_handler(commands=['cnpj'])
+    def handle_cnpj_command(message):
+        user_id = message.from_user.id
+        registrar_acesso(user_id)
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o CNPJ após o comando /cnpj.\nExemplo: /cnpj 00000000000191")
+            return
+
+        target = re.sub(r'\D', '', partes[1])
+        if not RE_CNPJ.match(target):
+            responder_seguro(message, "⚠️ CNPJ Inválido!\nDigite apenas os 14 números do CNPJ.")
+            return
+
+        resultados = executar_varredura_osint(target, query_type="cnpj")
+        hash_alvo = registrar_hash_alvo(target, "cnpj", resultados)
+
+        status_gratis_txt = ""
+        if not usuario_ja_usou_gratis(user_id):
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
+
+        texto = (
+            f"🏢 CONSULTA EMPRESARIAL (CNPJ):\n"
+            f"👤 {target}\n"
+            f"───────────────────────────────\n\n"
+            f"Gere o Painel Web Interativo com atalhos para:\n"
+            f"• Receita Federal | Casa dos Dados (QSA) | CNPJ.biz | Transparência\n\n"
+            f"{status_gratis_txt}"
+            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
+        )
+        markup = construir_markup_oferta(hash_alvo, user_id)
+        bot.send_message(message.chat.id, texto, reply_markup=markup)
+
+    @bot.message_handler(commands=['placa'])
+    def handle_placa_command(message):
+        user_id = message.from_user.id
+        registrar_acesso(user_id)
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie a placa após o comando /placa.\nExemplo: /placa ABC1D23")
+            return
+
+        target = partes[1].upper().replace("-", "").strip()
+        if not RE_PLACA.match(target):
+            responder_seguro(message, "⚠️ Placa Inválida!\nDigite a placa no formato tradicional (ABC1234) ou Mercosul (ABC1D23).")
+            return
+
+        resultados = executar_varredura_osint(target, query_type="placa")
+        hash_alvo = registrar_hash_alvo(target, "placa", resultados)
+
+        status_gratis_txt = ""
+        if not usuario_ja_usou_gratis(user_id):
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
+
+        texto = (
+            f"🚗 CONSULTA DE VEÍCULOS (PLACA):\n"
+            f"👤 {target}\n"
+            f"───────────────────────────────\n\n"
+            f"Gere o Painel Web Interativo com consultas para:\n"
+            f"• Sinesp Cidadão | Tabela FIPE | QualVeiculo | Histórico\n\n"
+            f"{status_gratis_txt}"
+            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
+        )
+        markup = construir_markup_oferta(hash_alvo, user_id)
+        bot.send_message(message.chat.id, texto, reply_markup=markup)
+
+    @bot.message_handler(commands=['dominio'])
+    def handle_dominio_command(message):
+        user_id = message.from_user.id
+        registrar_acesso(user_id)
+        partes = message.text.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o domínio após o comando /dominio.\nExemplo: /dominio site.com")
+            return
+
+        target = partes[1].lower().replace("https://", "").replace("http://", "").strip('/')
+        resultados = executar_varredura_osint(target, query_type="dominio")
+        hash_alvo = registrar_hash_alvo(target, "dominio", resultados)
+
+        status_gratis_txt = ""
+        if not usuario_ja_usou_gratis(user_id):
+            status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
+
+        texto = (
+            f"🌐 CONSULTA DE INFRAESTRUTURA E DOMÍNIO:\n"
+            f"👤 {target}\n"
+            f"───────────────────────────────\n\n"
+            f"Gere o Painel Web Interativo com ferramentas de análise:\n"
+            f"• Whois ICANN | DNS Dumpster | SecurityTrails | Shodan | Wayback Machine\n\n"
+            f"{status_gratis_txt}"
+            f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+            f"👉 Canal Oficial: {CANAL_TAG_PUBLICO}"
+        )
+        markup = construir_markup_oferta(hash_alvo, user_id)
+        bot.send_message(message.chat.id, texto, reply_markup=markup)
 
     @bot.message_handler(commands=['user'])
     def handle_user_command(message):
@@ -982,16 +1145,16 @@ if bot:
         target_user = partes[1].replace("@", "").strip()
 
         if not RE_USERNAME.match(target_user):
-            responder_seguro(message, "⚠️ Username Inválido!\nEnvia apenas letras, números, pontos e traços (sem e-mail, espaços ou links).")
+            responder_seguro(message, "⚠️ Username Inválido!\nEnvia apenas letras, números, pontos e traços.")
             orientar_uso_correto(message.chat.id)
             return
 
         if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nVocê atingiu o limite de 6 consultas por hora. Aguarde um momento para realizar novas varreduras.")
+            responder_seguro(message, "⚠️ Limite de buscas atingido!\nAguarde um momento para realizar novas varreduras.")
             return
 
         msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target_user}...")
-        resultados = executar_varredura_osint(target_user, is_fullname=False, is_email=False)
+        resultados = executar_varredura_osint(target_user, query_type="username")
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
         if msg_status:
@@ -1031,22 +1194,17 @@ if bot:
     def handle_email_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
-
-        texto_limpo = message.text.replace("\n", " ").strip()
-        partes = texto_limpo.split(maxsplit=1)
+        partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o e-mail após o comando /email.\nExemplo: /email alvo@gmail.com")
-            orientar_uso_correto(message.chat.id)
             return
 
         email_alvo = partes[1].strip()
-
         if not e_email_valido(email_alvo):
-            responder_seguro(message, "⚠️ Comando Inválido para E-mail!\nO comando /email exige um e-mail válido no formato usuario@dominio.com.")
-            orientar_uso_correto(message.chat.id)
+            responder_seguro(message, "⚠️ E-mail Inválido!\nUse o formato usuario@dominio.com.")
             return
 
-        resultados = executar_varredura_osint(email_alvo, is_email=True)
+        resultados = executar_varredura_osint(email_alvo, query_type="email")
         hash_alvo = registrar_hash_alvo(email_alvo, "email", resultados)
 
         status_gratis_txt = ""
@@ -1063,7 +1221,6 @@ if bot:
             f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
             f"👉 Acompanhe alertas no canal: {CANAL_TAG_PUBLICO}"
         )
-
         markup = construir_markup_oferta(hash_alvo, user_id)
         bot.send_message(message.chat.id, texto_email, reply_markup=markup)
 
@@ -1071,22 +1228,17 @@ if bot:
     def handle_nome_command(message):
         user_id = message.from_user.id
         registrar_acesso(user_id)
-
-        texto_limpo = message.text.replace("\n", " ").strip()
-        partes = texto_limpo.split(maxsplit=1)
+        partes = message.text.strip().split(maxsplit=1)
         if len(partes) < 2:
             responder_seguro(message, "⚠️ Comando Incompleto!\nEnvie o nome completo após o comando /nome.\nExemplo: /nome João da Silva")
-            orientar_uso_correto(message.chat.id)
             return
 
         nome_alvo = partes[1].strip()
-
-        if not e_nome_completo(nome_alvo) or "@" in nome_alvo or e_url(nome_alvo):
-            responder_seguro(message, "⚠️ Comando Inválido para Nome Completo!\nO comando /nome exige nome e sobrenome completo (sem e-mails ou URLs).")
-            orientar_uso_correto(message.chat.id)
+        if not e_nome_completo(nome_alvo):
+            responder_seguro(message, "⚠️ Nome Inválido!\nDigite nome e sobrenome completo.")
             return
 
-        resultados = executar_varredura_osint(nome_alvo, is_fullname=True)
+        resultados = executar_varredura_osint(nome_alvo, query_type="fullname")
         hash_alvo = registrar_hash_alvo(nome_alvo, "fullname", resultados)
 
         status_gratis_txt = ""
@@ -1097,13 +1249,12 @@ if bot:
             f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
             f"👤 {nome_alvo.upper()}\n"
             f"───────────────────────────────\n\n"
-            f"Gere o Painel Web Interativo com consultas configuradas para os principais portais públicos:\n"
+            f"Gere o Painel Web Interativo com consultas configuradas para:\n"
             f"• Jusbrasil | Escavador | Diários Oficiais | Portal Transparência\n\n"
             f"{status_gratis_txt}"
             f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
             f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
         )
-
         markup = construir_markup_oferta(hash_alvo, user_id)
         bot.send_message(message.chat.id, texto_oferta, reply_markup=markup)
 
@@ -1135,18 +1286,13 @@ if bot:
         )
 
         grupo_target = obter_grupo_logs_id()
-        
         try:
             bot.send_message(grupo_target, relatorio_financeiro)
-            logger.info("Relatório de estatísticas enviado para o grupo de logs: %s", grupo_target)
             if message.chat.type == 'private':
                 bot.reply_to(message, "✅ Relatório de estatísticas enviado diretamente para o grupo de logs/financeiro.")
         except Exception as e:
             logger.error("Falha ao enviar relatório para o grupo (%s): %s", grupo_target, str(e))
-            bot.reply_to(
-                message,
-                f"⚠️ Erro ao enviar para o grupo ({grupo_target}): Verifique se o bot é administrador do grupo."
-            )
+            bot.reply_to(message, f"⚠️ Erro ao enviar para o grupo ({grupo_target}).")
 
     @bot.message_handler(commands=['conceder'])
     def handle_conceder_command(message):
@@ -1165,11 +1311,13 @@ if bot:
             responder_seguro(message, "⚠️ ID de usuário inválido.")
             return
 
-        is_fullname = e_nome_completo(alvo)
-        is_email = e_email_valido(alvo)
-        qtype = "email" if is_email else ("fullname" if is_fullname else "username")
+        qtype = "username"
+        if e_email_valido(alvo): qtype = "email"
+        elif e_nome_completo(alvo): qtype = "fullname"
+        elif RE_CNPJ.match(re.sub(r'\D', '', alvo)): qtype = "cnpj"
+        elif RE_FONE.match(re.sub(r'\D', '', alvo)): qtype = "fone"
 
-        resultados = executar_varredura_osint(alvo, is_fullname=is_fullname, is_email=is_email)
+        resultados = executar_varredura_osint(alvo, query_type=qtype)
         results_json = json.dumps(resultados)
         token_relatorio = secrets.token_urlsafe(16)
         pid_cortesia = f"cortesia_{int(time.time())}"
@@ -1211,63 +1359,10 @@ if bot:
             return
 
         texto = message.text.replace("\n", " ").strip()
-        
-        if user_id == ADMIN_ID and texto.lower().startswith("admin"):
-            partes_admin = texto.split(maxsplit=2)
-            
-            if len(partes_admin) >= 3 and partes_admin[1].lower() in ["user", "nome", "email"]:
-                subcomando = partes_admin[1].lower()
-                target = partes_admin[2].replace("@", "").strip()
-                
-                is_email = (subcomando == "email")
-                is_fullname = (subcomando == "nome")
-            else:
-                target = texto.lower().replace("admin", "").replace("@", "").strip()
-                is_email = e_email_valido(target)
-                is_fullname = e_nome_completo(target) if not is_email else False
-
-            if len(target) < 2:
-                responder_seguro(message, "⚠️ Termo de busca muito curto para modo Admin.")
-                return
-
-            qtype = "email" if is_email else ("fullname" if is_fullname else "username")
-
-            msg_status = responder_seguro(message, f"👑 [ADMIN VIP - {qtype.upper()}] Processando consulta...")
-            resultados = executar_varredura_osint(target, is_fullname=is_fullname, is_email=is_email)
-            results_json = json.dumps(resultados)
-            token_relatorio = secrets.token_urlsafe(16)
-            pid_admin = f"admin_{int(time.time())}"
-
-            db_execute(
-                "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, query_type, results_json, created_at) "
-                "VALUES (?, ?, ?, 0.0, 'approved', ?, ?, ?, ?) "
-                "ON CONFLICT(payment_id) DO UPDATE SET status='approved', token=excluded.token",
-                (pid_admin, user_id, target, token_relatorio, qtype, results_json, datetime.now(TIMEZONE_BR).isoformat()),
-                commit=True
-            )
-            registrar_relatorio()
-
-            if msg_status:
-                try:
-                    bot.edit_message_text(f"✅ Varredura Módulo {qtype.upper()} concluída!", chat_id=message.chat.id, message_id=msg_status.message_id)
-                except Exception:
-                    pass
-
-            link_web = f"{WEB_BASE_URL}/relatorio/{token_relatorio}"
-            markup = InlineKeyboardMarkup(row_width=1)
-            markup.add(InlineKeyboardButton("🌐 Acessar Painel Interativo Web (ADMIN)", url=link_web))
-
-            bot.send_message(
-                message.chat.id,
-                f"👑 [MODO ADMIN - {qtype.upper()}] Painel Web gerado com sucesso:",
-                reply_markup=markup
-            )
-            return
-
         target = texto.replace("@", "").strip()
 
-        if e_url(target):
-            responder_seguro(message, "⚠️ Comando Inválido!\nBusca por URLs/links não são aceitas. Digite apenas o username, /email ou /nome.")
+        if e_url(target) and not ("." in target and "/" not in target):
+            responder_seguro(message, "⚠️ Comando Inválido!\nUtilize os comandos específicos como /user, /email, /nome, /fone, /cnpj, /placa ou /dominio.")
             orientar_uso_correto(message.chat.id)
             return
 
@@ -1275,83 +1370,29 @@ if bot:
             responder_seguro(message, "⚠️ Termo de busca muito curto.")
             return
 
-        if e_email_valido(target):
-            resultados = executar_varredura_osint(target, is_email=True)
-            hash_alvo = registrar_hash_alvo(target, "email", resultados)
-            status_gratis_txt = ""
-            if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
+        qtype = "username"
+        if e_email_valido(target): qtype = "email"
+        elif e_nome_completo(target): qtype = "fullname"
+        elif RE_CNPJ.match(re.sub(r'\D', '', target)): qtype = "cnpj"
+        elif RE_FONE.match(re.sub(r'\D', '', target)): qtype = "fone"
+        elif RE_PLACA.match(target.upper().replace("-", "")): qtype = "placa"
 
-            texto_email = (
-                f"📧 MÓDULO DE CONSULTA DE E-MAIL:\n"
-                f"👤 {target}\n"
-                f"───────────────────────────────\n\n"
-                f"Gere o Painel Web Interativo com os atalhos organizados para as principais plataformas de verificação:\n"
-                f"• Have I Been Pwned | DeHashed | IntelX | BreachDirectory | Scylla\n\n"
-                f"{status_gratis_txt}"
-                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-                f"👉 Acompanhe alertas no canal: {CANAL_TAG_PUBLICO}"
-            )
-
-            markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_email, reply_markup=markup)
-            return
-
-        if e_nome_completo(target):
-            resultados = executar_varredura_osint(target, is_fullname=True)
-            hash_alvo = registrar_hash_alvo(target, "fullname", resultados)
-            status_gratis_txt = ""
-            if not usuario_ja_usou_gratis(user_id):
-                status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
-
-            texto_upsell_oferta = (
-                f"🔍 BUSCA JUDICIAL E REGISTROS PÚBLICOS:\n"
-                f"👤 {target.upper()}\n"
-                f"───────────────────────────────\n\n"
-                f"Gere o Painel Web Interativo com consultas configuradas para os principais portais públicos:\n"
-                f"• Jusbrasil | Escavador | Diários Oficiais | Portal Transparência\n\n"
-                f"{status_gratis_txt}"
-                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
-                f"👉 Entre no nosso canal oficial: {CANAL_TAG_PUBLICO}"
-            )
-
-            markup = construir_markup_oferta(hash_alvo, user_id)
-            bot.send_message(message.chat.id, texto_upsell_oferta, reply_markup=markup)
-            return
-
-        if not RE_USERNAME.match(target):
-            responder_seguro(message, "⚠️ Username Inválido!\nUse apenas letras, números, pontos ou traços.")
-            orientar_uso_correto(message.chat.id)
-            return
-
-        if not limite_busca_ok(user_id):
-            responder_seguro(message, "⚠️ Limite de buscas atingido!\nVocê atingiu o limite de 6 consultas por hora. Aguarde um momento para realizar novas varreduras.")
-            return
-
-        msg_status = responder_seguro(message, f"🔎 Mapeando plataformas para @{target}...")
-        resultados = executar_varredura_osint(target, is_fullname=False, is_email=False)
+        resultados = executar_varredura_osint(target, query_type=qtype)
         encontrados = [p for p, data in resultados.items() if data.get("exists") is True]
 
-        if msg_status:
-            try:
-                bot.edit_message_text(f"✅ Mapeamento concluído para @{target}!", chat_id=message.chat.id, message_id=msg_status.message_id)
-            except Exception:
-                pass
-
-        if encontrados:
-            hash_alvo = registrar_hash_alvo(target, "username", resultados)
-            lista_plataformas = "\n".join([f"• {p}" for p in encontrados])
+        if encontrados or qtype != "username":
+            hash_alvo = registrar_hash_alvo(target, qtype, resultados)
             status_gratis_txt = ""
             if not usuario_ja_usou_gratis(user_id):
                 status_gratis_txt = "🎁 BÓNUS GRATUITO DISPONÍVEL: Resgate o seu relatório SEM CUSTO por ser membro do canal oficial!\n\n"
 
             texto_resultado = (
-                f"🎯 POSSÍVEIS PERFIS PARA @{target}\n"
+                f"🎯 CONSULTA OSINT DE ALVO ({qtype.upper()}):\n"
+                f"👤 {target}\n"
                 f"───────────────────────────────\n\n"
-                f"{lista_plataformas}\n\n"
-                f"⚠️ Identificamos {len(encontrados)} possíveis plataformas associadas a este termo.\n\n"
+                f"Gere o seu Painel Web Interativo completo para acessar todos os atalhos e resultados mapeados.\n\n"
                 f"{status_gratis_txt}"
-                f"💳 Valor normal da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
+                f"💳 Valor da consulta: R$ {PRECO_PADRAO:.2f} no Pix\n\n"
                 f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}"
             )
 
@@ -1360,7 +1401,7 @@ if bot:
         else:
             bot.send_message(
                 message.chat.id,
-                f"ℹ️ Varredura concluída: Nenhum perfil público localizado para @{target}.\n\n"
+                f"ℹ️ Varredura concluída: Nenhum registro público localizado para @{target}.\n\n"
                 f"👉 Fique por dentro de novas técnicas de OSINT no nosso canal: {CANAL_TAG_PUBLICO}"
             )
 
@@ -1389,7 +1430,6 @@ if bot:
                 bot.send_message(call.message.chat.id, msg_aviso, reply_markup=markup)
                 return
 
-            # REIVINDICAÇÃO ATÔMICA NO BANCO
             ok = db_execute(
                 "INSERT INTO free_claims (user_id, claimed_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING RETURNING user_id",
                 (user_id, datetime.now(TIMEZONE_BR).isoformat()), fetchone=True, commit=True
@@ -1412,20 +1452,6 @@ if bot:
                 f"Clique no botão abaixo para acessar o painel completo do alvo {target}:",
                 reply_markup=markup
             )
-
-            # Notificar no grupo de logs
-            grupo_logs_id = obter_grupo_logs_id()
-            if grupo_logs_id:
-                try:
-                    bot.send_message(
-                        grupo_logs_id,
-                        f"🎁 RELATÓRIO GRATUITO RESGATADO\n"
-                        f"• Utilizador ID: {user_id}\n"
-                        f"• Alvo: {target} ({qtype.upper()})\n"
-                        f"• Status: Sucesso (Membro do Canal)"
-                    )
-                except Exception:
-                    pass
 
         elif call.data.startswith("b_"):
             hash_curto = call.data.split("b_")[1]
@@ -1474,7 +1500,7 @@ if bot:
             bot.edit_message_text(
                 chat_id=call.message.chat.id, 
                 message_id=call.message.message_id, 
-                text=f"👍 Entendido! Digite um username, /email ou /nome para iniciar uma nova busca.\n\n👉 Acompanhe as novidades no canal: {CANAL_TAG_PUBLICO}"
+                text=f"👍 Entendido! Digite um comando como /user, /email, /nome ou /fone para iniciar uma nova busca.\n\n👉 Acompanhe as novidades no canal: {CANAL_TAG_PUBLICO}"
             )
 
         elif call.data.startswith("getkey_"):
@@ -1548,8 +1574,7 @@ def webhook():
                                         f"⚠️ Pix aprovado SEM registro utilizável\n"
                                         f"• Pagamento ID: {pid_str}\n"
                                         f"• Comprador ID: {meta.get('telegram_user_id')}\n"
-                                        f"• Valor: R$ {info.get('transaction_amount', 0.0):.2f}\n\n"
-                                        f"Estorne ou solicite o alvo ao cliente para utilizar o comando /conceder."
+                                        f"• Valor: R$ {info.get('transaction_amount', 0.0):.2f}"
                                     )
                         except Exception:
                             logger.exception("Falha ao alertar pagamento órfão no grupo de logs")
@@ -1582,19 +1607,14 @@ def webhook():
                             bot.send_message(
                                 telegram_id,
                                 f"⚡ PAGAMENTO CONFIRMADO — KRONOS INTEL VIP\n\n"
-                                f"Sua consulta foi liberada com sucesso!\n\n"
+                                f"Sua consulta ({query_type.upper()}) foi liberada com sucesso!\n\n"
                                 f"🔗 Clique no botão abaixo para acessar o painel e baixar o relatório TXT.\n\n"
-                                f"👉 Faça parte do nosso canal oficial de novidades: {CANAL_TAG_PUBLICO}",
+                                f"👉 Faça parte do nosso canal oficial: {CANAL_TAG_PUBLICO}",
                                 reply_markup=markup
                             )
                             registrar_relatorio()
                         except Exception:
                             logger.exception("Falha ao entregar relatório")
-                            if grupo_logs_id:
-                                bot.send_message(
-                                    grupo_logs_id,
-                                    f"⚠️ Pix {pid_str} aprovado, mas não consegui avisar o comprador {telegram_id}.\nLink: {link_web}"
-                                )
 
                     if bot and grupo_logs_id:
                         try:
@@ -1618,7 +1638,7 @@ def webhook():
 
 @app.route("/")
 def index():
-    return "Kronos Intel OSINT Bot & Webhook v27.0 Active.", 200
+    return "Kronos Intel OSINT Bot & Webhook v28.0 Active.", 200
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG", "0") == "1", host="0.0.0.0", port=PORT)
