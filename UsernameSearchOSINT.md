@@ -99,6 +99,10 @@ O endpoint `/healthz` também informa, sem revelar segredos, se Telegram, Mercad
 
 Comandos iniciados por `/` que não pertencem ao escopo do bot agora retornam uma mensagem de **comando inválido**, com a lista resumida dos comandos válidos. Todas as consultas também passam por `CONSULTA_TIMEOUT` (35 segundos no Render); quando um provedor demora além desse limite, o usuário recebe uma falha explícita em vez de ficar indefinidamente na mensagem de carregamento.
 
+Os relatórios agora exibem todas as fontes com status, observações e links, inclusive quando a fonte é apenas uma referência manual. E-mail usa a API do Have I Been Pwned quando `HIBP_API_KEY` estiver configurada e também inclui referências oficiais da Intelligence X, DeHashed e Mozilla Monitor. Nome completo inclui Jusbrasil, Escavador e buscas de presença em Google, Bing, DuckDuckGo, Yandex e Google News. Username inclui plataformas diretas, buscadores e uma referência manual ao MyCred; a presença precisa ser confirmada porque o MyCred não é um enumerador universal. Placa inclui Sinesp, Gov.br e SENATRAN, sem retornar proprietário, CPF ou endereço. Domínio inclui reputação do VirusTotal, Google Safe Browsing, URLScan e WHOIS; o VirusTotal não é uma fonte de senhas.
+
+Por segurança, o bot não coleta nem exibe senhas, tokens, dumps ou conteúdo bruto de vazamentos. APIs de terceiros como HIBP, IntelX e DeHashed devem ser usadas apenas com credenciais próprias, autorização e respeito aos termos do provedor.
+
 Novos módulos de consulta
 
 Cada tipo de pesquisa está isolado em um arquivo que pode ser chamado pelo dispatcher em `usernamesearchosint.py`:

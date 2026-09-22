@@ -152,6 +152,19 @@ def link_pdf(url: str) -> str:
         return sanitizar_pdf(url)
     return f'<a href="{sanitizar_pdf(seguro)}">{sanitizar_pdf(seguro)}</a>'
 
+def resumo_resultado(item: dict[str, Any]) -> str:
+    status = str(item.get("status") or ("found" if item.get("exists") is True else "not_found"))
+    partes = [f"Status: {status}"]
+    if item.get("breach_count") is not None:
+        partes.append(f"violações: {item['breach_count']}")
+    if item.get("breaches"):
+        partes.append("fontes: " + ", ".join(str(x) for x in item["breaches"][:10]))
+    if item.get("note"):
+        partes.append(str(item["note"]))
+    if item.get("text"):
+        partes.append(str(item["text"]))
+    return " — ".join(partes)
+
 def extrair_alvo_limpo(texto: str, preservar_arroba: bool = False) -> str:
     """ Extrai o termo de busca ignorando comandos e o caractere @. """
     partes = texto.strip().split(maxsplit=1)
@@ -489,6 +502,16 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
     resultados["X / Twitter Profile Direct"] = {"exists": True, "url": f"https://x.com/{encoded_user}"}
     resultados["WhatsMyName Username Enum"] = {"exists": True, "url": f"https://whatsmyname.app/?q={encoded_user}"}
     
+    resultados.update({
+        "MyCred — referência manual": {
+            "exists": None, "status": "reference_only", "url": "https://mycred.com/",
+            "query": username_limpo,
+            "note": "MyCred não é um enumerador universal; confirme qualquer ocorrência manualmente.",
+        },
+        "Google — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.google.com/search?q=%22{encoded_user}%22"},
+        "Bing — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.bing.com/search?q=%22{encoded_user}%22"},
+        "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded_user}%22"},
+    })
     return resultados
 
 def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
@@ -502,6 +525,14 @@ def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
         "TikTok": {"exists": True, "url": f"https://www.tiktok.com/@{encoded}"},
         "YouTube": {"exists": True, "url": f"https://www.youtube.com/@{encoded}"},
         "Mastodon / pesquisa": {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded}%22"},
+        "MyCred — referência manual": {
+            "exists": None, "status": "reference_only",
+            "url": "https://mycred.com/", "query": username,
+            "note": "MyCred não é um enumerador universal; a presença precisa ser confirmada manualmente.",
+        },
+        "Google — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.google.com/search?q=%22{encoded}%22"},
+        "Bing — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.bing.com/search?q=%22{encoded}%22"},
+        "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded}%22"},
     }
 
 def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
@@ -622,9 +653,10 @@ def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_ty
     table_data = [[Paragraph("PLATAFORMA / CAMPO", header_table_style), Paragraph("INFORMAÇÃO / LINK DIRETO", header_table_style)]]
 
     for p, v in resultados.items():
-        if isinstance(v, dict) and v.get("exists") is True:
+        if isinstance(v, dict):
             url_str = v.get('url', '')
-            table_data.append([Paragraph(f"<b>{sanitizar_pdf(p)}</b>", cell_style), Paragraph(link_pdf(url_str), cell_url_style)])
+            detalhe = f"{link_pdf(url_str)}<br/>{sanitizar_pdf(resumo_resultado(v))}"
+            table_data.append([Paragraph(f"<b>{sanitizar_pdf(p)}</b>", cell_style), Paragraph(detalhe, cell_url_style)])
 
     t_results = Table(table_data, colWidths=[180, 360])
     t_results.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0f172a')), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')), ('PADDING', (0,0), (-1,-1), 6)]))
@@ -937,11 +969,11 @@ def ver_relatorio_web(token):
     except Exception:
         results_json = {}
 
-    encontrados = []
+    fontes = []
     if isinstance(results_json, dict):
         for k, v in results_json.items():
-            if isinstance(v, dict) and v.get("exists") is True and v.get("url") != "#":
-                encontrados.append({"nome": k, "url": v.get("url")})
+            if isinstance(v, dict):
+                fontes.append({"nome": k, "url": v.get("url", ""), "resumo": resumo_resultado(v)})
 
     html_content = f"""
     <!DOCTYPE html>
@@ -967,8 +999,15 @@ def ver_relatorio_web(token):
                 <h4>Fontes e Bases Localizadas:</h4>
                 <div class="mt-3">
     """
-    for item in encontrados:
-        html_content += f'<a href="{item["url"]}" target="_blank" class="btn-link-custom">🔗 {item["nome"]} — {item["url"]}</a>'
+    for item in fontes:
+        nome = html.escape(str(item["nome"]))
+        url = html.escape(str(item["url"]))
+        resumo = html.escape(str(item["resumo"]))
+        if url.startswith(("http://", "https://")):
+            html_content += f'<a href="{url}" target="_blank" class="btn-link-custom">🔗 {nome} — abrir fonte</a>'
+        else:
+            html_content += f'<div class="btn-link-custom">🔎 {nome}</div>'
+        html_content += f'<p class="text-muted">{resumo}</p>'
     
     html_content += """
                 </div>

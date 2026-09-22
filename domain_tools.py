@@ -26,6 +26,7 @@ def consultar_dominio(dominio: str, timeout: int = 12) -> dict[str, dict[str, An
             "exists": True,
             "status": "api_key_required" if not os.getenv("VT_API_KEY") else "pending",
             "url": "https://www.virustotal.com/gui/domain/" + dominio,
+            "note": "VirusTotal avalia reputação e indicadores de ameaça; não informa senhas do domínio.",
         },
         "URLScan": {
             "exists": True,

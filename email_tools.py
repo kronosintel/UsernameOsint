@@ -1,14 +1,16 @@
-"""Consultas públicas e autorizadas relacionadas a um endereço de e-mail.
+"""Consulta defensiva de exposição de e-mail.
 
-A integração usa a API oficial do Have I Been Pwned quando HIBP_API_KEY está
-configurada. Ela retorna nomes e metadados de violações, não senhas nem dados
-expostos.
+O módulo nunca retorna senhas, tokens ou dados privados. A API do HIBP exige
+uma chave própria; IntelX e DeHashed aparecem como fontes oficiais para
+verificação manual ou integração autorizada quando o usuário configurar suas
+credenciais.
 """
 from __future__ import annotations
 
 import os
 import re
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -20,20 +22,25 @@ def _resultado(nome: str, url: str, status: str, **extra: Any) -> dict[str, Any]
 
 
 def consultar_email(email: str, timeout: int = 12) -> dict[str, dict[str, Any]]:
-    """Consulta ocorrência do e-mail em serviços públicos/legítimos."""
     email = email.strip().lower()
     if not EMAIL_RE.fullmatch(email):
         raise ValueError("Informe um endereço de e-mail válido.")
 
+    encoded = quote(email, safe="")
     resultados: dict[str, dict[str, Any]] = {}
-    hibp_url = "https://haveibeenpwned.com/account/" + email
+    hibp_url = "https://haveibeenpwned.com/account/" + encoded
     api_key = os.getenv("HIBP_API_KEY", "").strip()
     if not api_key:
-        resultados.update(_resultado("Have I Been Pwned", hibp_url, "api_key_required"))
+        resultados.update(_resultado(
+            "Have I Been Pwned",
+            hibp_url,
+            "api_key_required",
+            note="Configure HIBP_API_KEY para obter automaticamente os nomes das violações.",
+        ))
     else:
         try:
             response = requests.get(
-                "https://haveibeenpwned.com/api/v3/breachedaccount/" + email,
+                "https://haveibeenpwned.com/api/v3/breachedaccount/" + encoded,
                 headers={"hibp-api-key": api_key, "user-agent": "UsernameOsint/1.0"},
                 params={"truncateResponse": "true"},
                 timeout=timeout,
@@ -42,8 +49,8 @@ def consultar_email(email: str, timeout: int = 12) -> dict[str, dict[str, Any]]:
                 breaches = response.json()
                 resultados.update(_resultado(
                     "Have I Been Pwned", hibp_url, "found",
-                    breach_count=len(breaches) if isinstance(breaches, list) else None,
-                    breaches=breaches if isinstance(breaches, list) else [],
+                    breach_count=len(breaches) if isinstance(breaches, list) else 0,
+                    breaches=[item.get("Name") for item in breaches if isinstance(item, dict) and item.get("Name")],
                 ))
             elif response.status_code == 404:
                 resultados.update(_resultado("Have I Been Pwned", hibp_url, "not_found", breach_count=0))
@@ -56,14 +63,30 @@ def consultar_email(email: str, timeout: int = 12) -> dict[str, dict[str, Any]]:
         except requests.RequestException as exc:
             resultados.update(_resultado("Have I Been Pwned", hibp_url, "unavailable", error=str(exc)))
 
-    resultados.update(_resultado(
-        "Mozilla Monitor",
-        "https://monitor.mozilla.org/scan",
-        "reference_only",
-        note="Use o site oficial para uma consulta manual adicional.",
-    ))
+    resultados.update({
+        "Intelligence X (IntelX)": {
+            "exists": None,
+            "status": "reference_only",
+            "url": "https://intelx.io/",
+            "query": email,
+            "note": "Abra a fonte oficial e pesquise o e-mail. Resultados dependem da licença e dos limites da conta.",
+        },
+        "DeHashed": {
+            "exists": None,
+            "status": "reference_only",
+            "url": "https://dehashed.com/search",
+            "query": email,
+            "note": "Pesquisa manual/API exige conta e autorização; o relatório não coleta credenciais ou senhas.",
+        },
+        "Mozilla Monitor": {
+            "exists": None,
+            "status": "reference_only",
+            "url": "https://monitor.mozilla.org/scan",
+            "query": email,
+        },
+    })
     resultados["observacao"] = {
         "status": "safe_summary",
-        "text": "Nenhuma senha ou dado privado é coletado por este módulo; apenas metadados públicos de violações.",
+        "text": "O resultado indica nomes/metadados de exposição. Senhas, tokens e conteúdo de vazamentos nunca são exibidos.",
     }
     return resultados

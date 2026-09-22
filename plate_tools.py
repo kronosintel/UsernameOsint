@@ -29,6 +29,18 @@ def consultar_placa(placa: str, timeout: int = 12) -> dict[str, dict[str, Any]]:
             "url": "https://www.gov.br/pt-br/servicos/consultar-online-os-dados-de-placa-de-veiculo",
             "note": "Consulta manual no canal oficial; disponibilidade depende de autenticação e regras do serviço.",
         },
+        "Gov.br — dados da placa": {
+            "exists": None,
+            "status": "reference_only",
+            "url": "https://www.gov.br/pt-br/servicos/consultar-online-os-dados-de-placa-veicular",
+            "note": "Fonte oficial para fabricante, estampador, marca/modelo e ano quando o QR Code e as regras do serviço permitirem.",
+        },
+        "SENATRAN — Portal de Serviços": {
+            "exists": None,
+            "status": "reference_only",
+            "url": "https://portalservicos.senatran.serpro.gov.br/",
+            "note": "Acesso autenticado para consultas autorizadas do próprio usuário.",
+        },
         "Observação de privacidade": {
             "exists": True,
             "status": "safe_summary",

@@ -25,7 +25,8 @@ class UsernameSearchTests(unittest.TestCase):
         results = resultados_username_rapidos("alice")
         self.assertIn("GitHub", results)
         self.assertTrue(results["GitHub"]["url"].endswith("/alice"))
-        self.assertTrue(all(item["exists"] for item in results.values()))
+        self.assertEqual(results["GitHub"]["exists"], True)
+        self.assertEqual(results["MyCred — referência manual"]["status"], "reference_only")
 
     def test_email_lookup_returns_without_optional_api_key(self):
         results = executar_varredura_com_timeout("teste@example.com", "email")
