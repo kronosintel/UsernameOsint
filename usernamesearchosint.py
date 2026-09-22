@@ -791,5 +791,23 @@ def healthz():
 def index():
     return "Kronos Intel OSINT Active.", 200
 
+def configurar_webhook_telegram() -> None:
+    """Registra o webhook usando somente variáveis protegidas do Render."""
+    if not bot or not CFG.WEB_BASE_URL:
+        return
+    url = f"{CFG.WEB_BASE_URL}/telegram"
+    try:
+        if CFG.TELEGRAM_SECRET_TOKEN:
+            bot.set_webhook(url=url, secret_token=CFG.TELEGRAM_SECRET_TOKEN)
+        else:
+            bot.set_webhook(url=url)
+        logger.info("Webhook do Telegram configurado em %s", url)
+    except Exception as exc:
+        # Não impedir o Gunicorn de subir se o Telegram estiver temporariamente
+        # indisponível; o próximo deploy tentará novamente.
+        logger.warning("Não foi possível configurar o webhook do Telegram: %s", exc)
+
+configurar_webhook_telegram()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=CFG.PORT)
