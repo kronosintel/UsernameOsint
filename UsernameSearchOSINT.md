@@ -95,6 +95,8 @@ O comando `/user nome_do_usuario` também tenta consultar o Maigret por meio da 
 
 Para manter o bot rápido e estável, `MAIGRET_ENABLED=0` deixa o Maigret desligado por padrão e usa o catálogo rápido integrado. Depois de confirmar que o serviço está estável, o administrador pode ativar `MAIGRET_ENABLED=1`; nesse caso, o limite é controlado por `MAIGRET_TIMEOUT`.
 
+O endpoint `/healthz` também informa, sem revelar segredos, se Telegram, Mercado Pago, canal, QR code e Maigret estão configurados. A suíte local pode ser executada com `python3 -m unittest discover -v`; ela valida a rota de saúde, a raiz, o fallback rápido de username e o comportamento de tokens inexistentes.
+
 Novos módulos de consulta
 
 Cada tipo de pesquisa está isolado em um arquivo que pode ser chamado pelo dispatcher em `usernamesearchosint.py`:

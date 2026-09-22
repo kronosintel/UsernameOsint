@@ -370,7 +370,7 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
         "SELECT user_id, target_username, query_type, status, expires_at FROM payments WHERE external_reference = ?",
         (reference,), fetchone=True,
     )
-    if not row or row[3] == "approved":
+    if not row or row[3] in {"approved", "processing"}:
         return False
     if status != "approved":
         db_execute("UPDATE payments SET status = ?, provider_payment_id = ? WHERE external_reference = ?", (status, provider_payment_id, reference), commit=True)
@@ -381,8 +381,27 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
         db_execute("UPDATE payments SET status = 'expired', provider_payment_id = ? WHERE external_reference = ?", (provider_payment_id, reference), commit=True)
         return False
 
-    resultados = executar_varredura(target, query_type=qtype)
-    results_json = json.dumps(resultados, ensure_ascii=False)
+    with db_lock:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE payments SET status = 'processing', provider_payment_id = ? "
+            "WHERE external_reference = ? AND status = 'pending'",
+            (provider_payment_id, reference),
+        )
+        claimed = cur.rowcount == 1
+        conn.commit()
+        conn.close()
+    if not claimed:
+        return False
+
+    try:
+        resultados = executar_varredura(target, query_type=qtype)
+        results_json = json.dumps(resultados, ensure_ascii=False)
+    except Exception as exc:
+        logger.exception("Falha ao gerar relatório pago %s: %s", reference, exc)
+        db_execute("UPDATE payments SET status = 'report_error' WHERE external_reference = ?", (reference,), commit=True)
+        return False
     token_relatorio = secrets.token_urlsafe(16)
     db_execute(
         "UPDATE payments SET status = 'approved', provider_payment_id = ?, token = ?, results_json = ? WHERE external_reference = ?",
@@ -1022,7 +1041,14 @@ def telegram_webhook():
 
 @app.route("/healthz")
 def healthz():
-    return jsonify({"status": "healthy"}), 200
+    return jsonify({
+        "status": "healthy",
+        "telegram_configured": bool(CFG.TELEGRAM_TOKEN),
+        "mercadopago_configured": bool(CFG.MERCADOPAGO_ACCESS_TOKEN),
+        "channel_configured": bool(CFG.CANAL_PRINCIPAL_ID),
+        "maigret_enabled": CFG.MAIGRET_ENABLED,
+        "qrcode_available": qrcode is not None,
+    }), 200
 
 @app.route("/")
 def index():
