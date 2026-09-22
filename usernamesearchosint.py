@@ -75,6 +75,7 @@ class Config:
     MERCADOPAGO_ACCESS_TOKEN: str = os.getenv("MERCADOPAGO_ACCESS_TOKEN", os.getenv("MERCADOPAGO_TOKEN", "")).strip()
     PAGAMENTO_EXPIRACAO_MINUTOS: int = _env_int("PAGAMENTO_EXPIRACAO_MINUTOS", 30)
     ADMIN_BYPASS_PAYMENT: bool = os.getenv("ADMIN_BYPASS_PAYMENT", "1").lower() in {"1", "true", "yes"}
+    MAIGRET_TIMEOUT: int = _env_int("MAIGRET_TIMEOUT", 45)
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
@@ -495,7 +496,11 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
         # sites pode ser ativada no ambiente sem alterar o código do bot.
         try:
             todos_os_sites = os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"}
-            resultado_maigret = consultar_username(target_limpo, todos_os_sites=todos_os_sites)
+            resultado_maigret = consultar_username(
+                target_limpo,
+                todos_os_sites=todos_os_sites,
+                timeout=CFG.MAIGRET_TIMEOUT,
+            )
             resultados_maigret = {}
             for item in resultado_maigret.encontrados:
                 nome = item.get("site") or item.get("name") or item.get("title") or "Maigret"
