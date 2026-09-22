@@ -101,6 +101,18 @@ ADMIN_COMMANDS = {
     "/admin_dominio": "dominio",
 }
 
+ADMIN_MODULES = {
+    "user": "username",
+    "username": "username",
+    "email": "email",
+    "nome": "fullname",
+    "fullname": "fullname",
+    "fone": "fone",
+    "cnpj": "cnpj",
+    "placa": "placa",
+    "dominio": "dominio",
+}
+
 DDD_ESTADOS = {
     "11": "São Paulo (Grande SP)", "12": "São Paulo (Vale do Paraíba/Litoral Norte)", "13": "São Paulo (Baixada Santista)",
     "14": "São Paulo (Bauru/Marília/Jaú)", "15": "São Paulo (Sorocaba/Itapetininga)", "16": "São Paulo (Ribeirão Preto/Franca)",
@@ -758,6 +770,14 @@ if bot:
         if cmd == "/admin":
             if message.from_user.id != CFG.ADMIN_ID:
                 bot.reply_to(message, "⛔ Comando restrito ao administrador.")
+                return
+            if len(partes) == 2:
+                admin_partes = partes[1].split(maxsplit=1)
+                modulo = admin_partes[0].lower().lstrip("/")
+                if modulo in ADMIN_MODULES and len(admin_partes) == 2:
+                    iniciar_busca(message, admin_partes[1], ADMIN_MODULES[modulo])
+                    return
+                bot.reply_to(message, "Use: `/admin user alvo` ou `/admin email alvo`", parse_mode="Markdown")
                 return
             bot.send_message(message.chat.id, gerar_resumo_admin(), parse_mode="Markdown", disable_web_page_preview=True)
             return

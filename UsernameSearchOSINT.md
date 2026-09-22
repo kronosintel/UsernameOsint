@@ -135,6 +135,20 @@ O painel `/admin` e todos os comandos abaixo exigem que o ID do usuário do Tele
 /admin_dominio exemplo.com     reputação e sinais do domínio
 ```
 
+Também é possível usar o formato unificado, sempre restrito ao `ADMIN_ID`:
+
+```text
+/admin user nome_do_usuario
+/admin email email@dominio.com
+/admin nome Nome Completo
+/admin fone 11999998888
+/admin cnpj 11222333000181
+/admin placa ABC1D23
+/admin dominio exemplo.com
+```
+
+O comando `/admin` sem argumentos continua abrindo o painel administrativo. Os comandos públicos `/user`, `/email`, `/nome`, `/fone`, `/cnpj`, `/placa` e `/dominio` seguem a regra normal de consulta gratuita ou cobrança.
+
 Os comandos administrativos usam os mesmos módulos dos comandos públicos, mas ficam bloqueados para qualquer usuário que não corresponda ao `ADMIN_ID`. O painel exibe contagens e links dos últimos relatórios; ele não despeja os resultados completos no chat.
 
 Notificações de `/start` e consultas
