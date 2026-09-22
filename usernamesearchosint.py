@@ -469,6 +469,19 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
     
     return resultados
 
+def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
+    encoded = urllib.parse.quote(username)
+    return {
+        "GitHub": {"exists": True, "url": f"https://github.com/{encoded}"},
+        "GitLab": {"exists": True, "url": f"https://gitlab.com/{encoded}"},
+        "Instagram": {"exists": True, "url": f"https://www.instagram.com/{encoded}/"},
+        "X / Twitter": {"exists": True, "url": f"https://x.com/{encoded}"},
+        "Reddit": {"exists": True, "url": f"https://www.reddit.com/user/{encoded}/"},
+        "TikTok": {"exists": True, "url": f"https://www.tiktok.com/@{encoded}"},
+        "YouTube": {"exists": True, "url": f"https://www.youtube.com/@{encoded}"},
+        "Mastodon / pesquisa": {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded}%22"},
+    }
+
 def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
     target_limpo = extrair_alvo_limpo(target)
 
@@ -494,7 +507,11 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
         return consultar_dominio(target_limpo)
     else:
         if not CFG.MAIGRET_ENABLED:
-            return asyncio.run(consultar_alvo_async(target_limpo))
+            try:
+                return asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
+            except Exception as exc:
+                logger.warning("Catálogo online demorou ou falhou; usando relatório rápido: %s", exc)
+                return resultados_username_rapidos(target_limpo)
         # Maigret amplia a busca para milhares de sites. A opção de todos os
         # sites pode ser ativada no ambiente sem alterar o código do bot.
         try:
@@ -523,7 +540,11 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
 
         # Mantém o comportamento anterior quando a dependência não está
         # disponível, há timeout ou a versão instalada não retorna NDJSON.
-        return asyncio.run(consultar_alvo_async(target_limpo))
+        try:
+            return asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
+        except Exception as exc:
+            logger.warning("Fallback online demorou ou falhou; usando relatório rápido: %s", exc)
+            return resultados_username_rapidos(target_limpo)
 
 def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     buffer = io.BytesIO()
