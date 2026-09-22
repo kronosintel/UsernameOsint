@@ -559,13 +559,25 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
     enviar_notificacao_evento("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None)
 
     if user_id != CFG.ADMIN_ID and not consulta_gratis:
+        bot.send_message(
+            message.chat.id,
+            f"⏳ Consulta `{qtype.upper()}` recebida. Gerando cobrança de *{_preco_formatado()}*...",
+            parse_mode="Markdown",
+        )
         checkout = criar_preferencia_pagamento(message, target, qtype)
         if not checkout:
-            bot.reply_to(message, "⚠️ Não foi possível gerar o pagamento agora. Tente novamente em instantes.")
+            bot.send_message(
+                message.chat.id,
+                "⚠️ Não foi possível gerar o pagamento. O administrador precisa verificar "
+                "MERCADOPAGO_TOKEN/MERCADOPAGO_ACCESS_TOKEN e os logs do Render.",
+            )
             return
         _, checkout_url = checkout
         enviar_checkout_com_qr(message.chat.id, checkout_url, target, qtype)
         return
+
+    if consulta_gratis:
+        bot.send_message(message.chat.id, "🎁 Você está usando sua única consulta gratuita como membro do canal.")
 
     resultados = executar_varredura(target, query_type=qtype)
 
