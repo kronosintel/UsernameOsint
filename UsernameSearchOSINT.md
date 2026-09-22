@@ -170,6 +170,14 @@ O endereço público usado como `notification_url` é:
 https://usernameosint-1-vcj4.onrender.com/webhooks/mercadopago
 ```
 
+O webhook do Telegram usa uma rota fixa, sem token na URL:
+
+```text
+https://usernameosint-1-vcj4.onrender.com/telegram
+```
+
+O valor de `TELEGRAM_SECRET_TOKEN` é enviado pelo Telegram no cabeçalho `X-Telegram-Bot-Api-Secret-Token`.
+
 Depois de salvar as variáveis, faça **Manual Deploy → Deploy latest commit**. Teste primeiro em ambiente de teste do Mercado Pago; só mantenha um token de produção quando estiver confirmado que o valor, o usuário, o módulo e a liberação do relatório estão corretos. Nunca publique o token em issues, commits, screenshots ou mensagens.
 
 Render Web Service

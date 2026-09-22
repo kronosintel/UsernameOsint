@@ -767,10 +767,14 @@ def _processar_update_async(update_json):
     except Exception as e:
         logger.error(f"Erro ao processar mensagem do Telegram: {e}")
 
-@app.route(f"/telegram/{CFG.TELEGRAM_SECRET_TOKEN}", methods=["POST"])
+@app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     if not bot:
         return jsonify({"error": "bot_disabled"}), 400
+    if CFG.TELEGRAM_SECRET_TOKEN:
+        recebido = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not secrets.compare_digest(recebido, CFG.TELEGRAM_SECRET_TOKEN):
+            return jsonify({"error": "forbidden"}), 403
     try:
         data = request.get_json(force=True, silent=True)
         if data:
