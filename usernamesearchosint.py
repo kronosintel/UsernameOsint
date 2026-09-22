@@ -560,7 +560,7 @@ def gerar_painel_gratuito(user_id: int, target: str, qtype: str, resultados: dic
     )
     return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
-def processar_busca(message, raw_target: str, qtype: str = "username"):
+def _processar_busca(message, raw_target: str, qtype: str = "username"):
     user_id = message.from_user.id
     target = extrair_alvo_limpo(raw_target)
 
@@ -628,6 +628,22 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
             reply_markup=markup,
             parse_mode="Markdown"
         )
+
+def processar_busca(message, raw_target: str, qtype: str = "username"):
+    """Executa a consulta e informa falhas que ocorram na thread."""
+    try:
+        _processar_busca(message, raw_target, qtype)
+    except Exception as exc:
+        logger.exception("Falha ao gerar relatório (%s): %s", qtype, exc)
+        if bot:
+            try:
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ A consulta foi recebida, mas ocorreu um erro ao gerar o relatório. "
+                    "O administrador foi avisado nos logs. Tente novamente.",
+                )
+            except Exception:
+                logger.exception("Falha ao avisar o usuário sobre erro de relatório")
 
 def iniciar_busca(message, raw_target: str, qtype: str = "username") -> None:
     """Inicia a consulta fora do handler do webhook para não bloquear o bot."""
