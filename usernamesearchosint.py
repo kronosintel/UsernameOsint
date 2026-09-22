@@ -56,7 +56,7 @@ def _env_int(key: str, default: int) -> int:
 @dataclass
 class Config:
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wlA")
-    ADMIN_ID: int = _env_int("ADMIN_ID", 5041637922)
+    ADMIN_ID: int = _env_int("ADMIN_ID", 0)
     CANAL_TAG_PUBLICO: str = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
@@ -73,6 +73,16 @@ TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 db_lock = Lock()
 
 bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=False) if CFG.TELEGRAM_TOKEN else None
+
+ADMIN_COMMANDS = {
+    "/admin_user": "username",
+    "/admin_email": "email",
+    "/admin_nome": "fullname",
+    "/admin_fone": "fone",
+    "/admin_cnpj": "cnpj",
+    "/admin_placa": "placa",
+    "/admin_dominio": "dominio",
+}
 
 DDD_ESTADOS = {
     "11": "São Paulo (Grande SP)", "12": "São Paulo (Vale do Paraíba/Litoral Norte)", "13": "São Paulo (Baixada Santista)",
@@ -336,6 +346,41 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
             parse_mode="Markdown"
         )
 
+def gerar_resumo_admin() -> str:
+    """Monta um resumo administrativo sem expor resultados no chat."""
+    with db_lock:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+        cur = conn.cursor()
+        usuarios = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        relatorios = cur.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+        aprovados = cur.execute("SELECT COUNT(*) FROM payments WHERE status = 'approved'").fetchone()[0]
+        por_tipo = cur.execute(
+            "SELECT query_type, COUNT(*) FROM payments GROUP BY query_type ORDER BY COUNT(*) DESC"
+        ).fetchall()
+        ultimos = cur.execute(
+            "SELECT target_username, query_type, created_at, token FROM payments "
+            "ORDER BY created_at DESC LIMIT 8"
+        ).fetchall()
+        conn.close()
+
+    linhas = [
+        "👑 *PAINEL ADMINISTRATIVO*",
+        "",
+        f"• Usuários cadastrados: `{usuarios}`",
+        f"• Relatórios: `{relatorios}`",
+        f"• Relatórios aprovados: `{aprovados}`",
+        "",
+        "*Consultas por módulo:*",
+    ]
+    linhas.extend(f"• `{tipo}`: `{quantidade}`" for tipo, quantidade in por_tipo)
+    linhas.extend(["", "*Últimos relatórios:*"])
+    for alvo, tipo, criado_em, token in ultimos:
+        link = f"{CFG.WEB_BASE_URL}/relatorio/{token}"
+        linhas.append(f"• `{tipo}` — `{alvo}` — [{criado_em}]({link})")
+    if not ultimos:
+        linhas.append("• Nenhum relatório encontrado.")
+    return "\n".join(linhas)
+
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
@@ -376,18 +421,31 @@ if bot:
         )
         bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup, parse_mode="Markdown")
 
-    @bot.message_handler(commands=['admin_user', 'user', 'email', 'nome', 'fone', 'cnpj', 'placa', 'dominio'])
+    @bot.message_handler(commands=['admin', 'admin_user', 'admin_email', 'admin_nome', 'admin_fone', 'admin_cnpj', 'admin_placa', 'admin_dominio', 'user', 'email', 'nome', 'fone', 'cnpj', 'placa', 'dominio'])
     def handle_commands(message):
         cmd = message.text.split()[0].lower()
         partes = message.text.strip().split(maxsplit=1)
-        
+
+        if cmd == "/admin":
+            if message.from_user.id != CFG.ADMIN_ID:
+                bot.reply_to(message, "⛔ Comando restrito ao administrador.")
+                return
+            bot.send_message(message.chat.id, gerar_resumo_admin(), parse_mode="Markdown", disable_web_page_preview=True)
+            return
+
+        if cmd in ADMIN_COMMANDS and message.from_user.id != CFG.ADMIN_ID:
+            bot.reply_to(message, "⛔ Comando administrativo restrito ao administrador.")
+            return
+
         if len(partes) < 2:
             bot.reply_to(message, f"⚠️ Por favor, insira o termo de busca após o comando `{cmd}`.", parse_mode="Markdown")
             return
 
         alvo = partes[1]
         
-        if 'admin_user' in cmd or 'user' in cmd:
+        if cmd in ADMIN_COMMANDS:
+            processar_busca(message, alvo, ADMIN_COMMANDS[cmd])
+        elif cmd == '/user':
             processar_busca(message, alvo, "username")
         elif 'email' in cmd:
             processar_busca(message, alvo, "email")

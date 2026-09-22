@@ -120,6 +120,23 @@ Passo a passo para atualizar no Render
 
 Os segredos configurados no Render continuam fora do GitHub. Se uma chave já tiver sido exposta em commits anteriores, revogue-a no provedor e gere uma nova.
 
+Comandos administrativos
+
+O painel `/admin` e todos os comandos abaixo exigem que o ID do usuário do Telegram seja igual ao valor de `ADMIN_ID` configurado no Render:
+
+```text
+/admin                         resumo de usuários, relatórios e últimos acessos
+/admin_user nome_do_usuario    consulta Maigret/username
+/admin_email email@dominio     consulta de exposição do e-mail
+/admin_nome Nome Completo      pesquisa pública de processos e publicações
+/admin_fone 11999998888        consulta de telefone
+/admin_cnpj 11222333000181     consulta cadastral de CNPJ
+/admin_placa ABC1D23            referência de consulta de placa
+/admin_dominio exemplo.com     reputação e sinais do domínio
+```
+
+Os comandos administrativos usam os mesmos módulos dos comandos públicos, mas ficam bloqueados para qualquer usuário que não corresponda ao `ADMIN_ID`. O painel exibe contagens e links dos últimos relatórios; ele não despeja os resultados completos no chat.
+
 Render Web Service
 
 O projeto já está preparado para o Render. Use pip install -r requirements.txt como Build Command e gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT username_search_osint:app como Start Command. A rota / retorna texto simples e não depende da pasta templates, enquanto /health responde {"status":"ok"} e pode ser usado como Health Check Path. O arquivo render.yaml contém essa configuração de forma declarativa.
