@@ -30,6 +30,11 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from flask import Flask, jsonify, request, render_template_string, send_file
 from maigret_lookup import consultar_username
+from email_tools import consultar_email
+from plate_tools import consultar_placa
+from domain_tools import consultar_dominio
+from name_tools import consultar_nome_completo
+from cnpj_tools import consultar_cnpj
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -190,20 +195,9 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
     target_limpo = extrair_alvo_limpo(target)
 
     if query_type == "email":
-        encoded_email = urllib.parse.quote(target_limpo)
-        return {
-            "Have I Been Pwned (Vazamentos)": {"exists": True, "url": f"https://haveibeenpwned.com/account/{encoded_email}"},
-            "DeHashed CyberIntelligence": {"exists": True, "url": f"https://dehashed.com/search?query={encoded_email}"},
-            "Intelligence X (IntelX)": {"exists": True, "url": f"https://intelx.io/?s={encoded_email}"},
-            "BreachDirectory Engine": {"exists": True, "url": f"https://breachdirectory.org/search?query={encoded_email}"}
-        }
+        return consultar_email(target_limpo)
     elif query_type == "fullname":
-        encoded_name = urllib.parse.quote(f'"{target_limpo}"')
-        return {
-            "Jusbrasil (Processos e Diários)": {"exists": True, "url": f"https://www.jusbrasil.com.br/busca?q={encoded_name}"},
-            "Escavador (Publicações)": {"exists": True, "url": f"https://www.escavador.com/busca?q={encoded_name}"},
-            "Portal da Transparência": {"exists": True, "url": f"https://www.portaltransparencia.gov.br/busca?termo={urllib.parse.quote(target_limpo)}"}
-        }
+        return consultar_nome_completo(target_limpo)
     elif query_type == "fone":
         limpo = re.sub(r'\D', '', target_limpo)
         ddd = limpo[:2] if len(limpo) >= 10 else "N/A"
@@ -215,26 +209,11 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
             "Região Geográfica / UF": {"exists": True, "url": "#", "detalhes": regiao}
         }
     elif query_type == "cnpj":
-        limpo = re.sub(r'\D', '', target_limpo)
-        return {
-            "Receita Federal (Consulta)": {"exists": True, "url": f"https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp?cnpj={limpo}"},
-            "CNPJ.biz Consultas": {"exists": True, "url": f"https://cnpj.biz/{limpo}"},
-            "Casa dos Dados (QSA)": {"exists": True, "url": f"https://casadosdados.com.br/solucao/cnpj/{limpo}"}
-        }
+        return consultar_cnpj(target_limpo)
     elif query_type == "placa":
-        placa = target_limpo.upper().replace("-", "")
-        return {
-            "Sinesp Cidadão (Atalho)": {"exists": True, "url": f"https://www.google.com/search?q=consultar+placa+{placa}"},
-            "Tabela FIPE Veículos": {"exists": True, "url": f"https://www.google.com/search?q=fipe+placa+{placa}"},
-            "QualVeiculo Registro": {"exists": True, "url": f"https://www.qualveiculo.net/?placa={placa}"}
-        }
+        return consultar_placa(target_limpo)
     elif query_type == "dominio":
-        dom = target_limpo.lower().replace("https://", "").replace("http://", "").strip('/')
-        return {
-            "Whois ICANN / DomainTools": {"exists": True, "url": f"https://whois.domaintools.com/{dom}"},
-            "DNS Dumpster Infra": {"exists": True, "url": f"https://dnsdumpster.com/"},
-            "SecurityTrails DNS History": {"exists": True, "url": f"https://securitytrails.com/domain/{dom}/dns"}
-        }
+        return consultar_dominio(target_limpo)
     else:
         # Maigret amplia a busca para milhares de sites. A opção de todos os
         # sites pode ser ativada no ambiente sem alterar o código do bot.

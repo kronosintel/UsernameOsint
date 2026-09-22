@@ -14,5 +14,15 @@ services:
         value: "4"
       - key: REQUEST_TIMEOUT
         value: "8"
+      - key: MAIGRET_ALL_SITES
+        value: "0"
+      - key: HIBP_API_KEY
+        sync: false
+      - key: VT_API_KEY
+        sync: false
+      - key: PLACA_API_URL
+        sync: false
+      - key: PLACA_API_KEY
+        sync: false
       - key: FLASK_SECRET_KEY
         generateValue: true
