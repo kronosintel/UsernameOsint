@@ -28,7 +28,10 @@ from io import BytesIO
 
 import httpx
 import telebot
-import qrcode
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from flask import Flask, jsonify, request, render_template_string, send_file
 from maigret_lookup import consultar_username
@@ -194,6 +197,19 @@ def reivindicar_consulta_gratis(user_id: int) -> bool:
 
 def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: str) -> None:
     """Envia QR do link de checkout e o botão de pagamento."""
+    if qrcode is None:
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("💳 Abrir pagamento Mercado Pago", url=checkout_url))
+        bot.send_message(
+            chat_id,
+            f"🧾 Consulta `{qtype.upper()}` criada.\n"
+            f"Valor: *{_preco_formatado()}*\n"
+            f"Link para copiar: `{checkout_url}`",
+            reply_markup=markup,
+            parse_mode="Markdown",
+        )
+        logger.warning("Pacote qrcode não instalado; checkout enviado sem imagem QR")
+        return
     qr = qrcode.make(checkout_url)
     buffer = BytesIO()
     qr.save(buffer, format="PNG")
@@ -895,6 +911,13 @@ def index():
 
 def configurar_webhook_telegram() -> None:
     """Registra o webhook usando somente variáveis protegidas do Render."""
+    logger.info(
+        "Configuração: telegram=%s mercado_pago=%s canal=%s qrcode=%s",
+        bool(CFG.TELEGRAM_TOKEN),
+        bool(CFG.MERCADOPAGO_ACCESS_TOKEN),
+        bool(CFG.CANAL_PRINCIPAL_ID),
+        qrcode is not None,
+    )
     if not bot or not CFG.WEB_BASE_URL:
         return
     url = f"{CFG.WEB_BASE_URL}/telegram"
