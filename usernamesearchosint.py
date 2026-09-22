@@ -602,7 +602,15 @@ def gerar_painel_gratuito(user_id: int, target: str, qtype: str, resultados: dic
     )
     return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
-def _processar_busca(message, raw_target: str, qtype: str = "username"):
+def atualizar_progresso(message, progress_id: int | None, texto: str) -> None:
+    if not bot or not progress_id:
+        return
+    try:
+        bot.edit_message_text(texto, message.chat.id, progress_id, parse_mode="Markdown")
+    except Exception as exc:
+        logger.debug("Não foi possível atualizar progresso: %s", exc)
+
+def _processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None):
     user_id = message.from_user.id
     target = extrair_alvo_limpo(raw_target)
 
@@ -614,6 +622,7 @@ def _processar_busca(message, raw_target: str, qtype: str = "username"):
 
     membro_canal = usuario_esta_no_canal(user_id)
     consulta_gratis = membro_canal and reivindicar_consulta_gratis(user_id)
+    atualizar_progresso(message, progress_id, "🔎 *Consulta recebida*\n\n`[██░░░░░░░░]` 20%\nVerificando acesso...")
     Thread(
         target=enviar_notificacao_evento,
         args=("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None),
@@ -622,6 +631,7 @@ def _processar_busca(message, raw_target: str, qtype: str = "username"):
 
     admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
     if not admin_bypass and not consulta_gratis:
+        atualizar_progresso(message, progress_id, f"💳 *Gerando cobrança*\n\n`[████░░░░░░]` 40%\nValor: *{_preco_formatado()}*")
         bot.send_message(
             message.chat.id,
             f"⏳ Consulta `{qtype.upper()}` recebida. Gerando cobrança de *{_preco_formatado()}*...",
@@ -636,13 +646,18 @@ def _processar_busca(message, raw_target: str, qtype: str = "username"):
             )
             return
         _, checkout_url = checkout
+        atualizar_progresso(message, progress_id, "💳 *Aguardando pagamento*\n\n`[█████░░░░░]` 50%\nQR code e botão enviados abaixo.")
         enviar_checkout_com_qr(message.chat.id, checkout_url, target, qtype)
         return
 
     if consulta_gratis:
+        atualizar_progresso(message, progress_id, "🎁 *Consulta gratuita liberada*\n\n`[██████░░░░]` 60%\nBuscando informações públicas...")
         bot.send_message(message.chat.id, "🎁 Você está usando sua única consulta gratuita como membro do canal.")
+    elif admin_bypass:
+        atualizar_progresso(message, progress_id, "👑 *Acesso administrativo liberado*\n\n`[██████░░░░]` 60%\nBuscando informações públicas...")
 
     resultados = executar_varredura(target, query_type=qtype)
+    atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
 
     link_web = gerar_painel_gratuito(user_id, target, qtype, resultados)
     markup = InlineKeyboardMarkup(row_width=1)
@@ -675,13 +690,15 @@ def _processar_busca(message, raw_target: str, qtype: str = "username"):
             reply_markup=markup,
             parse_mode="Markdown"
         )
+    atualizar_progresso(message, progress_id, "✅ *Relatório pronto*\n\n`[██████████]` 100%\nO link foi enviado acima.")
 
-def processar_busca(message, raw_target: str, qtype: str = "username"):
+def processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None):
     """Executa a consulta e informa falhas que ocorram na thread."""
     try:
-        _processar_busca(message, raw_target, qtype)
+        _processar_busca(message, raw_target, qtype, progress_id)
     except Exception as exc:
         logger.exception("Falha ao gerar relatório (%s): %s", qtype, exc)
+        atualizar_progresso(message, progress_id, "❌ *Falha na consulta*\n\nO relatório não pôde ser gerado. Consulte os logs do Render.")
         if bot:
             try:
                 bot.send_message(
@@ -694,9 +711,13 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
 
 def iniciar_busca(message, raw_target: str, qtype: str = "username") -> None:
     """Inicia a consulta fora do handler do webhook para não bloquear o bot."""
-    if bot:
-        bot.send_message(message.chat.id, f"⏳ Recebi sua consulta `{qtype}`. Verificando acesso e pagamento...", parse_mode="Markdown")
-    Thread(target=processar_busca, args=(message, raw_target, qtype), daemon=True).start()
+    progress = bot.send_message(
+        message.chat.id,
+        "⏳ *Recebi sua consulta*\n\n`[█░░░░░░░░░]` 10%\nIniciando...",
+        parse_mode="Markdown",
+    ) if bot else None
+    progress_id = progress.message_id if progress else None
+    Thread(target=processar_busca, args=(message, raw_target, qtype, progress_id), daemon=True).start()
 
 def gerar_resumo_admin() -> str:
     """Monta um resumo administrativo sem expor resultados no chat."""
