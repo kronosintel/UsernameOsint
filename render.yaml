@@ -22,6 +22,10 @@ services:
         sync: false
       - key: CONSULTA_PRECO
         value: "5.90"
+      - key: MERCADOPAGO_ACCESS_TOKEN
+        sync: false
+      - key: PAGAMENTO_EXPIRACAO_MINUTOS
+        value: "30"
       - key: HIBP_API_KEY
         sync: false
       - key: VT_API_KEY

@@ -67,6 +67,8 @@ class Config:
     CANAL_PRINCIPAL_ID: str = os.getenv("CANAL_PRINCIPAL_ID", "").strip()
     GRUPO_LOGS_ID: str = os.getenv("GRUPO_LOGS_ID", "").strip()
     CONSULTA_PRECO: float = _env_float("CONSULTA_PRECO", 5.90)
+    MERCADOPAGO_ACCESS_TOKEN: str = os.getenv("MERCADOPAGO_ACCESS_TOKEN", os.getenv("MERCADOPAGO_TOKEN", "")).strip()
+    PAGAMENTO_EXPIRACAO_MINUTOS: int = _env_int("PAGAMENTO_EXPIRACAO_MINUTOS", 30)
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
@@ -191,6 +193,16 @@ def init_db():
                 created_at TEXT
             )
         """)
+        for column, definition in (
+            ("external_reference", "TEXT"),
+            ("provider_payment_id", "TEXT"),
+            ("expires_at", "TEXT"),
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE payments ADD COLUMN {column} {definition}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         conn.commit()
         conn.close()
 
@@ -206,6 +218,97 @@ def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
             conn.commit()
         conn.close()
         return res
+
+def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, str] | None:
+    """Cria um checkout do Mercado Pago para uma consulta individual."""
+    if not CFG.MERCADOPAGO_ACCESS_TOKEN:
+        logger.error("MERCADOPAGO_ACCESS_TOKEN não configurado")
+        return None
+
+    reference = secrets.token_urlsafe(18)
+    agora = datetime.now(TIMEZONE_BR)
+    expira = agora.timestamp() + (CFG.PAGAMENTO_EXPIRACAO_MINUTOS * 60)
+    expires_at = datetime.fromtimestamp(expira, TIMEZONE_BR).isoformat()
+    payment_id = f"mp_{reference}"
+    db_execute(
+        "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at, external_reference, expires_at) "
+        "VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?)",
+        (payment_id, message.from_user.id, target, CFG.CONSULTA_PRECO, qtype, agora.isoformat(), reference, expires_at),
+        commit=True,
+    )
+
+    amount = round(CFG.CONSULTA_PRECO, 2)
+    payload = {
+        "items": [{
+            "title": f"Consulta OSINT — {qtype}",
+            "description": f"Consulta autorizada de {target[:80]}",
+            "quantity": 1,
+            "currency_id": "BRL",
+            "unit_price": amount,
+        }],
+        "external_reference": reference,
+        "notification_url": f"{CFG.WEB_BASE_URL}/webhooks/mercadopago",
+        "back_urls": {
+            "success": CFG.WEB_BASE_URL,
+            "failure": CFG.WEB_BASE_URL,
+            "pending": CFG.WEB_BASE_URL,
+        },
+        "auto_return": "approved",
+    }
+    try:
+        response = requests.post(
+            "https://api.mercadopago.com/checkout/preferences",
+            headers={
+                "Authorization": f"Bearer {CFG.MERCADOPAGO_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+        checkout_url = data.get("init_point") or data.get("sandbox_init_point")
+        if not checkout_url:
+            raise RuntimeError("Mercado Pago não retornou o link de checkout.")
+        return reference, checkout_url
+    except (requests.RequestException, ValueError, RuntimeError) as exc:
+        logger.exception("Falha ao criar checkout Mercado Pago: %s", exc)
+        db_execute("UPDATE payments SET status = 'creation_error' WHERE external_reference = ?", (reference,), commit=True)
+        return None
+
+def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str) -> bool:
+    """Confirma um pagamento e gera o relatório somente após aprovação."""
+    row = db_execute(
+        "SELECT user_id, target_username, query_type, status, expires_at FROM payments WHERE external_reference = ?",
+        (reference,), fetchone=True,
+    )
+    if not row or row[3] == "approved":
+        return False
+    if status != "approved":
+        db_execute("UPDATE payments SET status = ?, provider_payment_id = ? WHERE external_reference = ?", (status, provider_payment_id, reference), commit=True)
+        return False
+
+    user_id, target, qtype, _, expires_at = row
+    if expires_at and datetime.fromisoformat(expires_at) < datetime.now(TIMEZONE_BR):
+        db_execute("UPDATE payments SET status = 'expired', provider_payment_id = ? WHERE external_reference = ?", (provider_payment_id, reference), commit=True)
+        return False
+
+    resultados = executar_varredura(target, query_type=qtype)
+    results_json = json.dumps(resultados, ensure_ascii=False)
+    token_relatorio = secrets.token_urlsafe(16)
+    db_execute(
+        "UPDATE payments SET status = 'approved', provider_payment_id = ?, token = ?, results_json = ? WHERE external_reference = ?",
+        (provider_payment_id, token_relatorio, results_json, reference), commit=True,
+    )
+    if bot:
+        link = f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
+        bot.send_message(
+            user_id,
+            f"✅ Pagamento aprovado. Seu relatório de `{qtype}` está pronto:\n{link}",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+    return True
 
 PLATAFORMAS = {
     "GitHub": "https://api.github.com/users/{username}",
@@ -358,6 +461,26 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
     enviar_notificacao_evento("NOVA CONSULTA", message, qtype, target)
+
+    if user_id != CFG.ADMIN_ID:
+        checkout = criar_preferencia_pagamento(message, target, qtype)
+        if not checkout:
+            bot.reply_to(message, "⚠️ Não foi possível gerar o pagamento agora. Tente novamente em instantes.")
+            return
+        reference, checkout_url = checkout
+        markup_pagamento = InlineKeyboardMarkup(row_width=1)
+        markup_pagamento.add(InlineKeyboardButton("💳 Pagar R$ 5,90 e liberar consulta", url=checkout_url))
+        bot.send_message(
+            message.chat.id,
+            f"🧾 *Consulta {qtype.upper()} criada*\n\n"
+            f"• Alvo: `{target}`\n"
+            f"• Valor: *{_preco_formatado()}*\n"
+            f"• Expira em: {CFG.PAGAMENTO_EXPIRACAO_MINUTOS} minutos\n\n"
+            "Após a aprovação, o relatório será processado e enviado automaticamente.",
+            reply_markup=markup_pagamento,
+            parse_mode="Markdown",
+        )
+        return
 
     resultados = executar_varredura(target, query_type=qtype)
 
@@ -584,6 +707,57 @@ def download_pdf(token):
         as_attachment=True,
         download_name=f"Relatorio_VIP_{target}.pdf"
     )
+
+@app.route("/webhooks/mercadopago", methods=["POST"])
+def webhook_mercadopago():
+    """Recebe a notificação e confirma o pagamento consultando a API oficial."""
+    if not CFG.MERCADOPAGO_ACCESS_TOKEN:
+        return jsonify({"ok": False, "error": "payment_not_configured"}), 503
+
+    payload = request.get_json(silent=True) or {}
+    payment_id = (payload.get("data") or {}).get("id") or request.args.get("data.id") or request.args.get("id")
+    event_type = payload.get("type") or request.args.get("type")
+    if not payment_id or event_type not in (None, "payment"):
+        return jsonify({"ok": True, "ignored": True}), 200
+
+    try:
+        response = requests.get(
+            f"https://api.mercadopago.com/v1/payments/{payment_id}",
+            headers={"Authorization": f"Bearer {CFG.MERCADOPAGO_ACCESS_TOKEN}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payment = response.json()
+        reference = payment.get("external_reference")
+        status = payment.get("status")
+        if not reference:
+            return jsonify({"ok": True, "ignored": True}), 200
+        liberado = liberar_consulta_paga(str(reference), str(payment_id), str(status))
+        if liberado and bot:
+            row = db_execute(
+                "SELECT user_id, target_username, query_type, amount FROM payments WHERE external_reference = ?",
+                (reference,), fetchone=True,
+            )
+            if row:
+                destinos = [destino for destino in (CFG.CANAL_PRINCIPAL_ID, CFG.GRUPO_LOGS_ID) if destino]
+                valor = f"R$ {float(row[3]):.2f}".replace(".", ",")
+                aviso = (
+                    "✅ *PAGAMENTO APROVADO*\n"
+                    f"• Usuário ID: `{row[0]}`\n"
+                    f"• Consulta: `{row[2]}`\n"
+                    f"• Alvo: `{row[1]}`\n"
+                    f"• Valor: *{valor}*\n"
+                    f"• Pagamento Mercado Pago: `{payment_id}`"
+                )
+                for destino in destinos:
+                    try:
+                        bot.send_message(destino, aviso, parse_mode="Markdown")
+                    except Exception as exc:
+                        logger.warning("Falha ao notificar pagamento aprovado: %s", exc)
+        return jsonify({"ok": True, "processed": liberado}), 200
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Falha ao confirmar webhook Mercado Pago: %s", exc)
+        return jsonify({"ok": False}), 200
 
 def _processar_update_async(update_json):
     try:

@@ -153,6 +153,25 @@ O bot precisa ser administrador do canal/grupo e ter permissão para enviar mens
 
 Como o token do Telegram apareceu na imagem enviada, ele deve ser revogado no BotFather e substituído no Render. Configure também `TELEGRAM_TOKEN` e, se usar webhook, `TELEGRAM_SECRET_TOKEN` somente nas variáveis protegidas do Render.
 
+Fluxo de pagamento Mercado Pago
+
+Para usuários não administrativos, cada consulta cria uma preferência separada de **R$ 5,90**. O bot envia o botão de checkout e cria um registro `pending` no banco. O relatório só é processado quando o webhook `/webhooks/mercadopago` consulta a API do Mercado Pago e confirma o status `approved`. O webhook usa `external_reference` e não confia apenas no conteúdo recebido na notificação. Pagamentos pendentes expiram em 30 minutos por padrão, controlados por `PAGAMENTO_EXPIRACAO_MINUTOS`.
+
+No Render, adicione a credencial de produção somente como variável protegida:
+
+```text
+MERCADOPAGO_ACCESS_TOKEN=seu_access_token
+PAGAMENTO_EXPIRACAO_MINUTOS=30
+```
+
+O endereço público usado como `notification_url` é:
+
+```text
+https://usernameosint-1-vcj4.onrender.com/webhooks/mercadopago
+```
+
+Depois de salvar as variáveis, faça **Manual Deploy → Deploy latest commit**. Teste primeiro em ambiente de teste do Mercado Pago; só mantenha um token de produção quando estiver confirmado que o valor, o usuário, o módulo e a liberação do relatório estão corretos. Nunca publique o token em issues, commits, screenshots ou mensagens.
+
 Render Web Service
 
 O projeto já está preparado para o Render. Use pip install -r requirements.txt como Build Command e gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT username_search_osint:app como Start Command. A rota / retorna texto simples e não depende da pasta templates, enquanto /health responde {"status":"ok"} e pode ser usado como Health Check Path. O arquivo render.yaml contém essa configuração de forma declarativa.
