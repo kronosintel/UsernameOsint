@@ -76,6 +76,7 @@ class Config:
     PAGAMENTO_EXPIRACAO_MINUTOS: int = _env_int("PAGAMENTO_EXPIRACAO_MINUTOS", 30)
     ADMIN_BYPASS_PAYMENT: bool = os.getenv("ADMIN_BYPASS_PAYMENT", "1").lower() in {"1", "true", "yes"}
     MAIGRET_TIMEOUT: int = _env_int("MAIGRET_TIMEOUT", 45)
+    MAIGRET_ENABLED: bool = os.getenv("MAIGRET_ENABLED", "0").lower() in {"1", "true", "yes"}
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
@@ -492,6 +493,8 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
     elif query_type == "dominio":
         return consultar_dominio(target_limpo)
     else:
+        if not CFG.MAIGRET_ENABLED:
+            return asyncio.run(consultar_alvo_async(target_limpo))
         # Maigret amplia a busca para milhares de sites. A opção de todos os
         # sites pode ser ativada no ambiente sem alterar o código do bot.
         try:
@@ -590,7 +593,11 @@ def _processar_busca(message, raw_target: str, qtype: str = "username"):
 
     membro_canal = usuario_esta_no_canal(user_id)
     consulta_gratis = membro_canal and reivindicar_consulta_gratis(user_id)
-    enviar_notificacao_evento("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None)
+    Thread(
+        target=enviar_notificacao_evento,
+        args=("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None),
+        daemon=True,
+    ).start()
 
     admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
     if not admin_bypass and not consulta_gratis:
@@ -713,7 +720,7 @@ if bot:
         user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
 
         db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
-        enviar_notificacao_evento("NOVO /START", message)
+        Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
 
         menu_boas_vindas = (
             f"👑 **KRONOS INTEL OSINT BOT v35.8 VIP** ⚡️\n"

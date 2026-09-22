@@ -93,6 +93,8 @@ Integração Maigret
 
 O comando `/user nome_do_usuario` também tenta consultar o Maigret por meio da função reutilizável `consultar_username`, definida em `maigret_lookup.py`. Por padrão, a consulta usa os sites padrão do Maigret. Para consultar todos os sites disponíveis, defina `MAIGRET_ALL_SITES=1` no ambiente. Se o Maigret não estiver disponível, exceder o timeout ou não retornar dados estruturados, o bot usa automaticamente o catálogo interno anterior.
 
+Para manter o bot rápido e estável, `MAIGRET_ENABLED=0` deixa o Maigret desligado por padrão e usa o catálogo rápido integrado. Depois de confirmar que o serviço está estável, o administrador pode ativar `MAIGRET_ENABLED=1`; nesse caso, o limite é controlado por `MAIGRET_TIMEOUT`.
+
 Novos módulos de consulta
 
 Cada tipo de pesquisa está isolado em um arquivo que pode ser chamado pelo dispatcher em `usernamesearchosint.py`:
