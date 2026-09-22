@@ -27,6 +27,7 @@ from threading import Lock, Thread
 from io import BytesIO
 
 import httpx
+import requests
 import telebot
 try:
     import qrcode
