@@ -24,9 +24,11 @@ from typing import Any, Dict
 import urllib.parse
 from zoneinfo import ZoneInfo
 from threading import Lock, Thread
+from io import BytesIO
 
 import httpx
 import telebot
+import qrcode
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from flask import Flask, jsonify, request, render_template_string, send_file
 from maigret_lookup import consultar_username
@@ -141,7 +143,7 @@ def extrair_alvo_limpo(texto: str) -> str:
 def _preco_formatado() -> str:
     return f"R$ {CFG.CONSULTA_PRECO:.2f}".replace(".", ",")
 
-def enviar_notificacao_evento(evento: str, message, consulta: str = "-", alvo: str = "-") -> None:
+def enviar_notificacao_evento(evento: str, message, consulta: str = "-", alvo: str = "-", valor: str | None = None) -> None:
     """Envia um log operacional ao canal principal e ao grupo opcional."""
     if not bot:
         return
@@ -153,7 +155,7 @@ def enviar_notificacao_evento(evento: str, message, consulta: str = "-", alvo: s
     usuario = message.from_user
     nome = " ".join(part for part in (usuario.first_name, usuario.last_name) if part).strip() or "Sem nome"
     username = f"@{usuario.username}" if usuario.username else "sem username"
-    valor = _preco_formatado() if consulta != "-" else "-"
+    valor = valor or (_preco_formatado() if consulta != "-" else "-")
     texto = (
         f"📣 *{evento}*\n"
         f"• Usuário: {escaping_html(nome)} ({username})\n"
@@ -169,6 +171,51 @@ def enviar_notificacao_evento(evento: str, message, consulta: str = "-", alvo: s
         except Exception as exc:
             logger.warning("Falha ao enviar log para %s: %s", destino, exc)
 
+def usuario_esta_no_canal(user_id: int) -> bool:
+    if not bot or not CFG.CANAL_PRINCIPAL_ID:
+        return False
+    try:
+        membro = bot.get_chat_member(CFG.CANAL_PRINCIPAL_ID, user_id)
+        return membro.status in {"member", "administrator", "creator"}
+    except Exception as exc:
+        logger.warning("Não foi possível validar entrada no canal: %s", exc)
+        return False
+
+def reivindicar_consulta_gratis(user_id: int) -> bool:
+    """Consome uma única consulta grátis de forma atômica."""
+    with db_lock:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET free_used = 1 WHERE user_id = ? AND COALESCE(free_used, 0) = 0", (user_id,))
+        consumida = cur.rowcount == 1
+        conn.commit()
+        conn.close()
+        return consumida
+
+def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: str) -> None:
+    """Envia QR do link de checkout e o botão de pagamento."""
+    qr = qrcode.make(checkout_url)
+    buffer = BytesIO()
+    qr.save(buffer, format="PNG")
+    buffer.seek(0)
+    buffer.name = "pagamento.png"
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("💳 Abrir pagamento Mercado Pago", url=checkout_url))
+    bot.send_photo(
+        chat_id,
+        buffer,
+        caption=(
+            f"🧾 Consulta `{qtype.upper()}` criada\n"
+            f"Alvo: `{target}`\n"
+            f"Valor: *{_preco_formatado()}*\n\n"
+            "Escaneie o QR ou abra o botão abaixo.\n"
+            f"Link para copiar manualmente: `{checkout_url}`\n"
+            f"O pagamento expira em {CFG.PAGAMENTO_EXPIRACAO_MINUTOS} minutos."
+        ),
+        reply_markup=markup,
+        parse_mode="Markdown",
+    )
+
 def init_db():
     with db_lock:
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
@@ -177,7 +224,8 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                created_at TEXT
+                created_at TEXT,
+                free_used INTEGER DEFAULT 0
             )
         """)
         cursor.execute("""
@@ -197,12 +245,20 @@ def init_db():
             ("external_reference", "TEXT"),
             ("provider_payment_id", "TEXT"),
             ("expires_at", "TEXT"),
+            ("reminder_at", "TEXT"),
+            ("reminder_sent", "INTEGER DEFAULT 0"),
+            ("checkout_url", "TEXT"),
         ):
             try:
                 cursor.execute(f"ALTER TABLE payments ADD COLUMN {column} {definition}")
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN free_used INTEGER DEFAULT 0")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
         conn.commit()
         conn.close()
 
@@ -231,9 +287,9 @@ def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, 
     expires_at = datetime.fromtimestamp(expira, TIMEZONE_BR).isoformat()
     payment_id = f"mp_{reference}"
     db_execute(
-        "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at, external_reference, expires_at) "
-        "VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?)",
-        (payment_id, message.from_user.id, target, CFG.CONSULTA_PRECO, qtype, agora.isoformat(), reference, expires_at),
+        "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at, external_reference, expires_at, reminder_at, reminder_sent) "
+        "VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?, ?, 0)",
+        (payment_id, message.from_user.id, target, CFG.CONSULTA_PRECO, qtype, agora.isoformat(), reference, expires_at, datetime.fromtimestamp(agora.timestamp() + 600, TIMEZONE_BR).isoformat()),
         commit=True,
     )
 
@@ -270,6 +326,7 @@ def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, 
         checkout_url = data.get("init_point") or data.get("sandbox_init_point")
         if not checkout_url:
             raise RuntimeError("Mercado Pago não retornou o link de checkout.")
+        db_execute("UPDATE payments SET checkout_url = ? WHERE external_reference = ?", (checkout_url, reference), commit=True)
         return reference, checkout_url
     except (requests.RequestException, ValueError, RuntimeError) as exc:
         logger.exception("Falha ao criar checkout Mercado Pago: %s", exc)
@@ -309,6 +366,43 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
             disable_web_page_preview=True,
         )
     return True
+
+def buscar_e_marcar_lembretes() -> list[tuple]:
+    agora = datetime.now(TIMEZONE_BR).isoformat()
+    with db_lock:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        rows = cur.execute(
+            "SELECT payment_id, user_id, target_username, query_type, amount, checkout_url "
+            "FROM payments WHERE status = 'pending' AND reminder_at <= ? AND reminder_sent = 0",
+            (agora,),
+        ).fetchall()
+        for row in rows:
+            cur.execute("UPDATE payments SET reminder_sent = 1 WHERE payment_id = ?", (row[0],))
+        conn.commit()
+        conn.close()
+    return rows
+
+def loop_lembretes() -> None:
+    """Worker leve: verifica apenas o lembrete persistido no SQLite."""
+    while True:
+        try:
+            for _, user_id, target, qtype, amount, checkout_url in buscar_e_marcar_lembretes():
+                if bot and checkout_url:
+                    markup = InlineKeyboardMarkup(row_width=1)
+                    markup.add(InlineKeyboardButton("💳 Continuar pagamento", url=checkout_url))
+                    bot.send_message(
+                        user_id,
+                        f"⏰ Lembrete: sua consulta `{qtype}` de `{target}` ainda está pendente.\n"
+                        f"Valor: *R$ {float(amount):.2f}*\n"
+                        "Este é o único lembrete automático desta cobrança.",
+                        reply_markup=markup,
+                        parse_mode="Markdown",
+                    )
+        except Exception as exc:
+            logger.warning("Erro no worker de lembretes: %s", exc)
+        time.sleep(30)
 
 PLATAFORMAS = {
     "GitHub": "https://api.github.com/users/{username}",
@@ -460,26 +554,17 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
 
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
-    enviar_notificacao_evento("NOVA CONSULTA", message, qtype, target)
+    membro_canal = usuario_esta_no_canal(user_id)
+    consulta_gratis = membro_canal and reivindicar_consulta_gratis(user_id)
+    enviar_notificacao_evento("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None)
 
-    if user_id != CFG.ADMIN_ID:
+    if user_id != CFG.ADMIN_ID and not consulta_gratis:
         checkout = criar_preferencia_pagamento(message, target, qtype)
         if not checkout:
             bot.reply_to(message, "⚠️ Não foi possível gerar o pagamento agora. Tente novamente em instantes.")
             return
-        reference, checkout_url = checkout
-        markup_pagamento = InlineKeyboardMarkup(row_width=1)
-        markup_pagamento.add(InlineKeyboardButton("💳 Pagar R$ 5,90 e liberar consulta", url=checkout_url))
-        bot.send_message(
-            message.chat.id,
-            f"🧾 *Consulta {qtype.upper()} criada*\n\n"
-            f"• Alvo: `{target}`\n"
-            f"• Valor: *{_preco_formatado()}*\n"
-            f"• Expira em: {CFG.PAGAMENTO_EXPIRACAO_MINUTOS} minutos\n\n"
-            "Após a aprovação, o relatório será processado e enviado automaticamente.",
-            reply_markup=markup_pagamento,
-            parse_mode="Markdown",
-        )
+        _, checkout_url = checkout
+        enviar_checkout_com_qr(message.chat.id, checkout_url, target, qtype)
         return
 
     resultados = executar_varredura(target, query_type=qtype)
@@ -491,10 +576,15 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
         InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
     )
 
-    if user_id == CFG.ADMIN_ID:
+    if user_id == CFG.ADMIN_ID or consulta_gratis:
+        cabecalho = (
+            "👑 **MODO ADMINISTRADOR - CONSULTA LIBERADA**\n\n"
+            if user_id == CFG.ADMIN_ID
+            else "🎁 **CONSULTA GRÁTIS PARA MEMBRO DO CANAL**\n\n"
+        )
         bot.send_message(
             message.chat.id,
-            f"👑 **MODO ADMINISTRADOR - CONSULTA LIBERADA**\n\n"
+            cabecalho +
             f"• **Alvo:** `{target}`\n"
             f"• **Modalidade:** {qtype.upper()}\n\n"
             f"Relatório processado e disponível abaixo:",
@@ -808,6 +898,7 @@ def configurar_webhook_telegram() -> None:
         logger.warning("Não foi possível configurar o webhook do Telegram: %s", exc)
 
 configurar_webhook_telegram()
+Thread(target=loop_lembretes, daemon=True, name="payment-reminders").start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=CFG.PORT)

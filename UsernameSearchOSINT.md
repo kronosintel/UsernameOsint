@@ -157,6 +157,8 @@ Fluxo de pagamento Mercado Pago
 
 Para usuários não administrativos, cada consulta cria uma preferência separada de **R$ 5,90**. O bot envia o botão de checkout e cria um registro `pending` no banco. O relatório só é processado quando o webhook `/webhooks/mercadopago` consulta a API do Mercado Pago e confirma o status `approved`. O webhook usa `external_reference` e não confia apenas no conteúdo recebido na notificação. Pagamentos pendentes expiram em 30 minutos por padrão, controlados por `PAGAMENTO_EXPIRACAO_MINUTOS`.
 
+Membros do `CANAL_PRINCIPAL_ID` recebem uma única consulta gratuita, consumida na primeira consulta válida depois que o bot confirma a participação no canal. Consultas seguintes geram cobrança normalmente. Para cobranças, o bot envia um QR code gerado a partir do link de checkout, um botão para abrir o Mercado Pago e o link em texto copiável. Um único lembrete é enviado dez minutos depois se a cobrança continuar pendente; a marcação do lembrete fica no SQLite para não repetir o aviso dentro do mesmo processo.
+
 No Render, adicione a credencial de produção somente como variável protegida:
 
 ```text

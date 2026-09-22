@@ -8,3 +8,4 @@ gunicorn
 reportlab
 
 maigret
+qrcode[pil]
