@@ -174,7 +174,7 @@ Depois de salvar as variáveis, faça **Manual Deploy → Deploy latest commit**
 
 Render Web Service
 
-O projeto já está preparado para o Render. Use pip install -r requirements.txt como Build Command e gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT username_search_osint:app como Start Command. A rota / retorna texto simples e não depende da pasta templates, enquanto /health responde {"status":"ok"} e pode ser usado como Health Check Path. O arquivo render.yaml contém essa configuração de forma declarativa.
+O projeto já está preparado para o Render. Use `pip install -r requirements.txt` como Build Command e `gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT usernamesearchosint:app` como Start Command. A rota `/` retorna texto simples, `/healthz` responde `{"status":"healthy"}` e pode ser usada como Health Check Path. O arquivo `render.yaml` contém essa configuração de forma declarativa.
 
 O Render fornece a porta na variável PORT; o Gunicorn deve escutar em 0.0.0.0:$PORT. Isso é obrigatório para o serviço receber tráfego externo. No plano gratuito, o serviço pode ser suspenso por inatividade; o endpoint de saúde ajuda o Render a verificar o serviço, mas não impede essa suspensão. Para execução contínua, é necessário um plano que não suspenda o serviço.
 

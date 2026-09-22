@@ -3,8 +3,8 @@ services:
     name: username-search-osint
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT username_search_osint:app
-    healthCheckPath: /health
+    startCommand: gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT usernamesearchosint:app
+    healthCheckPath: /healthz
     envVars:
       - key: FLASK_DEBUG
         value: "0"
