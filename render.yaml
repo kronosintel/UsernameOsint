@@ -26,6 +26,8 @@ services:
         sync: false
       - key: PAGAMENTO_EXPIRACAO_MINUTOS
         value: "30"
+      - key: ADMIN_BYPASS_PAYMENT
+        value: "1"
       - key: HIBP_API_KEY
         sync: false
       - key: VT_API_KEY

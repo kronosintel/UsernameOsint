@@ -74,6 +74,7 @@ class Config:
     CONSULTA_PRECO: float = _env_float("CONSULTA_PRECO", 5.90)
     MERCADOPAGO_ACCESS_TOKEN: str = os.getenv("MERCADOPAGO_ACCESS_TOKEN", os.getenv("MERCADOPAGO_TOKEN", "")).strip()
     PAGAMENTO_EXPIRACAO_MINUTOS: int = _env_int("PAGAMENTO_EXPIRACAO_MINUTOS", 30)
+    ADMIN_BYPASS_PAYMENT: bool = os.getenv("ADMIN_BYPASS_PAYMENT", "1").lower() in {"1", "true", "yes"}
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
@@ -574,7 +575,8 @@ def _processar_busca(message, raw_target: str, qtype: str = "username"):
     consulta_gratis = membro_canal and reivindicar_consulta_gratis(user_id)
     enviar_notificacao_evento("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None)
 
-    if user_id != CFG.ADMIN_ID and not consulta_gratis:
+    admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
+    if not admin_bypass and not consulta_gratis:
         bot.send_message(
             message.chat.id,
             f"⏳ Consulta `{qtype.upper()}` recebida. Gerando cobrança de *{_preco_formatado()}*...",
@@ -604,10 +606,10 @@ def _processar_busca(message, raw_target: str, qtype: str = "username"):
         InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
     )
 
-    if user_id == CFG.ADMIN_ID or consulta_gratis:
+    if admin_bypass or consulta_gratis:
         cabecalho = (
             "👑 **MODO ADMINISTRADOR - CONSULTA LIBERADA**\n\n"
-            if user_id == CFG.ADMIN_ID
+            if admin_bypass
             else "🎁 **CONSULTA GRÁTIS PARA MEMBRO DO CANAL**\n\n"
         )
         bot.send_message(
@@ -700,6 +702,7 @@ if bot:
             f"👑 **KRONOS INTEL OSINT BOT v35.8 VIP** ⚡️\n"
             f"─────────────────────────────────────────────\n"
             f"👋 Olá, {user_name}! Bem-vindo à sua central de inteligência cibernética!\n\n"
+            f"🎁 Entre no canal oficial e ganhe **1 consulta gratuita**. Depois dela, cada consulta custa **{_preco_formatado()}**.\n\n"
             f"🛠️ **MÓDULOS DE CONSULTA DISPONÍVEIS:**\n\n"
             f"1️⃣ 👤 **USERNAME / REDES SOCIAIS:**\n"
             f"   • `/user alvo123`\n"
@@ -723,9 +726,29 @@ if bot:
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
             InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
+            InlineKeyboardButton("✅ Já entrei — verificar consulta grátis", callback_data="verificar_gratis"),
             InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
         )
         bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup, parse_mode="Markdown")
+
+    @bot.callback_query_handler(func=lambda call: call.data == "verificar_gratis")
+    def verificar_consulta_gratis(call):
+        user_id = call.from_user.id
+        bot.answer_callback_query(call.id)
+        if not usuario_esta_no_canal(user_id):
+            bot.send_message(
+                call.message.chat.id,
+                "Ainda não consegui confirmar sua entrada no canal. Entre pelo botão e toque em verificar novamente.",
+            )
+            return
+        with db_lock:
+            conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+            usado = conn.execute("SELECT COALESCE(free_used, 0) FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            conn.close()
+        if usado and usado[0]:
+            bot.send_message(call.message.chat.id, f"Sua consulta gratuita já foi usada. As próximas consultas custam {_preco_formatado()}.")
+        else:
+            bot.send_message(call.message.chat.id, "✅ Entrada confirmada. Sua próxima consulta será gratuita. Use, por exemplo: /user nome_de_usuario")
 
     @bot.message_handler(commands=['admin', 'admin_user', 'admin_email', 'admin_nome', 'admin_fone', 'admin_cnpj', 'admin_placa', 'admin_dominio', 'user', 'email', 'nome', 'fone', 'cnpj', 'placa', 'dominio'])
     def handle_commands(message):

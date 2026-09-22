@@ -159,6 +159,16 @@ Para usuários não administrativos, cada consulta cria uma preferência separad
 
 Membros do `CANAL_PRINCIPAL_ID` recebem uma única consulta gratuita, consumida na primeira consulta válida depois que o bot confirma a participação no canal. Consultas seguintes geram cobrança normalmente. Para cobranças, o bot envia um QR code gerado a partir do link de checkout, um botão para abrir o Mercado Pago e o link em texto copiável. Um único lembrete é enviado dez minutos depois se a cobrança continuar pendente; a marcação do lembrete fica no SQLite para não repetir o aviso dentro do mesmo processo.
 
+O `/start` mostra um botão para entrar no canal e outro para verificar a entrada. Depois da confirmação, o usuário recebe a instrução para usar `/user`, `/email`, `/nome`, `/fone`, `/cnpj`, `/placa` ou `/dominio`. O relatório completo é liberado somente para a consulta gratuita válida, para o administrador com bypass ativo ou após o Mercado Pago confirmar `approved`.
+
+Para testar o checkout usando o próprio administrador, defina temporariamente:
+
+```text
+ADMIN_BYPASS_PAYMENT=0
+```
+
+Com `ADMIN_BYPASS_PAYMENT=1`, o administrador não paga por definição. Usuários comuns nunca recebem esse bypass.
+
 No Render, adicione a credencial de produção somente como variável protegida:
 
 ```text
