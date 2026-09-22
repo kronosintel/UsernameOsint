@@ -500,6 +500,7 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
     resultados["Instagram Profile Direct"] = {"exists": True, "url": f"https://www.instagram.com/{encoded_user}/"}
     resultados["TikTok Profile Direct"] = {"exists": True, "url": f"https://www.tiktok.com/@{encoded_user}"}
     resultados["X / Twitter Profile Direct"] = {"exists": True, "url": f"https://x.com/{encoded_user}"}
+    resultados["Pinterest Profile Direct"] = {"exists": True, "url": f"https://www.pinterest.com/{encoded_user}/"}
     resultados["WhatsMyName Username Enum"] = {"exists": True, "url": f"https://whatsmyname.app/?q={encoded_user}"}
     
     resultados.update({
@@ -523,6 +524,7 @@ def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
         "X / Twitter": {"exists": True, "url": f"https://x.com/{encoded}"},
         "Reddit": {"exists": True, "url": f"https://www.reddit.com/user/{encoded}/"},
         "TikTok": {"exists": True, "url": f"https://www.tiktok.com/@{encoded}"},
+        "Pinterest": {"exists": True, "url": f"https://www.pinterest.com/{encoded}/"},
         "YouTube": {"exists": True, "url": f"https://www.youtube.com/@{encoded}"},
         "Mastodon / pesquisa": {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded}%22"},
         "MyCred — referência manual": {
@@ -549,6 +551,13 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
         return {
             "WhatsApp Direct Chat": {"exists": True, "url": f"https://wa.me/55{limpo}"},
             "Truecaller Directory": {"exists": True, "url": f"https://www.truecaller.com/search/br/{limpo}"},
+            "Dono do Zap — referência manual": {
+                "exists": None,
+                "status": "reference_only",
+                "url": "https://donodozap.com/q/pesquisar-dono-whatsapp",
+                "query": limpo,
+                "note": "Abra a fonte e confirme o número manualmente. O bot não afirma a identidade do proprietário.",
+            },
             "Google Search (Busca Numérica)": {"exists": True, "url": f"https://www.google.com/search?q=%22{limpo}%22"},
             "Região Geográfica / UF": {"exists": True, "url": "#", "detalhes": regiao}
         }

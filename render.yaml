@@ -19,9 +19,9 @@ services:
       - key: MAIGRET_ALL_SITES
         value: "0"
       - key: MAIGRET_TIMEOUT
-        value: "45"
+        value: "25"
       - key: MAIGRET_ENABLED
-        value: "0"
+        value: "1"
       - key: CANAL_PRINCIPAL_ID
         sync: false
       - key: GRUPO_LOGS_ID

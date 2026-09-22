@@ -103,6 +103,8 @@ Os relatórios agora exibem todas as fontes com status, observações e links, i
 
 Por segurança, o bot não coleta nem exibe senhas, tokens, dumps ou conteúdo bruto de vazamentos. APIs de terceiros como HIBP, IntelX e DeHashed devem ser usadas apenas com credenciais próprias, autorização e respeito aos termos do provedor.
 
+Para telefone, o relatório inclui o [Dono do Zap](https://donodozap.com/q/pesquisar-dono-whatsapp) como referência manual, além do link do WhatsApp e do Truecaller. Essa fonte não é tratada como prova de identidade do proprietário. Para CNPJ, o relatório inclui o [CNPJá](https://cnpja.com/) como referência complementar e a [consulta oficial da Receita Federal](https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp). A função existente `maigret_lookup.consultar_username` foi ativada no Render com limite de 25 segundos e fallback rápido; Pinterest também foi incluído na lista de username.
+
 Novos módulos de consulta
 
 Cada tipo de pesquisa está isolado em um arquivo que pode ser chamado pelo dispatcher em `usernamesearchosint.py`:
