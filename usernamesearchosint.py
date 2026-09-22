@@ -53,16 +53,25 @@ def _env_int(key: str, default: int) -> int:
     except ValueError:
         return default
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)).replace(",", "."))
+    except ValueError:
+        return default
+
 @dataclass
 class Config:
-    TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "8625009528:AAHfx5Te-ngeeNMnlB_8hbP40wrpx6_1wlA")
+    TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
     ADMIN_ID: int = _env_int("ADMIN_ID", 0)
     CANAL_TAG_PUBLICO: str = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
+    CANAL_PRINCIPAL_ID: str = os.getenv("CANAL_PRINCIPAL_ID", "").strip()
+    GRUPO_LOGS_ID: str = os.getenv("GRUPO_LOGS_ID", "").strip()
+    CONSULTA_PRECO: float = _env_float("CONSULTA_PRECO", 5.90)
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
     PORT: int = _env_int("PORT", 5000)
-    TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "secret_token_kronos")
+    TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "")
 
 CFG = Config()
 
@@ -126,6 +135,37 @@ def extrair_alvo_limpo(texto: str) -> str:
     else:
         alvo = texto.strip()
     return alvo.replace("@", "").strip()
+
+def _preco_formatado() -> str:
+    return f"R$ {CFG.CONSULTA_PRECO:.2f}".replace(".", ",")
+
+def enviar_notificacao_evento(evento: str, message, consulta: str = "-", alvo: str = "-") -> None:
+    """Envia um log operacional ao canal principal e ao grupo opcional."""
+    if not bot:
+        return
+    destinos = [destino for destino in (CFG.CANAL_PRINCIPAL_ID, CFG.GRUPO_LOGS_ID) if destino]
+    if not destinos:
+        logger.warning("Nenhum destino de log configurado para o evento %s", evento)
+        return
+
+    usuario = message.from_user
+    nome = " ".join(part for part in (usuario.first_name, usuario.last_name) if part).strip() or "Sem nome"
+    username = f"@{usuario.username}" if usuario.username else "sem username"
+    valor = _preco_formatado() if consulta != "-" else "-"
+    texto = (
+        f"📣 *{evento}*\n"
+        f"• Usuário: {escaping_html(nome)} ({username})\n"
+        f"• ID: `{usuario.id}`\n"
+        f"• Consulta: `{consulta}`\n"
+        f"• Alvo: `{escaping_html(alvo)}`\n"
+        f"• Valor: *{valor}*\n"
+        f"• Horário: `{datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y %H:%M:%S')}`"
+    )
+    for destino in destinos:
+        try:
+            bot.send_message(destino, texto, parse_mode="Markdown", disable_web_page_preview=True)
+        except Exception as exc:
+            logger.warning("Falha ao enviar log para %s: %s", destino, exc)
 
 def init_db():
     with db_lock:
@@ -317,6 +357,8 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
 
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
+    enviar_notificacao_evento("NOVA CONSULTA", message, qtype, target)
+
     resultados = executar_varredura(target, query_type=qtype)
 
     link_web = gerar_painel_gratuito(user_id, target, qtype, resultados)
@@ -389,6 +431,7 @@ if bot:
         user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
 
         db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+        enviar_notificacao_evento("NOVO /START", message)
 
         menu_boas_vindas = (
             f"👑 **KRONOS INTEL OSINT BOT v35.8 VIP** ⚡️\n"

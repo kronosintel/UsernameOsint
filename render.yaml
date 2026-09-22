@@ -16,6 +16,12 @@ services:
         value: "8"
       - key: MAIGRET_ALL_SITES
         value: "0"
+      - key: CANAL_PRINCIPAL_ID
+        sync: false
+      - key: GRUPO_LOGS_ID
+        sync: false
+      - key: CONSULTA_PRECO
+        value: "5.90"
       - key: HIBP_API_KEY
         sync: false
       - key: VT_API_KEY

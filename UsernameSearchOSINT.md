@@ -137,6 +137,22 @@ O painel `/admin` e todos os comandos abaixo exigem que o ID do usuário do Tele
 
 Os comandos administrativos usam os mesmos módulos dos comandos públicos, mas ficam bloqueados para qualquer usuário que não corresponda ao `ADMIN_ID`. O painel exibe contagens e links dos últimos relatórios; ele não despeja os resultados completos no chat.
 
+Notificações de `/start` e consultas
+
+Cada execução de `/start` envia um aviso operacional para `CANAL_PRINCIPAL_ID`. Cada consulta válida também envia um aviso com usuário, ID do Telegram, módulo, alvo, horário e valor configurado. O valor padrão é **R$ 5,90**, controlado por `CONSULTA_PRECO`; essa notificação registra o preço da consulta, mas não realiza uma cobrança automaticamente. Para cobrar antes de liberar o relatório, é necessário conectar um fluxo de pagamento Mercado Pago separado.
+
+No Render, configure:
+
+```text
+CANAL_PRINCIPAL_ID=-100...
+GRUPO_LOGS_ID=-100...       # opcional; recebe uma cópia dos logs
+CONSULTA_PRECO=5.90
+```
+
+O bot precisa ser administrador do canal/grupo e ter permissão para enviar mensagens. O ID deve ser numérico, normalmente começando por `-100`. O valor do exemplo enviado pelo usuário não deve ser colocado no GitHub nem no código.
+
+Como o token do Telegram apareceu na imagem enviada, ele deve ser revogado no BotFather e substituído no Render. Configure também `TELEGRAM_TOKEN` e, se usar webhook, `TELEGRAM_SECRET_TOKEN` somente nas variáveis protegidas do Render.
+
 Render Web Service
 
 O projeto já está preparado para o Render. Use pip install -r requirements.txt como Build Command e gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT username_search_osint:app como Start Command. A rota / retorna texto simples e não depende da pasta templates, enquanto /health responde {"status":"ok"} e pode ser usado como Health Check Path. O arquivo render.yaml contém essa configuração de forma declarativa.
