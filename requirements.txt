@@ -6,3 +6,5 @@ werkzeug
 mercadopago
 gunicorn
 reportlab
+
+maigret

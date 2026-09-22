@@ -29,6 +29,7 @@ import httpx
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from flask import Flask, jsonify, request, render_template_string, send_file
+from maigret_lookup import consultar_username
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -235,6 +236,30 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
             "SecurityTrails DNS History": {"exists": True, "url": f"https://securitytrails.com/domain/{dom}/dns"}
         }
     else:
+        # Maigret amplia a busca para milhares de sites. A opção de todos os
+        # sites pode ser ativada no ambiente sem alterar o código do bot.
+        try:
+            todos_os_sites = os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"}
+            resultado_maigret = consultar_username(target_limpo, todos_os_sites=todos_os_sites)
+            resultados_maigret = {}
+            for item in resultado_maigret.encontrados:
+                nome = item.get("site") or item.get("name") or item.get("title") or "Maigret"
+                url = item.get("url") or item.get("link") or item.get("profile_url") or ""
+                resultados_maigret[str(nome)] = {
+                    "exists": True,
+                    "status": item.get("status", "found"),
+                    "url": url,
+                    "source": "Maigret",
+                }
+            if resultados_maigret:
+                return resultados_maigret
+            if resultado_maigret.erro:
+                logger.warning("Maigret sem resultados estruturados: %s", resultado_maigret.erro)
+        except (RuntimeError, TimeoutError, ValueError) as exc:
+            logger.warning("Maigret indisponível; usando catálogo interno: %s", exc)
+
+        # Mantém o comportamento anterior quando a dependência não está
+        # disponível, há timeout ou a versão instalada não retorna NDJSON.
         return asyncio.run(consultar_alvo_async(target_limpo))
 
 def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:

@@ -89,6 +89,10 @@ Mesmo um resultado encontrado pode ser um perfil homônimo. Faça validação in
 
 O catálogo inclui, entre outras, GitHub, GitLab, Bitbucket, Codeberg, npm, PyPI, Docker Hub, Hugging Face, Kaggle, Instagram, X, Reddit, TikTok, Pinterest, Mastodon, Bluesky, Threads, Telegram, Medium, Substack, Tumblr, Linktree, Patreon, Dribbble, Behance, Twitch, Steam, Spotify, SoundCloud, Vimeo, YouTube, Goodreads, Letterboxd, Chess.com e Lichess. Plataformas podem mudar URLs, exigir login, aplicar rate limits ou renderizar páginas dinamicamente; nesses casos o resultado aparece como inconclusivo.
 
+Integração Maigret
+
+O comando `/user nome_do_usuario` também tenta consultar o Maigret por meio da função reutilizável `consultar_username`, definida em `maigret_lookup.py`. Por padrão, a consulta usa os sites padrão do Maigret. Para consultar todos os sites disponíveis, defina `MAIGRET_ALL_SITES=1` no ambiente. Se o Maigret não estiver disponível, exceder o timeout ou não retornar dados estruturados, o bot usa automaticamente o catálogo interno anterior.
+
 Render Web Service
 
 O projeto já está preparado para o Render. Use pip install -r requirements.txt como Build Command e gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT username_search_osint:app como Start Command. A rota / retorna texto simples e não depende da pasta templates, enquanto /health responde {"status":"ok"} e pode ser usado como Health Check Path. O arquivo render.yaml contém essa configuração de forma declarativa.
@@ -110,4 +114,3 @@ As plataformas podem alterar HTML, redirecionamentos e políticas anti-automaç�
 Licença
 
 Consulte LICENSE.
-
