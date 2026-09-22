@@ -1044,6 +1044,15 @@ def telegram_webhook():
         data = request.get_json(force=True, silent=True)
         if data:
             logger.info("Webhook Telegram aceitou update_id=%s", data.get("update_id"))
+            raw_message = data.get("message") or {}
+            raw_text = str(raw_message.get("text") or "")
+            raw_command = raw_text.split()[0].split("@")[0].lower() if raw_text else ""
+            if raw_command in {"/start", "/help", "/ajuda", "/suporte"}:
+                update = Update.de_json(data)
+                if update.message:
+                    send_welcome(update.message)
+                    logger.info("Comando inicial respondido no webhook: %s", raw_command)
+                return jsonify({"status": "ok"}), 200
             Thread(target=_processar_update_async, args=(data,), daemon=True).start()
     except Exception as err:
         logger.exception("Erro no webhook: %s", str(err))
