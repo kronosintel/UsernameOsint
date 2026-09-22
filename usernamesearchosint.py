@@ -629,6 +629,12 @@ def processar_busca(message, raw_target: str, qtype: str = "username"):
             parse_mode="Markdown"
         )
 
+def iniciar_busca(message, raw_target: str, qtype: str = "username") -> None:
+    """Inicia a consulta fora do handler do webhook para não bloquear o bot."""
+    if bot:
+        bot.send_message(message.chat.id, f"⏳ Recebi sua consulta `{qtype}`. Verificando acesso e pagamento...", parse_mode="Markdown")
+    Thread(target=processar_busca, args=(message, raw_target, qtype), daemon=True).start()
+
 def gerar_resumo_admin() -> str:
     """Monta um resumo administrativo sem expor resultados no chat."""
     with db_lock:
@@ -728,21 +734,21 @@ if bot:
         alvo = partes[1]
         
         if cmd in ADMIN_COMMANDS:
-            processar_busca(message, alvo, ADMIN_COMMANDS[cmd])
+            iniciar_busca(message, alvo, ADMIN_COMMANDS[cmd])
         elif cmd == '/user':
-            processar_busca(message, alvo, "username")
+            iniciar_busca(message, alvo, "username")
         elif 'email' in cmd:
-            processar_busca(message, alvo, "email")
+            iniciar_busca(message, alvo, "email")
         elif 'nome' in cmd:
-            processar_busca(message, alvo, "fullname")
+            iniciar_busca(message, alvo, "fullname")
         elif 'fone' in cmd:
-            processar_busca(message, alvo, "fone")
+            iniciar_busca(message, alvo, "fone")
         elif 'cnpj' in cmd:
-            processar_busca(message, alvo, "cnpj")
+            iniciar_busca(message, alvo, "cnpj")
         elif 'placa' in cmd:
-            processar_busca(message, alvo, "placa")
+            iniciar_busca(message, alvo, "placa")
         elif 'dominio' in cmd:
-            processar_busca(message, alvo, "dominio")
+            iniciar_busca(message, alvo, "dominio")
 
     @bot.message_handler(func=lambda message: True)
     def handle_catch_all(message):
@@ -750,7 +756,7 @@ if bot:
             return
         target = extrair_alvo_limpo(message.text)
         if len(target) >= 2:
-            processar_busca(message, target, "username")
+            iniciar_busca(message, target, "username")
 
 @app.route("/relatorio/<token>")
 def ver_relatorio_web(token):
