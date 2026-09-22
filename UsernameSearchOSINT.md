@@ -97,6 +97,8 @@ Para manter o bot rápido e estável, `MAIGRET_ENABLED=0` deixa o Maigret deslig
 
 O endpoint `/healthz` também informa, sem revelar segredos, se Telegram, Mercado Pago, canal, QR code e Maigret estão configurados. A suíte local pode ser executada com `python3 -m unittest discover -v`; ela valida a rota de saúde, a raiz, o fallback rápido de username e o comportamento de tokens inexistentes.
 
+Comandos iniciados por `/` que não pertencem ao escopo do bot agora retornam uma mensagem de **comando inválido**, com a lista resumida dos comandos válidos. Todas as consultas também passam por `CONSULTA_TIMEOUT` (35 segundos no Render); quando um provedor demora além desse limite, o usuário recebe uma falha explícita em vez de ficar indefinidamente na mensagem de carregamento.
+
 Novos módulos de consulta
 
 Cada tipo de pesquisa está isolado em um arquivo que pode ser chamado pelo dispatcher em `usernamesearchosint.py`:

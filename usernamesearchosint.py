@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import sqlite3
@@ -78,6 +79,7 @@ class Config:
     ADMIN_BYPASS_PAYMENT: bool = os.getenv("ADMIN_BYPASS_PAYMENT", "1").lower() in {"1", "true", "yes"}
     MAIGRET_TIMEOUT: int = _env_int("MAIGRET_TIMEOUT", 45)
     MAIGRET_ENABLED: bool = os.getenv("MAIGRET_ENABLED", "0").lower() in {"1", "true", "yes"}
+    CONSULTA_TIMEOUT: int = _env_int("CONSULTA_TIMEOUT", 35)
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
@@ -150,14 +152,14 @@ def link_pdf(url: str) -> str:
         return sanitizar_pdf(url)
     return f'<a href="{sanitizar_pdf(seguro)}">{sanitizar_pdf(seguro)}</a>'
 
-def extrair_alvo_limpo(texto: str) -> str:
+def extrair_alvo_limpo(texto: str, preservar_arroba: bool = False) -> str:
     """ Extrai o termo de busca ignorando comandos e o caractere @. """
     partes = texto.strip().split(maxsplit=1)
     if len(partes) > 1 and partes[0].startswith('/'):
         alvo = partes[1].strip()
     else:
         alvo = texto.strip()
-    return alvo.replace("@", "").strip()
+    return alvo.strip() if preservar_arroba else alvo.replace("@", "").strip()
 
 def _preco_formatado() -> str:
     return f"R$ {CFG.CONSULTA_PRECO:.2f}".replace(".", ",")
@@ -503,7 +505,7 @@ def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
     }
 
 def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
-    target_limpo = extrair_alvo_limpo(target)
+    target_limpo = extrair_alvo_limpo(target, preservar_arroba=query_type == "email")
 
     if query_type == "email":
         return consultar_email(target_limpo)
@@ -565,6 +567,29 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
         except Exception as exc:
             logger.warning("Fallback online demorou ou falhou; usando relatório rápido: %s", exc)
             return resultados_username_rapidos(target_limpo)
+
+def executar_varredura_com_timeout(target: str, query_type: str) -> dict[str, Any]:
+    """Executa qualquer módulo com limite para nunca deixar a consulta presa."""
+    resultado_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            resultado_queue.put((True, executar_varredura(target, query_type)))
+        except Exception as exc:
+            resultado_queue.put((False, exc))
+
+    consulta_thread = Thread(target=worker, daemon=True)
+    consulta_thread.start()
+    consulta_thread.join(max(1, CFG.CONSULTA_TIMEOUT))
+    if consulta_thread.is_alive():
+        raise TimeoutError(f"A consulta excedeu {CFG.CONSULTA_TIMEOUT} segundos.")
+    try:
+        sucesso, valor = resultado_queue.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError("O módulo não retornou resultado.") from exc
+    if not sucesso:
+        raise valor
+    return valor
 
 def gerar_pdf_osint(target: str, resultados: dict[str, dict[str, Any]], query_type: str = "username") -> io.BytesIO:
     buffer = io.BytesIO()
@@ -632,7 +657,7 @@ def atualizar_progresso(message, progress_id: int | None, texto: str) -> None:
 
 def _processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None):
     user_id = message.from_user.id
-    target = extrair_alvo_limpo(raw_target)
+    target = extrair_alvo_limpo(raw_target, preservar_arroba=qtype == "email")
 
     if not target or len(target) < 2:
         bot.reply_to(message, "⚠️ Termo de busca muito curto.")
@@ -676,7 +701,9 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
     elif admin_bypass:
         atualizar_progresso(message, progress_id, "👑 *Acesso administrativo liberado*\n\n`[██████░░░░]` 60%\nBuscando informações públicas...")
 
-    resultados = executar_varredura(target, query_type=qtype)
+    logger.info("Iniciando varredura: tipo=%s alvo=%s usuario=%s", qtype, target, user_id)
+    resultados = executar_varredura_com_timeout(target, qtype)
+    logger.info("Varredura concluída: tipo=%s alvo=%s usuario=%s itens=%s", qtype, target, user_id, len(resultados))
     atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
 
     link_web = gerar_painel_gratuito(user_id, target, qtype, resultados)
@@ -838,7 +865,7 @@ if bot:
 
     @bot.message_handler(commands=['admin', 'admin_user', 'admin_email', 'admin_nome', 'admin_fone', 'admin_cnpj', 'admin_placa', 'admin_dominio', 'user', 'email', 'nome', 'fone', 'cnpj', 'placa', 'dominio'])
     def handle_commands(message):
-        cmd = message.text.split()[0].lower()
+        cmd = message.text.split()[0].split("@")[0].lower()
         partes = message.text.strip().split(maxsplit=1)
 
         if cmd == "/admin":
@@ -885,7 +912,14 @@ if bot:
 
     @bot.message_handler(func=lambda message: True)
     def handle_catch_all(message):
-        if not message.text or message.chat.type in ['group', 'supergroup'] or message.text.startswith('/'):
+        if not message.text or message.chat.type in ['group', 'supergroup']:
+            return
+        if message.text.startswith('/'):
+            bot.reply_to(
+                message,
+                "❌ Comando inválido. Use /start para ver os comandos disponíveis.\n\n"
+                "Consultas: /user, /email, /nome, /fone, /cnpj, /placa e /dominio.",
+            )
             return
         target = extrair_alvo_limpo(message.text)
         if len(target) >= 2:

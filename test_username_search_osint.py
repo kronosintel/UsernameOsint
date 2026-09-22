@@ -1,6 +1,6 @@
 import unittest
 
-from usernamesearchosint import app, resultados_username_rapidos
+from usernamesearchosint import app, executar_varredura_com_timeout, resultados_username_rapidos
 
 
 class UsernameSearchTests(unittest.TestCase):
@@ -26,6 +26,11 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("GitHub", results)
         self.assertTrue(results["GitHub"]["url"].endswith("/alice"))
         self.assertTrue(all(item["exists"] for item in results.values()))
+
+    def test_email_lookup_returns_without_optional_api_key(self):
+        results = executar_varredura_com_timeout("teste@example.com", "email")
+        self.assertIn("Have I Been Pwned", results)
+        self.assertIn("Mozilla Monitor", results)
 
     def test_missing_report_returns_404(self):
         response = self.client.get("/relatorio/token-inexistente")
