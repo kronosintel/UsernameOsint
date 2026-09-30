@@ -72,7 +72,7 @@ class Config:
     MERCADOPAGO_ACCESS_TOKEN: str = os.getenv("MERCADOPAGO_ACCESS_TOKEN", os.getenv("MERCADOPAGO_TOKEN", "")).strip()
     PAGAMENTO_EXPIRACAO_MINUTOS: int = _env_int("PAGAMENTO_EXPIRACAO_MINUTOS", 30)
     ADMIN_BYPASS_PAYMENT: bool = os.getenv("ADMIN_BYPASS_PAYMENT", "1").lower() in {"1", "true", "yes"}
-    MAIGRET_TIMEOUT: int = _env_int("MAIGRET_TIMEOUT", 45)
+    MAIGRET_TIMEOUT: int = _env_int("MAIGRET_TIMEOUT", 18)
     MAIGRET_ENABLED: bool = os.getenv("MAIGRET_ENABLED", "0").lower() in {"1", "true", "yes"}
     CONSULTA_TIMEOUT: int = _env_int("CONSULTA_TIMEOUT", 35)
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
@@ -209,6 +209,15 @@ def reivindicar_consulta_gratis(user_id: int) -> bool:
         conn.commit()
         conn.close()
         return consumida
+
+
+def devolver_consulta_gratis(user_id: int) -> None:
+    """Devolve a consulta grátis quando a execução falha antes do relatório."""
+    db_execute(
+        "UPDATE users SET free_used = 0 WHERE user_id = ? AND COALESCE(free_used, 0) = 1",
+        (user_id,),
+        commit=True,
+    )
 
 def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: str) -> None:
     """Envia QR do link de checkout e o botão de pagamento."""
@@ -610,10 +619,11 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
     # sites pode ser ativada no ambiente sem alterar o código do bot.
     try:
         todos_os_sites = os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"}
+        timeout_maigret = max(5, min(CFG.MAIGRET_TIMEOUT, CFG.CONSULTA_TIMEOUT - 10))
         resultado_maigret = consultar_username(
             target_limpo,
             todos_os_sites=todos_os_sites,
-            timeout=CFG.MAIGRET_TIMEOUT,
+            timeout=timeout_maigret,
         )
         resultados_maigret = {}
         for item in resultado_maigret.encontrados:
@@ -778,7 +788,13 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         atualizar_progresso(message, progress_id, "👑 *Acesso administrativo liberado*\n\n`[██████░░░░]` 60%\nBuscando informações públicas...")
 
     logger.info("Iniciando varredura: tipo=%s alvo=%s usuario=%s", qtype, target, user_id)
-    resultados = executar_varredura_com_timeout(target, qtype)
+    try:
+        resultados = executar_varredura_com_timeout(target, qtype)
+    except Exception:
+        if consulta_gratis:
+            devolver_consulta_gratis(user_id)
+            logger.info("Consulta grátis devolvida após falha: user_id=%s alvo=%s", user_id, target)
+        raise
     logger.info("Varredura concluída: tipo=%s alvo=%s usuario=%s itens=%s", qtype, target, user_id, len(resultados))
     atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
 
@@ -821,14 +837,16 @@ def processar_busca(message, raw_target: str, qtype: str = "username", progress_
         _processar_busca(message, raw_target, qtype, progress_id)
     except Exception as exc:
         logger.exception("Falha ao gerar relatório (%s): %s", qtype, exc)
-        atualizar_progresso(message, progress_id, "❌ *Falha na consulta*\n\nO relatório não pôde ser gerado. Consulte os logs do Render.")
+        if isinstance(exc, TimeoutError):
+            texto_progresso = "⏱️ *A consulta demorou mais que o esperado.*\n\nSua consulta grátis foi preservada. Tente novamente em alguns instantes."
+            texto_chat = "⏱️ A consulta demorou mais que o esperado e foi cancelada. Sua consulta grátis foi preservada; tente novamente em alguns instantes."
+        else:
+            texto_progresso = "⚠️ *Não foi possível concluir a consulta.*\n\nTente novamente em alguns instantes."
+            texto_chat = "⚠️ Não foi possível concluir a consulta agora. Tente novamente em alguns instantes."
+        atualizar_progresso(message, progress_id, texto_progresso)
         if bot:
             try:
-                bot.send_message(
-                    message.chat.id,
-                    "⚠️ A consulta foi recebida, mas ocorreu um erro ao gerar o relatório. "
-                    "O administrador foi avisado nos logs. Tente novamente.",
-                )
+                bot.send_message(message.chat.id, texto_chat)
             except Exception:
                 logger.exception("Falha ao avisar o usuário sobre erro de relatório")
 
