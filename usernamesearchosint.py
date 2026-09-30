@@ -80,6 +80,8 @@ class Config:
     DB_FILE: str = os.getenv("DB_FILE", "/var/data/kronos_osint.db" if os.path.exists("/var/data") else "kronos_osint.db")
     PORT: int = _env_int("PORT", 5000)
     TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "")
+    CANAL_PROMO_ENABLED: bool = os.getenv("CANAL_PROMO_ENABLED", "1").lower() in {"1", "true", "yes"}
+    CANAL_PROMO_INTERVAL_SECONDS: int = _env_int("CANAL_PROMO_INTERVAL_SECONDS", 259200)
 
 CFG = Config()
 
@@ -270,6 +272,12 @@ def init_db():
                 created_at TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS automation_state (
+                state_key TEXT PRIMARY KEY,
+                last_run_at TEXT
+            )
+        """)
         for column, definition in (
             ("external_reference", "TEXT"),
             ("provider_payment_id", "TEXT"),
@@ -451,6 +459,67 @@ def loop_lembretes() -> None:
         except Exception as exc:
             logger.warning("Erro no worker de lembretes: %s", exc)
         time.sleep(30)
+
+
+def mensagem_promocional_canal() -> str:
+    return (
+        "🔎 *Ainda procurando um username?*\n\n"
+        "O Kronos Intel está pronto para fazer uma nova varredura com o *Maigret* "
+        "e localizar perfis públicos associados ao username informado.\n\n"
+        "✅ Consulta focada somente em username\n"
+        "✅ Busca em várias plataformas\n"
+        "✅ Relatório organizado com links\n\n"
+        "👉 Acesse o bot e envie:\n"
+        "`/user seu_username`\n\n"
+        "Não deixe sua próxima descoberta para depois."
+    )
+
+
+def reivindicar_promocao_canal() -> bool:
+    """Garante no SQLite que apenas um worker publique a promoção por ciclo."""
+    agora = datetime.now(TIMEZONE_BR)
+    limite = agora.timestamp() - CFG.CANAL_PROMO_INTERVAL_SECONDS
+    with db_lock:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        row = cur.execute(
+            "SELECT last_run_at FROM automation_state WHERE state_key = ?",
+            ("channel_promo",),
+        ).fetchone()
+        if row and row[0]:
+            try:
+                if datetime.fromisoformat(row[0]).timestamp() > limite:
+                    conn.rollback()
+                    conn.close()
+                    return False
+            except ValueError:
+                pass
+        cur.execute(
+            "INSERT INTO automation_state(state_key, last_run_at) VALUES (?, ?) "
+            "ON CONFLICT(state_key) DO UPDATE SET last_run_at = excluded.last_run_at",
+            ("channel_promo", agora.isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        return True
+
+
+def loop_promocao_canal() -> None:
+    """Publica uma chamada no canal principal uma vez a cada três dias."""
+    while True:
+        try:
+            if CFG.CANAL_PROMO_ENABLED and bot and CFG.CANAL_PRINCIPAL_ID and reivindicar_promocao_canal():
+                bot.send_message(
+                    CFG.CANAL_PRINCIPAL_ID,
+                    mensagem_promocional_canal(),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+                logger.info("Mensagem promocional publicada no canal principal")
+        except Exception as exc:
+            logger.warning("Falha ao publicar mensagem promocional no canal: %s", exc)
+        time.sleep(60)
 
 PLATAFORMAS = {
     "GitHub": "https://api.github.com/users/{username}",
@@ -803,33 +872,39 @@ def gerar_resumo_admin() -> str:
 if bot:
     @bot.message_handler(commands=['start', 'help', 'suporte', 'ajuda'])
     def send_welcome(message):
-        user_id = message.from_user.id
-        raw_first = escaping_html(message.from_user.first_name or "Usuario")
-        user_name = "".join(c for c in raw_first if c.isalnum() or c == " ")[:30].strip() or "Usuario"
+        try:
+            user_id = message.from_user.id
+            user_name = re.sub(r"[^\w -]", "", message.from_user.first_name or "Usuario", flags=re.UNICODE)[:30].strip() or "Usuario"
 
-        db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
-        Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
+            db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+            Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
 
-        menu_boas_vindas = (
-            f"👑 **KRONOS INTEL — USERNAME BOT** ⚡️\n"
-            f"─────────────────────────────────────────────\n"
-            f"👋 Olá, {user_name}! Bem-vindo à sua central de inteligência cibernética!\n\n"
-            f"🎁 Entre no canal oficial e ganhe **1 consulta gratuita**. Depois dela, cada consulta custa **{_preco_formatado()}**.\n\n"
-            f"🛠️ **CONSULTA DISPONÍVEL:**\n\n"
-            f"👤 **USERNAME / REDES SOCIAIS:**\n"
-            f"   • `/user alvo123`\n"
-            f"   • `/admin_user alvo123` (Admin)\n\n"
-            f"📢 **Canal Oficial:** {CFG.CANAL_TAG_PUBLICO}\n"
-            f"💬 **Suporte Direto:** @{CFG.SUPORTE_USERNAME}"
-        )
+            menu_boas_vindas = (
+                f"👑 KRONOS INTEL — USERNAME BOT\n"
+                f"─────────────────────────────────────────────\n"
+                f"👋 Olá, {user_name}!\n\n"
+                f"🎁 Entre no canal oficial e ganhe 1 consulta gratuita.\n\n"
+                f"CONSULTA DISPONÍVEL:\n"
+                f"• /user alvo123\n"
+                f"• /admin_user alvo123 (Admin)\n\n"
+                f"Canal oficial: {CFG.CANAL_TAG_PUBLICO}\n"
+                f"Suporte: @{CFG.SUPORTE_USERNAME}"
+            )
 
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
-            InlineKeyboardButton("✅ Já entrei — verificar consulta grátis", callback_data="verificar_gratis"),
-            InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
-        )
-        bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup, parse_mode="Markdown")
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
+                InlineKeyboardButton("✅ Verificar consulta grátis", callback_data="verificar_gratis"),
+                InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
+            )
+            try:
+                bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
+            except Exception:
+                # Fallback sem teclado: o usuário ainda recebe uma resposta mesmo
+                # se um link/markup estiver inválido no Telegram.
+                bot.send_message(message.chat.id, menu_boas_vindas)
+        except Exception:
+            logger.exception("Falha ao responder /start para chat_id=%s", getattr(getattr(message, "chat", None), "id", "desconhecido"))
 
     @bot.callback_query_handler(func=lambda call: call.data == "verificar_gratis")
     def verificar_consulta_gratis(call):
@@ -1084,6 +1159,8 @@ def healthz():
         "mercadopago_configured": bool(CFG.MERCADOPAGO_ACCESS_TOKEN),
         "channel_configured": bool(CFG.CANAL_PRINCIPAL_ID),
         "maigret_enabled": CFG.MAIGRET_ENABLED,
+        "channel_promo_enabled": CFG.CANAL_PROMO_ENABLED,
+        "channel_promo_interval_seconds": CFG.CANAL_PROMO_INTERVAL_SECONDS,
         "qrcode_available": qrcode is not None,
     }), 200
 
@@ -1114,8 +1191,25 @@ def configurar_webhook_telegram() -> None:
         # indisponível; o próximo deploy tentará novamente.
         logger.warning("Não foi possível configurar o webhook do Telegram: %s", exc)
 
+
+def configurar_comandos_telegram() -> None:
+    if not bot:
+        return
+    try:
+        bot.set_my_commands([
+            telebot.types.BotCommand("start", "Iniciar o bot"),
+            telebot.types.BotCommand("user", "Consultar um username"),
+            telebot.types.BotCommand("help", "Ver ajuda"),
+            telebot.types.BotCommand("suporte", "Falar com o suporte"),
+        ])
+        logger.info("Comandos do Telegram registrados")
+    except Exception as exc:
+        logger.warning("Não foi possível registrar os comandos do Telegram: %s", exc)
+
 configurar_webhook_telegram()
+configurar_comandos_telegram()
 Thread(target=loop_lembretes, daemon=True, name="payment-reminders").start()
+Thread(target=loop_promocao_canal, daemon=True, name="channel-promotion").start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=CFG.PORT)

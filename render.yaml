@@ -22,6 +22,10 @@ services:
         value: "25"
       - key: MAIGRET_ENABLED
         value: "1"
+      - key: CANAL_PROMO_ENABLED
+        value: "1"
+      - key: CANAL_PROMO_INTERVAL_SECONDS
+        value: "259200"
       - key: CANAL_PRINCIPAL_ID
         sync: false
       - key: GRUPO_LOGS_ID
