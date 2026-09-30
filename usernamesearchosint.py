@@ -801,10 +801,11 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
     atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
 
     link_web = gerar_painel_gratuito(user_id, target, qtype, resultados)
-    markup = InlineKeyboardMarkup(row_width=1)
+    token_relatorio = link_web.rstrip("/").split("/")[-1]
+    markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("🌐 Acessar Painel VIP", url=link_web),
-        InlineKeyboardButton("📄 Baixar PDF VIP", url=f"{CFG.WEB_BASE_URL}/download/pdf/{link_web.split('/')[-1]}")
+        InlineKeyboardButton("🔎 Ver relatório", url=link_web),
+        InlineKeyboardButton("📥 Baixar PDF", url=f"{CFG.WEB_BASE_URL}/download/pdf/{token_relatorio}")
     )
 
     if admin_bypass or consulta_gratis:
@@ -816,18 +817,20 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         bot.send_message(
             message.chat.id,
             cabecalho +
-            f"• **Alvo:** `{target}`\n"
-            f"• **Modalidade:** {qtype.upper()}\n\n"
-            f"Relatório processado e disponível abaixo:",
+            f"✅ **Relatório pronto**\n\n"
+            f"• **Username:** `{target}`\n"
+            f"• **Consulta:** {qtype.upper()}\n\n"
+            f"Escolha uma opção para acessar o resultado:",
             reply_markup=markup,
             parse_mode="Markdown"
         )
     else:
         bot.send_message(
             message.chat.id,
-            f"🎯 **CONSULTA OSINT CONCLUÍDA ({qtype.upper()})**\n\n"
-            f"• **Alvo:** `{target}`\n\n"
-            f"Clique abaixo para ver o painel:",
+            f"✅ **Relatório pronto**\n\n"
+            f"• **Username:** `{target}`\n"
+            f"• **Consulta:** {qtype.upper()}\n\n"
+            f"Escolha uma opção para acessar o resultado:",
             reply_markup=markup,
             parse_mode="Markdown"
         )
@@ -1021,43 +1024,73 @@ def ver_relatorio_web(token):
             if isinstance(v, dict):
                 fontes.append({"nome": k, "url": v.get("url", ""), "resumo": resumo_resultado(v)})
 
+    target_html = html.escape(str(target))
+    query_type_html = html.escape(str(query_type).upper())
     html_content = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
     <head>
         <meta charset="UTF-8">
-        <title>Kronos Intel — Relatório OSINT ({target})</title>
+        <title>Kronos Intel — Relatório de username ({target_html})</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <style>
-            body {{ background-color: #0f172a; color: #f8fafc; font-family: sans-serif; padding: 20px; }}
-            .card-custom {{ background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
-            .btn-link-custom {{ background: #334155; color: #38bdf8; text-decoration: none; padding: 10px 15px; border-radius: 8px; display: block; margin-bottom: 10px; }}
-            .btn-link-custom:hover {{ background: #475569; color: #f8fafc; }}
+            :root {{ --bg: #07111f; --surface: #101f33; --surface-2: #172a43; --line: #29415f; --accent: #38bdf8; --text: #e6f1ff; --muted: #91a4bd; }}
+            body {{ background: radial-gradient(circle at top right, #123252 0, var(--bg) 42%); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; min-height: 100vh; padding: 28px 14px; }}
+            .shell {{ max-width: 920px; margin: 0 auto; }}
+            .brand {{ color: var(--accent); font-size: .78rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 12px; }}
+            .hero, .card-custom {{ background: rgba(16, 31, 51, .92); border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 18px 50px rgba(0,0,0,.2); }}
+            .hero {{ padding: 30px; margin-bottom: 18px; }}
+            .hero h1 {{ font-size: clamp(1.55rem, 4vw, 2.25rem); margin: 0 0 14px; font-weight: 800; }}
+            .hero p, .muted {{ color: var(--muted); }}
+            .badge-status {{ display: inline-flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, .12); border: 1px solid rgba(34, 197, 94, .3); border-radius: 999px; color: #86efac; font-size: .8rem; font-weight: 700; padding: 7px 12px; }}
+            .meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 22px; }}
+            .meta-item {{ background: var(--surface-2); border-radius: 12px; padding: 14px 16px; }}
+            .meta-label {{ color: var(--muted); display: block; font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }}
+            .meta-value {{ font-weight: 700; overflow-wrap: anywhere; }}
+            .card-custom {{ padding: 24px; margin-bottom: 18px; }}
+            .card-custom h2 {{ font-size: 1.1rem; margin: 0 0 4px; }}
+            .source {{ border-top: 1px solid var(--line); padding: 16px 0 4px; }}
+            .source:first-child {{ border-top: 0; padding-top: 0; }}
+            .btn-link-custom {{ align-items: center; background: linear-gradient(135deg, #1e5680, #16415f); border: 1px solid #2d719c; color: #e0f2fe; display: flex; gap: 10px; justify-content: space-between; padding: 13px 16px; border-radius: 11px; text-decoration: none; font-weight: 700; transition: transform .15s, background .15s; }}
+            .btn-link-custom:hover {{ background: linear-gradient(135deg, #2875a8, #1d5778); color: #fff; transform: translateY(-1px); }}
+            .source-name {{ overflow-wrap: anywhere; }}
+            .source-action {{ color: #bae6fd; font-size: .82rem; white-space: nowrap; }}
+            .empty {{ color: var(--muted); padding: 18px 0 4px; }}
+            footer {{ color: #7186a0; font-size: .78rem; padding: 4px 2px; text-align: center; }}
         </style>
     </head>
     <body>
-        <div class="container">
-            <div class="card-custom">
-                <h2>🔎 Relatório OSINT ({query_type.upper()}): {target}</h2>
-                <p class="text-muted">Data: {created_at}</p>
+        <div class="shell">
+            <div class="brand">Kronos Intel · Central de resultados</div>
+            <div class="hero">
+                <span class="badge-status">● Relatório disponível</span>
+                <h1>Resultado da consulta</h1>
+                <p>Resumo organizado das fontes públicas encontradas para este username.</p>
+                <div class="meta">
+                    <div class="meta-item"><span class="meta-label">Username</span><span class="meta-value">{target_html}</span></div>
+                    <div class="meta-item"><span class="meta-label">Modalidade</span><span class="meta-value">{query_type_html}</span></div>
+                    <div class="meta-item"><span class="meta-label">Gerado em</span><span class="meta-value">{html.escape(str(created_at))}</span></div>
+                </div>
             </div>
             <div class="card-custom">
-                <h4>Fontes e Bases Localizadas:</h4>
-                <div class="mt-3">
+                <h2>Fontes e perfis localizados</h2>
+                <p class="muted mb-4">Acesse cada fonte diretamente pelos botões abaixo.</p>
+                <div>
     """
     for item in fontes:
         nome = html.escape(str(item["nome"]))
         url = html.escape(str(item["url"]))
         resumo = html.escape(str(item["resumo"]))
         if url.startswith(("http://", "https://")):
-            html_content += f'<a href="{url}" target="_blank" class="btn-link-custom">🔗 {nome} — abrir fonte</a>'
+            html_content += f'<div class="source"><a href="{url}" target="_blank" rel="noopener noreferrer" class="btn-link-custom"><span class="source-name">🔗 {nome}</span><span class="source-action">Abrir fonte ↗</span></a>'
         else:
-            html_content += f'<div class="btn-link-custom">🔎 {nome}</div>'
-        html_content += f'<p class="text-muted">{resumo}</p>'
+            html_content += f'<div class="source"><div class="btn-link-custom"><span class="source-name">🔎 {nome}</span><span class="source-action">Referência</span></div>'
+        html_content += f'<p class="muted mt-2 mb-0">{resumo}</p></div>'
     
     html_content += """
                 </div>
             </div>
+            <footer>Use estas informações apenas para fins legítimos de pesquisa e auditoria.</footer>
         </div>
     </body>
     </html>
