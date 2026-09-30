@@ -462,10 +462,17 @@ def loop_lembretes() -> None:
 
 
 def mensagem_promocional_canal() -> str:
+    bot_username = ""
+    if bot:
+        try:
+            bot_username = bot.get_me().username or ""
+        except Exception as exc:
+            logger.warning("Não foi possível obter o username público do bot: %s", exc)
+    bot_link = f"https://t.me/{bot_username}" if bot_username else f"https://t.me/{CFG.SUPORTE_USERNAME}"
     return (
         "🔎 *Ainda procurando um username?*\n\n"
-        "O Kronos Intel está pronto para fazer uma nova varredura com o *Maigret* "
-        "e localizar perfis públicos associados ao username informado.\n\n"
+        f"[Kronos Intel — abrir o bot]({bot_link})\n\n"
+        "Faça uma nova consulta e encontre perfis públicos associados ao username informado.\n\n"
         "✅ Consulta focada somente em username\n"
         "✅ Busca em várias plataformas\n"
         "✅ Relatório organizado com links\n\n"
@@ -747,7 +754,8 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         atualizar_progresso(message, progress_id, f"💳 *Gerando cobrança*\n\n`[████░░░░░░]` 40%\nValor: *{_preco_formatado()}*")
         bot.send_message(
             message.chat.id,
-            f"⏳ Consulta `{qtype.upper()}` recebida. Gerando cobrança de *{_preco_formatado()}*...",
+            f"⏳ Consulta `{qtype.upper()}` recebida.\n"
+            f"💳 Esta consulta custa *{_preco_formatado()}*. Gerando cobrança...",
             parse_mode="Markdown",
         )
         checkout = criar_preferencia_pagamento(message, target, qtype)
@@ -880,15 +888,9 @@ if bot:
             Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
 
             menu_boas_vindas = (
-                f"👑 KRONOS INTEL — USERNAME BOT\n"
-                f"─────────────────────────────────────────────\n"
                 f"👋 Olá, {user_name}!\n\n"
-                f"🎁 Entre no canal oficial e ganhe 1 consulta gratuita.\n\n"
-                f"CONSULTA DISPONÍVEL:\n"
-                f"• /user alvo123\n"
-                f"• /admin_user alvo123 (Admin)\n\n"
-                f"Canal oficial: {CFG.CANAL_TAG_PUBLICO}\n"
-                f"Suporte: @{CFG.SUPORTE_USERNAME}"
+                f"🎁 Entre no canal oficial para ganhar 1 consulta gratuita.\n\n"
+                f"Toque no botão abaixo para entrar e depois confirme sua participação."
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
@@ -946,6 +948,7 @@ if bot:
             return
 
         if cmd in ADMIN_COMMANDS and message.from_user.id != CFG.ADMIN_ID:
+            logger.warning("Tentativa de comando admin negada: user_id=%s cmd=%s", message.from_user.id, cmd)
             bot.reply_to(message, "⛔ Comando administrativo restrito ao administrador.")
             return
 

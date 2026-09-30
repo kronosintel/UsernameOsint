@@ -28,6 +28,8 @@ services:
         value: "259200"
       - key: CANAL_PRINCIPAL_ID
         sync: false
+      - key: ADMIN_ID
+        sync: false
       - key: GRUPO_LOGS_ID
         sync: false
       - key: CONSULTA_PRECO
