@@ -750,16 +750,18 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
 
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
 
+    admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
     membro_canal = usuario_esta_no_canal(user_id)
     consulta_gratis = membro_canal and reivindicar_consulta_gratis(user_id)
     atualizar_progresso(message, progress_id, "🔎 *Consulta recebida*\n\n`[██░░░░░░░░]` 20%\nVerificando acesso...")
-    Thread(
-        target=enviar_notificacao_evento,
-        args=("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None),
-        daemon=True,
-    ).start()
-
-    admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
+    if not admin_bypass:
+        Thread(
+            target=enviar_notificacao_evento,
+            args=("CONSULTA GRÁTIS" if consulta_gratis else "NOVA CONSULTA", message, qtype, target, "GRÁTIS" if consulta_gratis else None),
+            daemon=True,
+        ).start()
+    else:
+        logger.info("Uso administrativo não será enviado ao canal: user_id=%s alvo=%s", user_id, target)
     if not admin_bypass and not consulta_gratis:
         atualizar_progresso(message, progress_id, f"💳 *Gerando cobrança*\n\n`[████░░░░░░]` 40%\nValor: *{_preco_formatado()}*")
         bot.send_message(
@@ -903,7 +905,10 @@ if bot:
             user_name = re.sub(r"[^\w -]", "", message.from_user.first_name or "Usuario", flags=re.UNICODE)[:30].strip() or "Usuario"
 
             db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
-            Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
+            if user_id != CFG.ADMIN_ID:
+                Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
+            else:
+                logger.info("/start administrativo não será enviado ao canal: user_id=%s", user_id)
 
             menu_boas_vindas = (
                 f"👋 Olá, {user_name}!\n\n"
