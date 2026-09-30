@@ -28,10 +28,9 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertEqual(results["GitHub"]["exists"], True)
         self.assertEqual(results["MyCred — referência manual"]["status"], "reference_only")
 
-    def test_email_lookup_returns_without_optional_api_key(self):
-        results = executar_varredura_com_timeout("teste@example.com", "email")
-        self.assertIn("Have I Been Pwned", results)
-        self.assertIn("Mozilla Monitor", results)
+    def test_non_username_lookup_is_rejected(self):
+        with self.assertRaises(ValueError):
+            executar_varredura_com_timeout("teste@example.com", "email")
 
     def test_missing_report_returns_404(self):
         response = self.client.get("/relatorio/token-inexistente")
