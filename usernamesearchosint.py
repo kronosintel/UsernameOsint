@@ -155,11 +155,11 @@ def categoria_fonte(nome: str, url: str = "", status: str = "") -> str:
     texto = f"{nome} {url}".lower()
     if status == "reference_only" or any(x in texto for x in ("google", "bing", "duckduckgo", "mycred", "whatsmyname")):
         return "Busca e referências"
-    if any(x in texto for x in ("github", "gitlab", "codeberg", "stackoverflow", "docker", "npm", "pypi", "bitbucket")):
+    if any(x in texto for x in ("github", "gitlab", "codeberg", "stackoverflow", "docker", "npm", "pypi", "bitbucket", "kaggle", "keybase")):
         return "Desenvolvimento"
     if any(x in texto for x in ("steam", "lichess", "chess", "twitch", "roblox", "xbox", "playstation")):
         return "Jogos e comunidades"
-    if any(x in texto for x in ("instagram", "tiktok", "reddit", "facebook", "twitter", "x /", "pinterest", "youtube", "telegram", "mastodon", "medium")):
+    if any(x in texto for x in ("instagram", "tiktok", "reddit", "facebook", "twitter", "x /", "pinterest", "youtube", "telegram", "mastodon", "medium", "behance", "dribbble", "soundcloud", "vimeo", "flickr", "quora", "patreon")):
         return "Redes e conteúdo"
     return "Outras fontes"
 
@@ -589,6 +589,16 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
         "X / Twitter Profile Direct": f"https://x.com/{encoded_user}",
         "Pinterest Profile Direct": f"https://www.pinterest.com/{encoded_user}/",
         "WhatsMyName Username Enum": f"https://whatsmyname.app/?q={encoded_user}",
+        "Telegram Profile Direct": f"https://t.me/{encoded_user}",
+        "Twitch Profile Direct": f"https://www.twitch.tv/{encoded_user}",
+        "Kaggle Profile Direct": f"https://www.kaggle.com/{encoded_user}",
+        "Keybase Profile Direct": f"https://keybase.io/{encoded_user}",
+        "Behance Profile Direct": f"https://www.behance.net/{encoded_user}",
+        "Dribbble Profile Direct": f"https://dribbble.com/{encoded_user}",
+        "SoundCloud Profile Direct": f"https://soundcloud.com/{encoded_user}",
+        "Vimeo Profile Direct": f"https://vimeo.com/{encoded_user}",
+        "Flickr Profile Direct": f"https://www.flickr.com/people/{encoded_user}/",
+        "Quora Profile Direct": f"https://www.quora.com/profile/{encoded_user}",
     }
     for nome, url in links_diretos.items():
         resultados[nome] = {
@@ -623,6 +633,16 @@ def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
         "TikTok": {"exists": True, "url": f"https://www.tiktok.com/@{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
         "Pinterest": {"exists": True, "url": f"https://www.pinterest.com/{encoded}/", "category": "Redes e conteúdo", "source": "Fallback"},
         "YouTube": {"exists": True, "url": f"https://www.youtube.com/@{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Telegram": {"exists": True, "url": f"https://t.me/{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Twitch": {"exists": True, "url": f"https://www.twitch.tv/{encoded}", "category": "Jogos e comunidades", "source": "Fallback"},
+        "Kaggle": {"exists": True, "url": f"https://www.kaggle.com/{encoded}", "category": "Desenvolvimento", "source": "Fallback"},
+        "Keybase": {"exists": True, "url": f"https://keybase.io/{encoded}", "category": "Desenvolvimento", "source": "Fallback"},
+        "Behance": {"exists": True, "url": f"https://www.behance.net/{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Dribbble": {"exists": True, "url": f"https://dribbble.com/{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "SoundCloud": {"exists": True, "url": f"https://soundcloud.com/{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Vimeo": {"exists": True, "url": f"https://vimeo.com/{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Flickr": {"exists": True, "url": f"https://www.flickr.com/people/{encoded}/", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Quora": {"exists": True, "url": f"https://www.quora.com/profile/{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
         "Mastodon / pesquisa": {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded}%22", "category": "Busca e referências", "source": "Fallback"},
         "MyCred — referência manual": {
             "exists": None, "status": "reference_only",
@@ -1272,6 +1292,9 @@ def healthz():
         "mercadopago_configured": bool(CFG.MERCADOPAGO_ACCESS_TOKEN),
         "channel_configured": bool(CFG.CANAL_PRINCIPAL_ID),
         "maigret_enabled": CFG.MAIGRET_ENABLED,
+        "maigret_all_sites": os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"},
+        "maigret_timeout_seconds": CFG.MAIGRET_TIMEOUT,
+        "consulta_timeout_seconds": CFG.CONSULTA_TIMEOUT,
         "channel_promo_enabled": CFG.CANAL_PROMO_ENABLED,
         "channel_promo_interval_seconds": CFG.CANAL_PROMO_INTERVAL_SECONDS,
         "qrcode_available": qrcode is not None,

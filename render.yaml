@@ -15,11 +15,11 @@ services:
       - key: REQUEST_TIMEOUT
         value: "8"
       - key: CONSULTA_TIMEOUT
-        value: "30"
+        value: "55"
       - key: MAIGRET_ALL_SITES
-        value: "0"
+        value: "1"
       - key: MAIGRET_TIMEOUT
-        value: "18"
+        value: "40"
       - key: MAIGRET_ENABLED
         value: "1"
       - key: CANAL_PROMO_ENABLED

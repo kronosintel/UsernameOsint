@@ -15,6 +15,8 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("telegram_configured", response.json)
         self.assertIn("mercadopago_configured", response.json)
         self.assertIn("maigret_enabled", response.json)
+        self.assertIn("maigret_timeout_seconds", response.json)
+        self.assertIn("consulta_timeout_seconds", response.json)
 
     def test_root_endpoint(self):
         response = self.client.get("/")
@@ -28,6 +30,9 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertEqual(results["GitHub"]["exists"], True)
         self.assertEqual(results["GitHub"]["category"], "Desenvolvimento")
         self.assertEqual(results["Instagram"]["category"], "Redes e conteúdo")
+        self.assertIn("Telegram", results)
+        self.assertIn("Kaggle", results)
+        self.assertEqual(results["Kaggle"]["category"], "Desenvolvimento")
         self.assertEqual(results["MyCred — referência manual"]["status"], "reference_only")
 
     def test_source_categories_are_stable(self):
