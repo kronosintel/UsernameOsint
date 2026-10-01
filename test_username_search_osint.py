@@ -1,6 +1,6 @@
 import unittest
 
-from usernamesearchosint import app, executar_varredura_com_timeout, resultados_username_rapidos
+from usernamesearchosint import app, categoria_fonte, executar_varredura_com_timeout, resultados_username_rapidos
 
 
 class UsernameSearchTests(unittest.TestCase):
@@ -26,7 +26,14 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("GitHub", results)
         self.assertTrue(results["GitHub"]["url"].endswith("/alice"))
         self.assertEqual(results["GitHub"]["exists"], True)
+        self.assertEqual(results["GitHub"]["category"], "Desenvolvimento")
+        self.assertEqual(results["Instagram"]["category"], "Redes e conteúdo")
         self.assertEqual(results["MyCred — referência manual"]["status"], "reference_only")
+
+    def test_source_categories_are_stable(self):
+        self.assertEqual(categoria_fonte("GitHub", "https://github.com/alice"), "Desenvolvimento")
+        self.assertEqual(categoria_fonte("Steam", "https://steamcommunity.com/id/alice"), "Jogos e comunidades")
+        self.assertEqual(categoria_fonte("Google", "https://google.com", "reference_only"), "Busca e referências")
 
     def test_non_username_lookup_is_rejected(self):
         with self.assertRaises(ValueError):

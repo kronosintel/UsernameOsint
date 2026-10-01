@@ -149,6 +149,20 @@ def resumo_resultado(item: dict[str, Any]) -> str:
         partes.append(str(item["text"]))
     return " — ".join(partes)
 
+
+def categoria_fonte(nome: str, url: str = "", status: str = "") -> str:
+    """Classifica uma fonte sem depender de API externa ou cadastro manual."""
+    texto = f"{nome} {url}".lower()
+    if status == "reference_only" or any(x in texto for x in ("google", "bing", "duckduckgo", "mycred", "whatsmyname")):
+        return "Busca e referências"
+    if any(x in texto for x in ("github", "gitlab", "codeberg", "stackoverflow", "docker", "npm", "pypi", "bitbucket")):
+        return "Desenvolvimento"
+    if any(x in texto for x in ("steam", "lichess", "chess", "twitch", "roblox", "xbox", "playstation")):
+        return "Jogos e comunidades"
+    if any(x in texto for x in ("instagram", "tiktok", "reddit", "facebook", "twitter", "x /", "pinterest", "youtube", "telegram", "mastodon", "medium")):
+        return "Redes e conteúdo"
+    return "Outras fontes"
+
 def extrair_alvo_limpo(texto: str, preservar_arroba: bool = False) -> str:
     """ Extrai o termo de busca ignorando comandos e o caractere @. """
     partes = texto.strip().split(maxsplit=1)
@@ -560,48 +574,65 @@ async def consultar_alvo_async(username: str) -> dict[str, Any]:
         
         for (nome, _), resp in zip(PLATAFORMAS.items(), responses):
             if isinstance(resp, httpx.Response) and resp.status_code == 200:
-                resultados[nome] = {"exists": True, "url": str(resp.url)}
+                resultados[nome] = {
+                    "exists": True,
+                    "url": str(resp.url),
+                    "category": categoria_fonte(nome, str(resp.url)),
+                    "source": "Catálogo online",
+                }
 
     encoded_user = urllib.parse.quote(username_limpo)
-    resultados["Google Search (Redes & Perfis)"] = {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded_user}%22"}
-    resultados["Instagram Profile Direct"] = {"exists": True, "url": f"https://www.instagram.com/{encoded_user}/"}
-    resultados["TikTok Profile Direct"] = {"exists": True, "url": f"https://www.tiktok.com/@{encoded_user}"}
-    resultados["X / Twitter Profile Direct"] = {"exists": True, "url": f"https://x.com/{encoded_user}"}
-    resultados["Pinterest Profile Direct"] = {"exists": True, "url": f"https://www.pinterest.com/{encoded_user}/"}
-    resultados["WhatsMyName Username Enum"] = {"exists": True, "url": f"https://whatsmyname.app/?q={encoded_user}"}
+    links_diretos = {
+        "Google Search (Redes & Perfis)": f"https://www.google.com/search?q=%22{encoded_user}%22",
+        "Instagram Profile Direct": f"https://www.instagram.com/{encoded_user}/",
+        "TikTok Profile Direct": f"https://www.tiktok.com/@{encoded_user}",
+        "X / Twitter Profile Direct": f"https://x.com/{encoded_user}",
+        "Pinterest Profile Direct": f"https://www.pinterest.com/{encoded_user}/",
+        "WhatsMyName Username Enum": f"https://whatsmyname.app/?q={encoded_user}",
+    }
+    for nome, url in links_diretos.items():
+        resultados[nome] = {
+            "exists": True,
+            "status": "direct_profile",
+            "url": url,
+            "category": categoria_fonte(nome, url),
+            "source": "Referência direta",
+        }
     
     resultados.update({
         "MyCred — referência manual": {
             "exists": None, "status": "reference_only", "url": "https://mycred.com/",
             "query": username_limpo,
             "note": "MyCred não é um enumerador universal; confirme qualquer ocorrência manualmente.",
+            "category": categoria_fonte("MyCred", "https://mycred.com/", "reference_only"),
         },
-        "Google — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.google.com/search?q=%22{encoded_user}%22"},
-        "Bing — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.bing.com/search?q=%22{encoded_user}%22"},
-        "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded_user}%22"},
+        "Google — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.google.com/search?q=%22{encoded_user}%22", "category": "Busca e referências"},
+        "Bing — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.bing.com/search?q=%22{encoded_user}%22", "category": "Busca e referências"},
+        "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded_user}%22", "category": "Busca e referências"},
     })
     return resultados
 
 def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
     encoded = urllib.parse.quote(username)
     return {
-        "GitHub": {"exists": True, "url": f"https://github.com/{encoded}"},
-        "GitLab": {"exists": True, "url": f"https://gitlab.com/{encoded}"},
-        "Instagram": {"exists": True, "url": f"https://www.instagram.com/{encoded}/"},
-        "X / Twitter": {"exists": True, "url": f"https://x.com/{encoded}"},
-        "Reddit": {"exists": True, "url": f"https://www.reddit.com/user/{encoded}/"},
-        "TikTok": {"exists": True, "url": f"https://www.tiktok.com/@{encoded}"},
-        "Pinterest": {"exists": True, "url": f"https://www.pinterest.com/{encoded}/"},
-        "YouTube": {"exists": True, "url": f"https://www.youtube.com/@{encoded}"},
-        "Mastodon / pesquisa": {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded}%22"},
+        "GitHub": {"exists": True, "url": f"https://github.com/{encoded}", "category": "Desenvolvimento", "source": "Fallback"},
+        "GitLab": {"exists": True, "url": f"https://gitlab.com/{encoded}", "category": "Desenvolvimento", "source": "Fallback"},
+        "Instagram": {"exists": True, "url": f"https://www.instagram.com/{encoded}/", "category": "Redes e conteúdo", "source": "Fallback"},
+        "X / Twitter": {"exists": True, "url": f"https://x.com/{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Reddit": {"exists": True, "url": f"https://www.reddit.com/user/{encoded}/", "category": "Redes e conteúdo", "source": "Fallback"},
+        "TikTok": {"exists": True, "url": f"https://www.tiktok.com/@{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Pinterest": {"exists": True, "url": f"https://www.pinterest.com/{encoded}/", "category": "Redes e conteúdo", "source": "Fallback"},
+        "YouTube": {"exists": True, "url": f"https://www.youtube.com/@{encoded}", "category": "Redes e conteúdo", "source": "Fallback"},
+        "Mastodon / pesquisa": {"exists": True, "url": f"https://www.google.com/search?q=%22{encoded}%22", "category": "Busca e referências", "source": "Fallback"},
         "MyCred — referência manual": {
             "exists": None, "status": "reference_only",
             "url": "https://mycred.com/", "query": username,
             "note": "MyCred não é um enumerador universal; a presença precisa ser confirmada manualmente.",
+            "category": "Busca e referências",
         },
-        "Google — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.google.com/search?q=%22{encoded}%22"},
-        "Bing — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.bing.com/search?q=%22{encoded}%22"},
-        "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded}%22"},
+        "Google — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.google.com/search?q=%22{encoded}%22", "category": "Busca e referências"},
+        "Bing — presença do username": {"exists": None, "status": "reference_only", "url": f"https://www.bing.com/search?q=%22{encoded}%22", "category": "Busca e referências"},
+        "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded}%22", "category": "Busca e referências"},
     }
 
 def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
@@ -634,6 +665,7 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
                 "status": item.get("status", "found"),
                 "url": url,
                 "source": "Maigret",
+                "category": categoria_fonte(str(nome), url, item.get("status", "found")),
             }
         if resultados_maigret:
             return resultados_maigret
@@ -1022,7 +1054,18 @@ def ver_relatorio_web(token):
     if isinstance(results_json, dict):
         for k, v in results_json.items():
             if isinstance(v, dict):
-                fontes.append({"nome": k, "url": v.get("url", ""), "resumo": resumo_resultado(v)})
+                url_fonte = v.get("url", "")
+                fontes.append({
+                    "nome": k,
+                    "url": url_fonte,
+                    "resumo": resumo_resultado(v),
+                    "categoria": v.get("category") or categoria_fonte(k, url_fonte, v.get("status", "")),
+                    "origem": v.get("source", "Resultado normalizado"),
+                })
+    grupos = {}
+    ordem_categorias = ["Redes e conteúdo", "Desenvolvimento", "Jogos e comunidades", "Busca e referências", "Outras fontes"]
+    for item in fontes:
+        grupos.setdefault(item["categoria"], []).append(item)
 
     target_html = html.escape(str(target))
     query_type_html = html.escape(str(query_type).upper())
@@ -1055,6 +1098,11 @@ def ver_relatorio_web(token):
             .btn-link-custom:hover {{ background: linear-gradient(135deg, #2875a8, #1d5778); color: #fff; transform: translateY(-1px); }}
             .source-name {{ overflow-wrap: anywhere; }}
             .source-action {{ color: #bae6fd; font-size: .82rem; white-space: nowrap; }}
+            .category-card {{ background: rgba(23, 42, 67, .72); border: 1px solid var(--line); border-radius: 14px; margin-top: 16px; padding: 18px; }}
+            .category-heading {{ align-items: center; display: flex; justify-content: space-between; gap: 12px; margin-bottom: 2px; }}
+            .category-heading h3 {{ font-size: 1rem; margin: 0; }}
+            .category-count {{ background: rgba(56, 189, 248, .12); border: 1px solid rgba(56, 189, 248, .28); border-radius: 999px; color: #bae6fd; font-size: .72rem; padding: 4px 9px; white-space: nowrap; }}
+            .origin {{ color: var(--muted); font-size: .72rem; margin-top: 7px; }}
             .empty {{ color: var(--muted); padding: 18px 0 4px; }}
             footer {{ color: #7186a0; font-size: .78rem; padding: 4px 2px; text-align: center; }}
         </style>
@@ -1074,21 +1122,27 @@ def ver_relatorio_web(token):
             </div>
             <div class="card-custom">
                 <h2>Fontes e perfis localizados</h2>
-                <p class="muted mb-4">Acesse cada fonte diretamente pelos botões abaixo.</p>
-                <div>
+                <p class="muted mb-4">Resultados organizados por categoria. Links diretos são referências e devem ser confirmados na fonte original.</p>
     """
-    for item in fontes:
-        nome = html.escape(str(item["nome"]))
-        url = html.escape(str(item["url"]))
-        resumo = html.escape(str(item["resumo"]))
-        if url.startswith(("http://", "https://")):
-            html_content += f'<div class="source"><a href="{url}" target="_blank" rel="noopener noreferrer" class="btn-link-custom"><span class="source-name">🔗 {nome}</span><span class="source-action">Abrir fonte ↗</span></a>'
-        else:
-            html_content += f'<div class="source"><div class="btn-link-custom"><span class="source-name">🔎 {nome}</span><span class="source-action">Referência</span></div>'
-        html_content += f'<p class="muted mt-2 mb-0">{resumo}</p></div>'
-    
+    for categoria in ordem_categorias:
+        itens = grupos.get(categoria, [])
+        if not itens:
+            continue
+        html_content += f'<section class="category-card"><div class="category-heading"><h3>{html.escape(categoria)}</h3><span class="category-count">{len(itens)} fonte(s)</span></div>'
+        for item in itens:
+            nome = html.escape(str(item["nome"]))
+            url = html.escape(str(item["url"]))
+            resumo = html.escape(str(item["resumo"]))
+            origem = html.escape(str(item["origem"]))
+            if url.startswith(("http://", "https://")):
+                html_content += f'<div class="source"><a href="{url}" target="_blank" rel="noopener noreferrer" class="btn-link-custom"><span class="source-name">🔗 {nome}</span><span class="source-action">Abrir fonte ↗</span></a>'
+            else:
+                html_content += f'<div class="source"><div class="btn-link-custom"><span class="source-name">🔎 {nome}</span><span class="source-action">Referência</span></div>'
+            html_content += f'<div class="origin">Origem: {origem}</div><p class="muted mt-2 mb-0">{resumo}</p></div>'
+        html_content += '</section>'
+    if not fontes:
+        html_content += '<p class="empty">Nenhuma fonte estruturada foi encontrada nesta consulta.</p>'
     html_content += """
-                </div>
             </div>
             <footer>Use estas informações apenas para fins legítimos de pesquisa e auditoria.</footer>
         </div>
