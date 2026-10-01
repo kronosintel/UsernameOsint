@@ -17,6 +17,7 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("maigret_enabled", response.json)
         self.assertIn("maigret_timeout_seconds", response.json)
         self.assertIn("consulta_timeout_seconds", response.json)
+        self.assertIn("consulta_price_brl", response.json)
 
     def test_root_endpoint(self):
         response = self.client.get("/")

@@ -1295,6 +1295,7 @@ def healthz():
         "maigret_all_sites": os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"},
         "maigret_timeout_seconds": CFG.MAIGRET_TIMEOUT,
         "consulta_timeout_seconds": CFG.CONSULTA_TIMEOUT,
+        "consulta_price_brl": round(CFG.CONSULTA_PRECO, 2),
         "channel_promo_enabled": CFG.CANAL_PROMO_ENABLED,
         "channel_promo_interval_seconds": CFG.CANAL_PROMO_INTERVAL_SECONDS,
         "qrcode_available": qrcode is not None,
