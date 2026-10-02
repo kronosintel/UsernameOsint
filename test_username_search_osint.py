@@ -18,6 +18,8 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("maigret_timeout_seconds", response.json)
         self.assertIn("consulta_timeout_seconds", response.json)
         self.assertIn("consulta_price_brl", response.json)
+        self.assertEqual(response.json["billing_mode"], "monthly_pass")
+        self.assertEqual(response.json["monthly_pass_days"], 30)
 
     def test_root_endpoint(self):
         response = self.client.get("/")

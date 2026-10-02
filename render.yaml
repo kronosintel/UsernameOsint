@@ -33,7 +33,9 @@ services:
       - key: GRUPO_LOGS_ID
         sync: false
       - key: CONSULTA_PRECO
-        value: "5.90"
+        value: "6.90"
+      - key: PASSE_MENSAL_DIAS
+        value: "30"
       - key: MERCADOPAGO_ACCESS_TOKEN
         sync: false
       - key: PAGAMENTO_EXPIRACAO_MINUTOS
