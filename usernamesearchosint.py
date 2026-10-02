@@ -24,7 +24,7 @@ import time
 from typing import Any, Dict
 import urllib.parse
 from zoneinfo import ZoneInfo
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from io import BytesIO
 
 import httpx
@@ -171,6 +171,15 @@ def extrair_alvo_limpo(texto: str, preservar_arroba: bool = False) -> str:
     else:
         alvo = texto.strip()
     return alvo.strip() if preservar_arroba else alvo.replace("@", "").strip()
+
+def username_valido(username: str) -> bool:
+    """Aceita usernames simples e rejeita IDs numéricos, URLs e texto livre."""
+    alvo = str(username or "").strip()
+    return (
+        2 <= len(alvo) <= 64
+        and bool(re.fullmatch(r"[A-Za-z0-9_.-]+", alvo))
+        and bool(re.search(r"[A-Za-z]", alvo))
+    )
 
 def _preco_formatado() -> str:
     return f"R$ {CFG.CONSULTA_PRECO:.2f}".replace(".", ",")
@@ -790,6 +799,16 @@ def atualizar_progresso(message, progress_id: int | None, texto: str) -> None:
     except Exception as exc:
         logger.debug("Não foi possível atualizar progresso: %s", exc)
 
+def enviar_typing_periodico(chat_id: int, stop_event: Event) -> None:
+    """Mantém o indicador de digitação ativo enquanto a busca está em andamento."""
+    while not stop_event.is_set():
+        if bot:
+            try:
+                bot.send_chat_action(chat_id, "typing")
+            except Exception as exc:
+                logger.debug("Não foi possível enviar indicador de digitação: %s", exc)
+        stop_event.wait(4)
+
 def _processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None):
     if qtype != "username":
         raise ValueError("Este bot aceita somente consultas de username.")
@@ -798,6 +817,13 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
 
     if not target or len(target) < 2:
         bot.reply_to(message, "⚠️ Termo de busca muito curto.")
+        return
+    if not username_valido(target):
+        bot.reply_to(
+            message,
+            "⚠️ Informe um username válido, com letras e sem espaços. "
+            "IDs compostos apenas por números não são aceitos.",
+        )
         return
 
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
@@ -888,7 +914,7 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         )
     atualizar_progresso(message, progress_id, "✅ *Relatório pronto*\n\n`[██████████]` 100%\nO link foi enviado acima.")
 
-def processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None):
+def processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None, typing_stop: Event | None = None):
     """Executa a consulta e informa falhas que ocorram na thread."""
     try:
         _processar_busca(message, raw_target, qtype, progress_id)
@@ -906,6 +932,9 @@ def processar_busca(message, raw_target: str, qtype: str = "username", progress_
                 bot.send_message(message.chat.id, texto_chat)
             except Exception:
                 logger.exception("Falha ao avisar o usuário sobre erro de relatório")
+    finally:
+        if typing_stop:
+            typing_stop.set()
 
 def iniciar_busca(message, raw_target: str, qtype: str = "username") -> None:
     """Inicia a consulta fora do handler do webhook para não bloquear o bot."""
@@ -915,7 +944,9 @@ def iniciar_busca(message, raw_target: str, qtype: str = "username") -> None:
         parse_mode="Markdown",
     ) if bot else None
     progress_id = progress.message_id if progress else None
-    Thread(target=processar_busca, args=(message, raw_target, qtype, progress_id), daemon=True).start()
+    typing_stop = Event()
+    Thread(target=enviar_typing_periodico, args=(message.chat.id, typing_stop), daemon=True).start()
+    Thread(target=processar_busca, args=(message, raw_target, qtype, progress_id, typing_stop), daemon=True).start()
 
 def gerar_resumo_admin() -> str:
     """Monta um resumo administrativo sem expor resultados no chat."""

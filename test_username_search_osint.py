@@ -1,6 +1,6 @@
 import unittest
 
-from usernamesearchosint import app, categoria_fonte, executar_varredura_com_timeout, resultados_username_rapidos
+from usernamesearchosint import app, categoria_fonte, executar_varredura_com_timeout, resultados_username_rapidos, username_valido
 
 
 class UsernameSearchTests(unittest.TestCase):
@@ -44,6 +44,11 @@ class UsernameSearchTests(unittest.TestCase):
     def test_non_username_lookup_is_rejected(self):
         with self.assertRaises(ValueError):
             executar_varredura_com_timeout("teste@example.com", "email")
+
+    def test_username_format_rejects_numeric_ids(self):
+        self.assertFalse(username_valido("6633554708"))
+        self.assertFalse(username_valido("https://example.com/user"))
+        self.assertTrue(username_valido("alice_2026"))
 
     def test_missing_report_returns_404(self):
         response = self.client.get("/relatorio/token-inexistente")
