@@ -18,6 +18,7 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("mercadopago_configured", response.json)
         self.assertIn("maigret_enabled", response.json)
         self.assertIn("maigret_timeout_seconds", response.json)
+        self.assertEqual(response.json["maigret_timeout_seconds"], bot_module.timeout_maigret_efetivo())
         self.assertIn("consulta_timeout_seconds", response.json)
         self.assertIn("consulta_price_brl", response.json)
         self.assertEqual(response.json["billing_mode"], "monthly_pass")
@@ -26,6 +27,13 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("query_cooldown_seconds", response.json)
         self.assertIn("metrics", response.json)
         self.assertIn("maigret_fallbacks", response.json["metrics"])
+
+    def test_effective_maigret_timeout_is_capped_for_speed(self):
+        with (
+            patch.object(bot_module.CFG, "MAIGRET_TIMEOUT", 25),
+            patch.object(bot_module.CFG, "CONSULTA_TIMEOUT", 35),
+        ):
+            self.assertEqual(bot_module.timeout_maigret_efetivo(), 10)
 
     def test_root_endpoint(self):
         response = self.client.get("/")
@@ -83,6 +91,15 @@ class UsernameSearchTests(unittest.TestCase):
         db_execute.assert_not_called()
         check_subscription.assert_not_called()
         check_channel.assert_not_called()
+
+    def test_db_execute_fails_fast_when_lock_is_busy(self):
+        fake_lock = Mock()
+        fake_lock.acquire.return_value = False
+        with patch.object(bot_module, "db_lock", fake_lock):
+            with self.assertRaises(TimeoutError):
+                bot_module.db_execute("SELECT 1")
+        fake_lock.acquire.assert_called_once_with(timeout=5.0)
+        fake_lock.release.assert_not_called()
 
     def test_fast_username_fallback_contains_links(self):
         results = resultados_username_rapidos("alice")

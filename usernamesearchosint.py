@@ -410,15 +410,23 @@ def init_db():
 init_db()
 
 def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
-    with db_lock:
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+    if not db_lock.acquire(timeout=5.0):
+        raise TimeoutError("O banco local está ocupado; a operação foi interrompida após 5 segundos.")
+    conn = None
+    try:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=5.0)
         cursor = conn.cursor()
         cursor.execute(query, params)
         res = cursor.fetchone() if fetchone else None
         if commit:
             conn.commit()
-        conn.close()
         return res
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            db_lock.release()
 
 def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, str] | None:
     """Cria um checkout único do Mercado Pago para um passe mensal pré-pago."""
@@ -785,6 +793,11 @@ def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
         "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded}%22", "category": "Busca e referências"},
     }
 
+def timeout_maigret_efetivo() -> int:
+    """Retorna o teto efetivo do Maigret antes do fallback rápido."""
+    return max(5, min(CFG.MAIGRET_TIMEOUT, CFG.CONSULTA_TIMEOUT - 10, 10))
+
+
 def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
     if query_type != "username":
         raise ValueError("Este bot aceita somente consultas de username.")
@@ -807,7 +820,9 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
     try:
         metric_inc("maigret_attempts")
         todos_os_sites = os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"}
-        timeout_maigret = max(5, min(CFG.MAIGRET_TIMEOUT, CFG.CONSULTA_TIMEOUT - 10))
+        # O Maigret não vinha concluindo antes de 25 s; limitar essa espera
+        # para o catálogo interno poder responder rapidamente como fallback.
+        timeout_maigret = timeout_maigret_efetivo()
         resultado_maigret = consultar_username(
             target_limpo,
             todos_os_sites=todos_os_sites,
@@ -921,6 +936,8 @@ def gerar_painel_gratuito(user_id: int, target: str, qtype: str, resultados: dic
     results_json = json.dumps(resultados)
     token_relatorio = secrets.token_urlsafe(16)
     pid_free = f"free_{user_id}_{secrets.token_hex(4)}"
+    iniciou_em = time.monotonic()
+    logger.info("Persistindo relatório: user_id=%s itens=%s", user_id, len(resultados))
 
     db_execute(
         "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at) "
@@ -928,6 +945,7 @@ def gerar_painel_gratuito(user_id: int, target: str, qtype: str, resultados: dic
         (pid_free, user_id, target, token_relatorio, results_json, qtype, datetime.now(TIMEZONE_BR).isoformat()),
         commit=True
     )
+    logger.info("Relatório persistido: user_id=%s duracao_s=%.2f", user_id, time.monotonic() - iniciou_em)
     return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
 def enviar_resultado_telegram(chat_id: int, user_id: int, target: str, qtype: str, resultados: dict, cabecalho: str = "") -> None:
@@ -946,7 +964,9 @@ def enviar_resultado_telegram(chat_id: int, user_id: int, target: str, qtype: st
         f"• <b>Consulta:</b> <code>{escaping_html(qtype.upper())}</code>\n\n"
         "Escolha uma opção para acessar o resultado."
     )
+    logger.info("Enviando mensagem com link do relatório: user_id=%s", user_id)
     bot.send_message(chat_id, texto, reply_markup=markup, parse_mode="HTML")
+    logger.info("Mensagem com link do relatório enviada: user_id=%s", user_id)
     metric_inc("reports_delivered")
     return link_web
 
@@ -1064,6 +1084,7 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         raise
     logger.info("Varredura concluída: tipo=%s alvo=%s usuario=%s itens=%s", qtype, target, user_id, len(resultados))
     atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
+    logger.info("Etapa de 80%%: iniciando persistência e entrega do relatório para user_id=%s", user_id)
 
     if admin_bypass or consulta_gratis:
         cabecalho = (
@@ -1074,7 +1095,9 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados, cabecalho)
     else:
         enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados)
+    logger.info("Etapa de 80%%: relatório entregue para user_id=%s", user_id)
     atualizar_progresso(message, progress_id, "✅ *Relatório pronto*\n\n`[██████████]` 100%\nO link foi enviado acima.")
+    logger.info("Etapa de 100%%: consulta encerrada para user_id=%s", user_id)
 
 def processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None, typing_stop: Event | None = None):
     """Executa a consulta e informa falhas que ocorram na thread."""
@@ -1541,7 +1564,7 @@ def healthz():
         "channel_configured": bool(CFG.CANAL_PRINCIPAL_ID),
         "maigret_enabled": CFG.MAIGRET_ENABLED,
         "maigret_all_sites": os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"},
-        "maigret_timeout_seconds": CFG.MAIGRET_TIMEOUT,
+        "maigret_timeout_seconds": timeout_maigret_efetivo(),
         "consulta_timeout_seconds": CFG.CONSULTA_TIMEOUT,
         "consulta_price_brl": round(CFG.CONSULTA_PRECO, 2),
         "billing_mode": "monthly_pass",
