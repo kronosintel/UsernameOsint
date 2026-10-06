@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import usernamesearchosint as bot_module
 from usernamesearchosint import app, categoria_fonte, executar_varredura_com_timeout, resultados_username_rapidos, username_valido
@@ -41,6 +41,23 @@ class UsernameSearchTests(unittest.TestCase):
             response = self.client.post("/telegram", json=payload)
         self.assertEqual(response.status_code, 200)
         thread.assert_called_once()
+
+    def test_admin_bypass_skips_channel_membership_lookup(self):
+        message = Mock()
+        message.from_user.id = 123
+        message.chat.id = 123
+        with (
+            patch.object(bot_module.CFG, "ADMIN_ID", 123),
+            patch.object(bot_module.CFG, "ADMIN_BYPASS_PAYMENT", True),
+            patch.object(bot_module, "db_execute"),
+            patch.object(bot_module, "acesso_mensal_ativo", return_value=(False, None)),
+            patch.object(bot_module, "usuario_esta_no_canal") as check_channel,
+            patch.object(bot_module, "atualizar_progresso"),
+            patch.object(bot_module, "executar_varredura_com_timeout", return_value={}),
+            patch.object(bot_module, "enviar_resultado_telegram"),
+        ):
+            bot_module._processar_busca(message, "alice")
+        check_channel.assert_not_called()
 
     def test_fast_username_fallback_contains_links(self):
         results = resultados_username_rapidos("alice")

@@ -1006,9 +1006,9 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
 
     admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
     passe_ativo, access_until = acesso_mensal_ativo(user_id)
-    membro_canal = usuario_esta_no_canal(user_id)
-    consulta_gratis = not passe_ativo and membro_canal and reivindicar_consulta_gratis(user_id)
     atualizar_progresso(message, progress_id, "🔎 *Consulta recebida*\n\n`[██░░░░░░░░]` 20%\nVerificando acesso...")
+    membro_canal = False if admin_bypass or passe_ativo else usuario_esta_no_canal(user_id)
+    consulta_gratis = not passe_ativo and membro_canal and reivindicar_consulta_gratis(user_id)
     if not admin_bypass:
         Thread(
             target=enviar_notificacao_evento,
