@@ -72,14 +72,16 @@ class UsernameSearchTests(unittest.TestCase):
         with (
             patch.object(bot_module.CFG, "ADMIN_ID", 123),
             patch.object(bot_module.CFG, "ADMIN_BYPASS_PAYMENT", True),
-            patch.object(bot_module, "db_execute"),
-            patch.object(bot_module, "acesso_mensal_ativo", return_value=(False, None)),
+            patch.object(bot_module, "db_execute") as db_execute,
+            patch.object(bot_module, "acesso_mensal_ativo") as check_subscription,
             patch.object(bot_module, "usuario_esta_no_canal") as check_channel,
             patch.object(bot_module, "atualizar_progresso"),
             patch.object(bot_module, "executar_varredura_com_timeout", return_value={}),
             patch.object(bot_module, "enviar_resultado_telegram"),
         ):
             bot_module._processar_busca(message, "alice")
+        db_execute.assert_not_called()
+        check_subscription.assert_not_called()
         check_channel.assert_not_called()
 
     def test_fast_username_fallback_contains_links(self):

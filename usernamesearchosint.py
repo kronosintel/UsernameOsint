@@ -1000,15 +1000,20 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         )
         return
 
-    db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
-
-    if not (user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT) and consulta_em_cooldown(user_id):
-        bot.reply_to(message, f"⏳ Aguarde alguns segundos antes de iniciar outra consulta.")
-        return
-
     admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
-    passe_ativo, access_until = acesso_mensal_ativo(user_id)
     atualizar_progresso(message, progress_id, "🔎 *Consulta recebida*\n\n`[██░░░░░░░░]` 20%\nVerificando acesso...")
+    if admin_bypass:
+        # O administrador não precisa de cooldown, registro de usuário, passe
+        # nem consulta ao SQLite para executar uma busca liberada.
+        passe_ativo, access_until = False, None
+        logger.info("Atalho administrativo: ignorando verificações de acesso e banco")
+    else:
+        db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+        if consulta_em_cooldown(user_id):
+            bot.reply_to(message, f"⏳ Aguarde alguns segundos antes de iniciar outra consulta.")
+            return
+        passe_ativo, access_until = acesso_mensal_ativo(user_id)
+
     membro_canal = False if admin_bypass or passe_ativo else usuario_esta_no_canal(user_id)
     consulta_gratis = not passe_ativo and membro_canal and reivindicar_consulta_gratis(user_id)
     if not admin_bypass:
@@ -1073,6 +1078,7 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
 
 def processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None, typing_stop: Event | None = None):
     """Executa a consulta e informa falhas que ocorram na thread."""
+    logger.info("Worker de consulta iniciado: tipo=%s usuario=%s", qtype, message.from_user.id)
     try:
         _processar_busca(message, raw_target, qtype, progress_id)
     except Exception as exc:
