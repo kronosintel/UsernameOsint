@@ -20,6 +20,10 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("consulta_price_brl", response.json)
         self.assertEqual(response.json["billing_mode"], "monthly_pass")
         self.assertEqual(response.json["monthly_pass_days"], 30)
+        self.assertIn("result_cache_seconds", response.json)
+        self.assertIn("query_cooldown_seconds", response.json)
+        self.assertIn("metrics", response.json)
+        self.assertIn("maigret_fallbacks", response.json["metrics"])
 
     def test_root_endpoint(self):
         response = self.client.get("/")

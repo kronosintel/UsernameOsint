@@ -83,6 +83,8 @@ class Config:
     TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "")
     CANAL_PROMO_ENABLED: bool = os.getenv("CANAL_PROMO_ENABLED", "1").lower() in {"1", "true", "yes"}
     CANAL_PROMO_INTERVAL_SECONDS: int = _env_int("CANAL_PROMO_INTERVAL_SECONDS", 259200)
+    RESULT_CACHE_SECONDS: int = _env_int("RESULT_CACHE_SECONDS", 900)
+    QUERY_COOLDOWN_SECONDS: int = _env_int("QUERY_COOLDOWN_SECONDS", 8)
 
 CFG = Config()
 
@@ -91,6 +93,18 @@ app.config['SECRET_KEY'] = secrets.token_hex(16)
 
 TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 db_lock = Lock()
+cache_lock = Lock()
+metrics_lock = Lock()
+result_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+last_query_by_user: dict[int, float] = {}
+metrics = {
+    "maigret_attempts": 0,
+    "maigret_successes": 0,
+    "maigret_fallbacks": 0,
+    "maigret_timeouts": 0,
+    "cache_hits": 0,
+    "reports_delivered": 0,
+}
 
 bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=False) if CFG.TELEGRAM_TOKEN else None
 
@@ -182,6 +196,39 @@ def username_valido(username: str) -> bool:
         and bool(re.search(r"[A-Za-z]", alvo))
     )
 
+def metric_inc(nome: str, valor: int = 1) -> None:
+    with metrics_lock:
+        metrics[nome] = metrics.get(nome, 0) + valor
+
+def cache_key(username: str, query_type: str) -> str:
+    return f"{query_type}:{username.lower()}"
+
+def cache_get(username: str, query_type: str) -> dict[str, Any] | None:
+    chave = cache_key(username, query_type)
+    with cache_lock:
+        item = result_cache.get(chave)
+        if not item:
+            return None
+        criado_em, valor = item
+        if time.monotonic() - criado_em > max(0, CFG.RESULT_CACHE_SECONDS):
+            result_cache.pop(chave, None)
+            return None
+        metric_inc("cache_hits")
+        return json.loads(json.dumps(valor, ensure_ascii=False))
+
+def cache_put(username: str, query_type: str, valor: dict[str, Any]) -> None:
+    with cache_lock:
+        result_cache[cache_key(username, query_type)] = (time.monotonic(), json.loads(json.dumps(valor, ensure_ascii=False)))
+
+def consulta_em_cooldown(user_id: int) -> bool:
+    agora = time.monotonic()
+    with cache_lock:
+        anterior = last_query_by_user.get(user_id, 0.0)
+        if agora - anterior < max(0, CFG.QUERY_COOLDOWN_SECONDS):
+            return True
+        last_query_by_user[user_id] = agora
+        return False
+
 def _preco_formatado() -> str:
     return f"R$ {CFG.CONSULTA_PRECO:.2f}".replace(".", ",")
 
@@ -199,17 +246,17 @@ def enviar_notificacao_evento(evento: str, message, consulta: str = "-", alvo: s
     username = f"@{usuario.username}" if usuario.username else "sem username"
     valor = valor or (_preco_formatado() if consulta != "-" else "-")
     texto = (
-        f"📣 *{evento}*\n"
-        f"• Usuário: {escaping_html(nome)} ({username})\n"
-        f"• ID: `{usuario.id}`\n"
-        f"• Consulta: `{consulta}`\n"
-        f"• Alvo: `{escaping_html(alvo)}`\n"
-        f"• Valor: *{valor}*\n"
-        f"• Horário: `{datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y %H:%M:%S')}`"
+        f"📣 <b>{escaping_html(evento)}</b>\n"
+        f"• Usuário: {escaping_html(nome)} ({escaping_html(username)})\n"
+        f"• ID: <code>{usuario.id}</code>\n"
+        f"• Consulta: <code>{escaping_html(consulta)}</code>\n"
+        f"• Alvo: <code>{escaping_html(alvo)}</code>\n"
+        f"• Valor: <b>{escaping_html(valor)}</b>\n"
+        f"• Horário: <code>{datetime.now(TIMEZONE_BR).strftime('%d/%m/%Y %H:%M:%S')}</code>"
     )
     for destino in destinos:
         try:
-            bot.send_message(destino, texto, parse_mode="Markdown", disable_web_page_preview=True)
+            bot.send_message(destino, texto, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as exc:
             logger.warning("Falha ao enviar log para %s: %s", destino, exc)
 
@@ -264,10 +311,10 @@ def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: 
             chat_id,
             f"🧾 Passe mensal criado\n"
             f"Acesso por {CFG.PASSE_MENSAL_DIAS} dias\n"
-            f"Valor: *{_preco_formatado()}*\n"
-            f"Link para copiar: `{checkout_url}`",
+            f"Valor: <b>{escaping_html(_preco_formatado())}</b>\n"
+            f"Link para copiar: <code>{escaping_html(checkout_url)}</code>",
             reply_markup=markup,
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         logger.warning("Pacote qrcode não instalado; checkout enviado sem imagem QR")
         return
@@ -284,13 +331,13 @@ def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: 
         caption=(
             f"🧾 Passe mensal Kronos Intel\n"
             f"Acesso a consultas de username por {CFG.PASSE_MENSAL_DIAS} dias\n"
-            f"Valor: *{_preco_formatado()}*\n\n"
+            f"Valor: <b>{escaping_html(_preco_formatado())}</b>\n\n"
             "Escaneie o QR ou abra o botão abaixo.\n"
-            f"Link para copiar manualmente: `{checkout_url}`\n"
+            f"Link para copiar manualmente: <code>{escaping_html(checkout_url)}</code>\n"
             f"O pagamento expira em {CFG.PAGAMENTO_EXPIRACAO_MINUTOS} minutos."
         ),
         reply_markup=markup,
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 def init_db():
@@ -489,6 +536,7 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
             parse_mode="Markdown",
             disable_web_page_preview=True,
         )
+        Thread(target=executar_e_entregar_pos_pagamento, args=(user_id, target, qtype), daemon=True).start()
     return True
 
 def buscar_e_marcar_lembretes() -> list[tuple]:
@@ -706,15 +754,22 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
         raise ValueError("Este bot aceita somente consultas de username.")
 
     target_limpo = extrair_alvo_limpo(target)
+    cached = cache_get(target_limpo, query_type)
+    if cached is not None:
+        logger.info("Resultado servido do cache: tipo=%s alvo=%s", query_type, target_limpo)
+        return cached
     if not CFG.MAIGRET_ENABLED:
         try:
-            return asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
+            resultado = asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
+            cache_put(target_limpo, query_type, resultado)
+            return resultado
         except Exception as exc:
             logger.warning("Catálogo online demorou ou falhou; usando relatório rápido: %s", exc)
             return resultados_username_rapidos(target_limpo)
     # Maigret amplia a busca para milhares de sites. A opção de todos os
     # sites pode ser ativada no ambiente sem alterar o código do bot.
     try:
+        metric_inc("maigret_attempts")
         todos_os_sites = os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"}
         timeout_maigret = max(5, min(CFG.MAIGRET_TIMEOUT, CFG.CONSULTA_TIMEOUT - 10))
         resultado_maigret = consultar_username(
@@ -734,19 +789,30 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
                 "category": categoria_fonte(str(nome), url, item.get("status", "found")),
             }
         if resultados_maigret:
+            metric_inc("maigret_successes")
+            cache_put(target_limpo, query_type, resultados_maigret)
             return resultados_maigret
         if resultado_maigret.erro:
             logger.warning("Maigret sem resultados estruturados: %s", resultado_maigret.erro)
-    except (RuntimeError, TimeoutError, ValueError) as exc:
+    except TimeoutError as exc:
+        metric_inc("maigret_timeouts")
+        logger.warning("Maigret indisponível; usando catálogo interno: %s", exc)
+    except (RuntimeError, ValueError) as exc:
         logger.warning("Maigret indisponível; usando catálogo interno: %s", exc)
 
     # Mantém o comportamento anterior quando a dependência não está
     # disponível, há timeout ou a versão instalada não retorna NDJSON.
+    metric_inc("maigret_fallbacks")
     try:
-        return asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
+        resultado = asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
+        cache_put(target_limpo, query_type, resultado)
+        return resultado
     except Exception as exc:
+        metric_inc("maigret_fallbacks")
         logger.warning("Fallback online demorou ou falhou; usando relatório rápido: %s", exc)
-        return resultados_username_rapidos(target_limpo)
+        resultado = resultados_username_rapidos(target_limpo)
+        cache_put(target_limpo, query_type, resultado)
+        return resultado
 
 def executar_varredura_com_timeout(target: str, query_type: str) -> dict[str, Any]:
     """Executa qualquer módulo com limite para nunca deixar a consulta presa."""
@@ -828,6 +894,41 @@ def gerar_painel_gratuito(user_id: int, target: str, qtype: str, resultados: dic
     )
     return f"{CFG.WEB_BASE_URL}/relatorio/{token_relatorio}"
 
+def enviar_resultado_telegram(chat_id: int, user_id: int, target: str, qtype: str, resultados: dict, cabecalho: str = "") -> None:
+    """Gera os links do relatório e envia uma mensagem segura ao Telegram."""
+    link_web = gerar_painel_gratuito(user_id, target, qtype, resultados)
+    token_relatorio = link_web.rstrip("/").split("/")[-1]
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🔎 Ver relatório", url=link_web),
+        InlineKeyboardButton("📥 Baixar PDF", url=f"{CFG.WEB_BASE_URL}/download/pdf/{token_relatorio}"),
+    )
+    prefixo = f"{cabecalho}\n\n" if cabecalho else ""
+    texto = (
+        f"{prefixo}<b>✅ Relatório pronto</b>\n\n"
+        f"• <b>Username:</b> <code>{escaping_html(target)}</code>\n"
+        f"• <b>Consulta:</b> <code>{escaping_html(qtype.upper())}</code>\n\n"
+        "Escolha uma opção para acessar o resultado."
+    )
+    bot.send_message(chat_id, texto, reply_markup=markup, parse_mode="HTML")
+    metric_inc("reports_delivered")
+    return link_web
+
+def executar_e_entregar_pos_pagamento(user_id: int, target: str, qtype: str) -> None:
+    """Executa automaticamente a consulta que originou o checkout aprovado."""
+    if not bot or not target:
+        return
+    try:
+        bot.send_message(user_id, "🔎 Pagamento aprovado. Vou concluir agora a consulta que você solicitou...")
+        resultados = executar_varredura_com_timeout(target, qtype)
+        enviar_resultado_telegram(user_id, user_id, target, qtype, resultados, "✅ Passe mensal ativado")
+    except Exception as exc:
+        logger.exception("Falha ao retomar consulta após pagamento: %s", exc)
+        try:
+            bot.send_message(user_id, "⚠️ O passe foi ativado, mas a consulta automática não terminou. Envie o username novamente para tentar outra vez.")
+        except Exception:
+            logger.exception("Falha ao avisar usuário sobre erro pós-pagamento")
+
 def atualizar_progresso(message, progress_id: int | None, texto: str) -> None:
     if not bot or not progress_id:
         return
@@ -864,6 +965,10 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         return
 
     db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+
+    if not (user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT) and consulta_em_cooldown(user_id):
+        bot.reply_to(message, f"⏳ Aguarde alguns segundos antes de iniciar outra consulta.")
+        return
 
     admin_bypass = user_id == CFG.ADMIN_ID and CFG.ADMIN_BYPASS_PAYMENT
     passe_ativo, access_until = acesso_mensal_ativo(user_id)
@@ -919,40 +1024,15 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
     logger.info("Varredura concluída: tipo=%s alvo=%s usuario=%s itens=%s", qtype, target, user_id, len(resultados))
     atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
 
-    link_web = gerar_painel_gratuito(user_id, target, qtype, resultados)
-    token_relatorio = link_web.rstrip("/").split("/")[-1]
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🔎 Ver relatório", url=link_web),
-        InlineKeyboardButton("📥 Baixar PDF", url=f"{CFG.WEB_BASE_URL}/download/pdf/{token_relatorio}")
-    )
-
     if admin_bypass or consulta_gratis:
         cabecalho = (
-            "👑 **MODO ADMINISTRADOR - CONSULTA LIBERADA**\n\n"
+            "👑 MODO ADMINISTRADOR - CONSULTA LIBERADA"
             if admin_bypass
-            else "🎁 **CONSULTA GRÁTIS PARA MEMBRO DO CANAL**\n\n"
+            else "🎁 CONSULTA GRÁTIS PARA MEMBRO DO CANAL"
         )
-        bot.send_message(
-            message.chat.id,
-            cabecalho +
-            f"✅ **Relatório pronto**\n\n"
-            f"• **Username:** `{target}`\n"
-            f"• **Consulta:** {qtype.upper()}\n\n"
-            f"Escolha uma opção para acessar o resultado:",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+        enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados, cabecalho)
     else:
-        bot.send_message(
-            message.chat.id,
-            f"✅ **Relatório pronto**\n\n"
-            f"• **Username:** `{target}`\n"
-            f"• **Consulta:** {qtype.upper()}\n\n"
-            f"Escolha uma opção para acessar o resultado:",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+        enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados)
     atualizar_progresso(message, progress_id, "✅ *Relatório pronto*\n\n`[██████████]` 100%\nO link foi enviado acima.")
 
 def processar_busca(message, raw_target: str, qtype: str = "username", progress_id: int | None = None, typing_stop: Event | None = None):
@@ -962,8 +1042,8 @@ def processar_busca(message, raw_target: str, qtype: str = "username", progress_
     except Exception as exc:
         logger.exception("Falha ao gerar relatório (%s): %s", qtype, exc)
         if isinstance(exc, TimeoutError):
-            texto_progresso = "⏱️ *A consulta demorou mais que o esperado.*\n\nSua consulta grátis foi preservada. Tente novamente em alguns instantes."
-            texto_chat = "⏱️ A consulta demorou mais que o esperado e foi cancelada. Sua consulta grátis foi preservada; tente novamente em alguns instantes."
+            texto_progresso = "⏱️ *A consulta demorou mais que o esperado.*\n\nSeu acesso não foi alterado. Tente novamente em alguns instantes."
+            texto_chat = "⏱️ A consulta demorou mais que o esperado e foi cancelada. Seu acesso não foi alterado; tente novamente em alguns instantes."
         else:
             texto_progresso = "⚠️ *Não foi possível concluir a consulta.*\n\nTente novamente em alguns instantes."
             texto_chat = "⚠️ Não foi possível concluir a consulta agora. Tente novamente em alguns instantes."
@@ -1007,19 +1087,19 @@ def gerar_resumo_admin() -> str:
         conn.close()
 
     linhas = [
-        "👑 *PAINEL ADMINISTRATIVO*",
+        "👑 <b>PAINEL ADMINISTRATIVO</b>",
         "",
-        f"• Usuários cadastrados: `{usuarios}`",
-        f"• Relatórios: `{relatorios}`",
-        f"• Relatórios aprovados: `{aprovados}`",
+        f"• Usuários cadastrados: <code>{usuarios}</code>",
+        f"• Relatórios: <code>{relatorios}</code>",
+        f"• Relatórios aprovados: <code>{aprovados}</code>",
         "",
-        "*Consultas por módulo:*",
+        "<b>Consultas por módulo:</b>",
     ]
-    linhas.extend(f"• `{tipo}`: `{quantidade}`" for tipo, quantidade in por_tipo)
-    linhas.extend(["", "*Últimos relatórios:*"])
+    linhas.extend(f"• <code>{escaping_html(tipo)}</code>: <code>{quantidade}</code>" for tipo, quantidade in por_tipo)
+    linhas.extend(["", "<b>Últimos relatórios:</b>"])
     for alvo, tipo, criado_em, token in ultimos:
         link = f"{CFG.WEB_BASE_URL}/relatorio/{token}"
-        linhas.append(f"• `{tipo}` — `{alvo}` — [{criado_em}]({link})")
+        linhas.append(f'• <code>{escaping_html(tipo)}</code> — <code>{escaping_html(alvo)}</code> — <a href="{escaping_html(link)}">abrir</a>')
     if not ultimos:
         linhas.append("• Nenhum relatório encontrado.")
     return "\n".join(linhas)
@@ -1041,6 +1121,11 @@ if bot:
                 f"👋 Olá, {user_name}!\n\n"
                 f"🎁 Entre no canal oficial para ganhar 1 consulta gratuita.\n\n"
                 f"Depois da consulta gratuita, ative o passe mensal por {_preco_formatado()} e use o bot por {CFG.PASSE_MENSAL_DIAS} dias.\n\n"
+                "Comandos disponíveis:\n"
+                "• /user username — fazer uma consulta\n"
+                "• /status — ver seu passe\n"
+                "• /assinar — ativar o passe mensal\n"
+                "• /ajuda — instruções completas\n\n"
                 f"Toque no botão abaixo para entrar e depois confirme sua participação."
             )
 
@@ -1081,10 +1166,52 @@ if bot:
         else:
             bot.send_message(call.message.chat.id, "✅ Entrada confirmada. Sua próxima consulta será gratuita. Use, por exemplo: /user nome_de_usuario")
 
-    @bot.message_handler(commands=['admin', 'admin_user', 'user'])
+    @bot.callback_query_handler(func=lambda call: call.data == "assinar_mensal")
+    def callback_assinar_mensal(call):
+        bot.answer_callback_query(call.id)
+        user_id = call.from_user.id
+        ativo, expira = acesso_mensal_ativo(user_id)
+        if ativo and expira:
+            bot.send_message(call.message.chat.id, f"✅ Seu passe já está ativo até <b>{expira.strftime('%d/%m/%Y %H:%M')}</b>.", parse_mode="HTML")
+            return
+        checkout = criar_preferencia_pagamento(call.message, "", "username")
+        if checkout:
+            _, checkout_url = checkout
+            enviar_checkout_com_qr(call.message.chat.id, checkout_url, "", "username")
+        else:
+            bot.send_message(call.message.chat.id, "⚠️ Não foi possível gerar o pagamento agora.")
+
+    @bot.message_handler(commands=['admin', 'admin_user', 'user', 'status', 'assinar'])
     def handle_commands(message):
         cmd = message.text.split()[0].split("@")[0].lower()
         partes = message.text.strip().split(maxsplit=1)
+
+        if cmd == "/status":
+            user_id = message.from_user.id
+            db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+            ativo, expira = acesso_mensal_ativo(user_id)
+            if ativo and expira:
+                restante = max(0, (expira - datetime.now(TIMEZONE_BR)).days)
+                bot.send_message(message.chat.id, f"✅ <b>Passe mensal ativo</b>\n\nVálido até: <b>{expira.strftime('%d/%m/%Y %H:%M')}</b>\nDias restantes: <b>{restante}</b>\n\nVocê pode consultar usernames sem nova cobrança.", parse_mode="HTML")
+            else:
+                markup = InlineKeyboardMarkup(row_width=1)
+                markup.add(InlineKeyboardButton(f"💳 Ativar passe por {_preco_formatado()}", callback_data="assinar_mensal"))
+                bot.send_message(message.chat.id, "ℹ️ <b>Nenhum passe mensal ativo</b>\n\nUse /assinar para liberar consultas por 30 dias.", reply_markup=markup, parse_mode="HTML")
+            return
+
+        if cmd == "/assinar":
+            user_id = message.from_user.id
+            ativo, expira = acesso_mensal_ativo(user_id)
+            if ativo and expira:
+                bot.send_message(message.chat.id, f"✅ Seu passe já está ativo até <b>{expira.strftime('%d/%m/%Y %H:%M')}</b>.", parse_mode="HTML")
+                return
+            checkout = criar_preferencia_pagamento(message, "", "username")
+            if checkout:
+                _, checkout_url = checkout
+                enviar_checkout_com_qr(message.chat.id, checkout_url, "", "username")
+            else:
+                bot.send_message(message.chat.id, "⚠️ Não foi possível gerar o pagamento agora. Tente novamente em instantes.")
+            return
 
         if cmd == "/admin":
             if message.from_user.id != CFG.ADMIN_ID:
@@ -1098,7 +1225,7 @@ if bot:
                     return
                 bot.reply_to(message, "Use: `/admin user alvo`", parse_mode="Markdown")
                 return
-            bot.send_message(message.chat.id, gerar_resumo_admin(), parse_mode="Markdown", disable_web_page_preview=True)
+            bot.send_message(message.chat.id, gerar_resumo_admin(), parse_mode="HTML", disable_web_page_preview=True)
             return
 
         if cmd in ADMIN_COMMANDS and message.from_user.id != CFG.ADMIN_ID:
@@ -1107,7 +1234,7 @@ if bot:
             return
 
         if len(partes) < 2:
-            bot.reply_to(message, f"⚠️ Por favor, insira o termo de busca após o comando `{cmd}`.", parse_mode="Markdown")
+            bot.reply_to(message, f"⚠️ Por favor, insira o termo de busca após o comando {cmd}.")
             return
 
         alvo = partes[1]
@@ -1301,15 +1428,15 @@ def webhook_mercadopago():
                 destinos = [destino for destino in (CFG.CANAL_PRINCIPAL_ID, CFG.GRUPO_LOGS_ID) if destino]
                 valor = f"R$ {float(row[3]):.2f}".replace(".", ",")
                 aviso = (
-                    "✅ *PASSE MENSAL ATIVADO*\n"
-                    f"• Usuário ID: `{row[0]}`\n"
-                    f"• Acesso: `{CFG.PASSE_MENSAL_DIAS} dias`\n"
-                    f"• Valor: *{valor}*\n"
-                    f"• Pagamento Mercado Pago: `{payment_id}`"
+                    "✅ <b>PASSE MENSAL ATIVADO</b>\n"
+                    f"• Usuário ID: <code>{row[0]}</code>\n"
+                    f"• Acesso: <code>{CFG.PASSE_MENSAL_DIAS} dias</code>\n"
+                    f"• Valor: <b>{escaping_html(valor)}</b>\n"
+                    f"• Pagamento Mercado Pago: <code>{escaping_html(payment_id)}</code>"
                 )
                 for destino in destinos:
                     try:
-                        bot.send_message(destino, aviso, parse_mode="Markdown")
+                        bot.send_message(destino, aviso, parse_mode="HTML")
                     except Exception as exc:
                         logger.warning("Falha ao notificar pagamento aprovado: %s", exc)
         return jsonify({"ok": True, "processed": liberado}), 200
@@ -1361,6 +1488,8 @@ def telegram_webhook():
 
 @app.route("/healthz")
 def healthz():
+    with metrics_lock:
+        metricas = dict(metrics)
     return jsonify({
         "status": "healthy",
         "telegram_configured": bool(CFG.TELEGRAM_TOKEN),
@@ -1373,6 +1502,9 @@ def healthz():
         "consulta_price_brl": round(CFG.CONSULTA_PRECO, 2),
         "billing_mode": "monthly_pass",
         "monthly_pass_days": CFG.PASSE_MENSAL_DIAS,
+        "result_cache_seconds": CFG.RESULT_CACHE_SECONDS,
+        "query_cooldown_seconds": CFG.QUERY_COOLDOWN_SECONDS,
+        "metrics": metricas,
         "channel_promo_enabled": CFG.CANAL_PROMO_ENABLED,
         "channel_promo_interval_seconds": CFG.CANAL_PROMO_INTERVAL_SECONDS,
         "qrcode_available": qrcode is not None,
@@ -1413,6 +1545,8 @@ def configurar_comandos_telegram() -> None:
         bot.set_my_commands([
             telebot.types.BotCommand("start", "Iniciar o bot"),
             telebot.types.BotCommand("user", "Consultar um username"),
+            telebot.types.BotCommand("status", "Ver status do passe"),
+            telebot.types.BotCommand("assinar", "Ativar passe mensal"),
             telebot.types.BotCommand("help", "Ver ajuda"),
             telebot.types.BotCommand("suporte", "Falar com o suporte"),
         ])

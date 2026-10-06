@@ -36,6 +36,10 @@ services:
         value: "6.90"
       - key: PASSE_MENSAL_DIAS
         value: "30"
+      - key: RESULT_CACHE_SECONDS
+        value: "900"
+      - key: QUERY_COOLDOWN_SECONDS
+        value: "8"
       - key: MERCADOPAGO_ACCESS_TOKEN
         sync: false
       - key: PAGAMENTO_EXPIRACAO_MINUTOS
