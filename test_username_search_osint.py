@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import patch
 
+import usernamesearchosint as bot_module
 from usernamesearchosint import app, categoria_fonte, executar_varredura_com_timeout, resultados_username_rapidos, username_valido
 
 
@@ -29,6 +31,16 @@ class UsernameSearchTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Kronos Intel OSINT Active", response.data)
+
+    def test_telegram_webhook_acks_start_without_blocking(self):
+        payload = {
+            "update_id": 999,
+            "message": {"message_id": 1, "chat": {"id": 123, "type": "private"}, "text": "/start"},
+        }
+        with patch.object(bot_module, "bot", object()), patch.object(bot_module, "Thread") as thread:
+            response = self.client.post("/telegram", json=payload)
+        self.assertEqual(response.status_code, 200)
+        thread.assert_called_once()
 
     def test_fast_username_fallback_contains_links(self):
         results = resultados_username_rapidos("alice")
