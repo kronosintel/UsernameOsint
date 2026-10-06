@@ -350,7 +350,8 @@ def init_db():
                 user_id INTEGER PRIMARY KEY,
                 created_at TEXT,
                 free_used INTEGER DEFAULT 0,
-                access_until TEXT
+                access_until TEXT,
+                pass_reminder_for TEXT
             )
         """)
         cursor.execute("""
@@ -393,6 +394,11 @@ def init_db():
                 raise
         try:
             cursor.execute("ALTER TABLE users ADD COLUMN access_until TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN pass_reminder_for TEXT")
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
@@ -529,11 +535,11 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
     if bot:
         bot.send_message(
             user_id,
-            f"✅ *Passe mensal ativado!*\n\n"
+            f"✅ <b>Passe mensal ativado!</b>\n\n"
             f"Você pode fazer consultas de username por {CFG.PASSE_MENSAL_DIAS} dias.\n"
-            f"Acesso válido até: *{access_until.strftime('%d/%m/%Y %H:%M')}*\n\n"
+            f"Acesso válido até: <b>{access_until.strftime('%d/%m/%Y %H:%M')}</b>\n\n"
             "Envie agora o username que deseja consultar.",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             disable_web_page_preview=True,
         )
         Thread(target=executar_e_entregar_pos_pagamento, args=(user_id, target, qtype), daemon=True).start()
@@ -556,6 +562,27 @@ def buscar_e_marcar_lembretes() -> list[tuple]:
         conn.close()
     return rows
 
+def buscar_e_marcar_expiracoes() -> list[tuple[int, str]]:
+    limite = datetime.now(TIMEZONE_BR) + timedelta(days=3)
+    agora = datetime.now(TIMEZONE_BR)
+    avisos = []
+    with db_lock:
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        rows = cur.execute("SELECT user_id, access_until, pass_reminder_for FROM users WHERE access_until IS NOT NULL").fetchall()
+        for user_id, access_until, reminder_for in rows:
+            try:
+                expira = datetime.fromisoformat(access_until)
+            except (TypeError, ValueError):
+                continue
+            if agora < expira <= limite and reminder_for != access_until:
+                cur.execute("UPDATE users SET pass_reminder_for = ? WHERE user_id = ?", (access_until, user_id))
+                avisos.append((user_id, access_until))
+        conn.commit()
+        conn.close()
+    return avisos
+
 def loop_lembretes() -> None:
     """Worker leve: verifica apenas o lembrete persistido no SQLite."""
     while True:
@@ -566,12 +593,19 @@ def loop_lembretes() -> None:
                     markup.add(InlineKeyboardButton("💳 Continuar pagamento", url=checkout_url))
                     bot.send_message(
                         user_id,
-                        "⏰ Lembrete: seu passe mensal ainda está pendente.\n"
-                        f"Valor: *R$ {float(amount):.2f}*\n"
+                        "⏰ <b>Lembrete: seu passe mensal ainda está pendente.</b>\n"
+                        f"Valor: <b>R$ {float(amount):.2f}</b>\n"
                         f"Após a aprovação, você terá {CFG.PASSE_MENSAL_DIAS} dias de acesso às consultas.\n"
                         "Este é o único lembrete automático desta cobrança.",
                         reply_markup=markup,
-                        parse_mode="Markdown",
+                        parse_mode="HTML",
+                    )
+            for user_id, access_until in buscar_e_marcar_expiracoes():
+                if bot:
+                    bot.send_message(
+                        user_id,
+                        f"⏳ <b>Seu passe mensal vence em breve</b>\n\nAcesso válido até: <b>{escaping_html(datetime.fromisoformat(access_until).strftime('%d/%m/%Y %H:%M'))}</b>\n\nUse /assinar para renovar por {_preco_formatado()}.",
+                        parse_mode="HTML",
                     )
         except Exception as exc:
             logger.warning("Erro no worker de lembretes: %s", exc)
@@ -587,14 +621,14 @@ def mensagem_promocional_canal() -> str:
             logger.warning("Não foi possível obter o username público do bot: %s", exc)
     bot_link = f"https://t.me/{bot_username}" if bot_username else f"https://t.me/{CFG.SUPORTE_USERNAME}"
     return (
-        "🔎 *Ainda procurando um username?*\n\n"
-        f"[Kronos Intel — abrir o bot]({bot_link})\n\n"
+        "🔎 <b>Ainda procurando um username?</b>\n\n"
+        f'<a href="{escaping_html(bot_link)}">Kronos Intel — abrir o bot</a>\n\n'
         "Faça uma nova consulta e encontre perfis públicos associados ao username informado.\n\n"
         "✅ Consulta focada somente em username\n"
         "✅ Busca em várias plataformas\n"
         "✅ Relatório organizado com links\n\n"
         "👉 Acesse o bot e envie:\n"
-        "`/user seu_username`\n\n"
+        "<code>/user seu_username</code>\n\n"
         "Não deixe sua próxima descoberta para depois."
     )
 
@@ -637,7 +671,7 @@ def loop_promocao_canal() -> None:
                 bot.send_message(
                     CFG.CANAL_PRINCIPAL_ID,
                     mensagem_promocional_canal(),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
                 logger.info("Mensagem promocional publicada no canal principal")
