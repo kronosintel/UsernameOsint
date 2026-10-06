@@ -32,10 +32,28 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Kronos Intel OSINT Active", response.data)
 
-    def test_telegram_webhook_acks_start_without_blocking(self):
+    def test_telegram_webhook_handles_start_directly(self):
         payload = {
             "update_id": 999,
             "message": {"message_id": 1, "chat": {"id": 123, "type": "private"}, "text": "/start"},
+        }
+        update = Mock()
+        update.message = Mock()
+        with (
+            patch.object(bot_module, "bot", object()),
+            patch.object(bot_module.Update, "de_json", return_value=update),
+            patch.object(bot_module, "send_welcome", create=True) as send_welcome,
+            patch.object(bot_module, "Thread") as thread,
+        ):
+            response = self.client.post("/telegram", json=payload)
+        self.assertEqual(response.status_code, 200)
+        send_welcome.assert_called_once_with(update.message)
+        thread.assert_not_called()
+
+    def test_telegram_webhook_keeps_other_updates_async(self):
+        payload = {
+            "update_id": 1000,
+            "message": {"message_id": 2, "chat": {"id": 123, "type": "private"}, "text": "/user alice"},
         }
         with patch.object(bot_module, "bot", object()), patch.object(bot_module, "Thread") as thread:
             response = self.client.post("/telegram", json=payload)
