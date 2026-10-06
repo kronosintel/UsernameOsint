@@ -30,6 +30,7 @@ from io import BytesIO
 import httpx
 import requests
 import telebot
+from telebot import apihelper
 try:
     import qrcode
 except ImportError:
@@ -60,7 +61,8 @@ def _env_float(key: str, default: float) -> float:
         return float(os.getenv(key, str(default)).replace(",", "."))
     except ValueError:
         return default
-
+apihelper.CONNECT_TIMEOUT = max(1, _env_int("TELEGRAM_CONNECT_TIMEOUT", 5))
+apihelper.READ_TIMEOUT = max(1, _env_int("TELEGRAM_READ_TIMEOUT", 10))
 @dataclass
 class Config:
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
@@ -1145,11 +1147,7 @@ if bot:
             user_id = message.from_user.id
             user_name = re.sub(r"[^\w -]", "", message.from_user.first_name or "Usuario", flags=re.UNICODE)[:30].strip() or "Usuario"
 
-            db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
-            if user_id != CFG.ADMIN_ID:
-                Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
-            else:
-                logger.info("/start administrativo não será enviado ao canal: user_id=%s", user_id)
+            logger.info("/start iniciado: user_id=%s", user_id)
 
             menu_boas_vindas = (
                 f"👋 Olá, {user_name}!\n\n"
@@ -1170,11 +1168,26 @@ if bot:
                 InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
             )
             try:
+                logger.info("Enviando menu de boas-vindas: user_id=%s", user_id)
                 bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
-            except Exception:
+                logger.info("Menu de boas-vindas enviado: user_id=%s", user_id)
+            except Exception as exc:
                 # Fallback sem teclado: o usuário ainda recebe uma resposta mesmo
                 # se um link/markup estiver inválido no Telegram.
-                bot.send_message(message.chat.id, menu_boas_vindas)
+                logger.warning("Falha no menu com teclado para user_id=%s: tipo=%s", user_id, type(exc).__name__)
+                try:
+                    bot.send_message(message.chat.id, menu_boas_vindas)
+                    logger.info("Menu de boas-vindas enviado sem teclado: user_id=%s", user_id)
+                except Exception as fallback_exc:
+                    logger.warning("Falha no menu sem teclado para user_id=%s: tipo=%s", user_id, type(fallback_exc).__name__)
+            try:
+                db_execute("INSERT INTO users (user_id, created_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING", (user_id, datetime.now(TIMEZONE_BR).isoformat()), commit=True)
+            except Exception as exc:
+                logger.warning("Falha ao registrar usuário do /start: user_id=%s tipo=%s", user_id, type(exc).__name__)
+            if user_id != CFG.ADMIN_ID:
+                Thread(target=enviar_notificacao_evento, args=("NOVO /START", message), daemon=True).start()
+            else:
+                logger.info("/start administrativo não será enviado ao canal: user_id=%s", user_id)
         except Exception:
             logger.exception("Falha ao responder /start para chat_id=%s", getattr(getattr(message, "chat", None), "id", "desconhecido"))
 
@@ -1506,15 +1519,6 @@ def telegram_webhook():
         data = request.get_json(force=True, silent=True)
         if data:
             logger.info("Webhook Telegram aceitou update_id=%s", data.get("update_id"))
-            raw_message = data.get("message") or {}
-            raw_text = str(raw_message.get("text") or "")
-            raw_command = raw_text.split()[0].split("@")[0].lower() if raw_text else ""
-            if raw_command in {"/start", "/help", "/ajuda", "/suporte"}:
-                update = Update.de_json(data)
-                if update.message:
-                    send_welcome(update.message)
-                    logger.info("Comando inicial respondido no webhook: %s", raw_command)
-                return jsonify({"status": "ok"}), 200
             Thread(target=_processar_update_async, args=(data,), daemon=True).start()
     except Exception as err:
         logger.exception("Erro no webhook: %s", str(err))

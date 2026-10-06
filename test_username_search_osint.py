@@ -32,23 +32,28 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Kronos Intel OSINT Active", response.data)
 
-    def test_telegram_webhook_handles_start_directly(self):
+    def test_telegram_webhook_acks_start_immediately(self):
         payload = {
             "update_id": 999,
             "message": {"message_id": 1, "chat": {"id": 123, "type": "private"}, "text": "/start"},
         }
-        update = Mock()
-        update.message = Mock()
-        with (
-            patch.object(bot_module, "bot", object()),
-            patch.object(bot_module.Update, "de_json", return_value=update),
-            patch.object(bot_module, "send_welcome", create=True) as send_welcome,
-            patch.object(bot_module, "Thread") as thread,
-        ):
+        with patch.object(bot_module, "bot", object()), patch.object(bot_module, "Thread") as thread:
             response = self.client.post("/telegram", json=payload)
         self.assertEqual(response.status_code, 200)
+        thread.assert_called_once_with(target=bot_module._processar_update_async, args=(payload,), daemon=True)
+
+    def test_start_worker_dispatches_welcome_directly(self):
+        payload = {"update_id": 1001, "message": {"text": "/start"}}
+        update = Mock()
+        update.message.text = "/start"
+        with (
+            patch.object(bot_module, "bot", Mock()) as fake_bot,
+            patch.object(bot_module.Update, "de_json", return_value=update),
+            patch.object(bot_module, "send_welcome", create=True) as send_welcome,
+        ):
+            bot_module._processar_update_async(payload)
         send_welcome.assert_called_once_with(update.message)
-        thread.assert_not_called()
+        fake_bot.process_new_updates.assert_not_called()
 
     def test_telegram_webhook_keeps_other_updates_async(self):
         payload = {
