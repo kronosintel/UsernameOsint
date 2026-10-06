@@ -410,10 +410,11 @@ def init_db():
 init_db()
 
 def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
-    if not db_lock.acquire(timeout=5.0):
-        raise TimeoutError("O banco local está ocupado; a operação foi interrompida após 5 segundos.")
     conn = None
     try:
+        # Cada chamada usa sua própria conexão. O SQLite/WAL coordena os
+        # escritores; não bloquear numa trava Python compartilhada por tarefas
+        # independentes, que pode atrasar o salvamento do relatório.
         conn = sqlite3.connect(CFG.DB_FILE, timeout=5.0)
         cursor = conn.cursor()
         cursor.execute(query, params)
@@ -422,11 +423,8 @@ def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
             conn.commit()
         return res
     finally:
-        try:
-            if conn is not None:
-                conn.close()
-        finally:
-            db_lock.release()
+        if conn is not None:
+            conn.close()
 
 def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, str] | None:
     """Cria um checkout único do Mercado Pago para um passe mensal pré-pago."""

@@ -92,14 +92,19 @@ class UsernameSearchTests(unittest.TestCase):
         check_subscription.assert_not_called()
         check_channel.assert_not_called()
 
-    def test_db_execute_fails_fast_when_lock_is_busy(self):
+    def test_db_execute_uses_own_connection_without_waiting_on_python_lock(self):
         fake_lock = Mock()
-        fake_lock.acquire.return_value = False
-        with patch.object(bot_module, "db_lock", fake_lock):
-            with self.assertRaises(TimeoutError):
-                bot_module.db_execute("SELECT 1")
-        fake_lock.acquire.assert_called_once_with(timeout=5.0)
-        fake_lock.release.assert_not_called()
+        fake_conn = Mock()
+        fake_cursor = fake_conn.cursor.return_value
+        fake_cursor.fetchone.return_value = (1,)
+        with (
+            patch.object(bot_module, "db_lock", fake_lock),
+            patch.object(bot_module.sqlite3, "connect", return_value=fake_conn) as connect,
+        ):
+            self.assertEqual(bot_module.db_execute("SELECT 1", fetchone=True), (1,))
+        fake_lock.acquire.assert_not_called()
+        connect.assert_called_once_with(bot_module.CFG.DB_FILE, timeout=5.0)
+        fake_conn.close.assert_called_once()
 
     def test_fast_username_fallback_contains_links(self):
         results = resultados_username_rapidos("alice")
