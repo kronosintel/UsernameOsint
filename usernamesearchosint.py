@@ -1337,7 +1337,11 @@ if bot:
 
 @app.route("/relatorio/<token>")
 def ver_relatorio_web(token):
-    p = db_execute("SELECT target_username, results_json, query_type, created_at FROM payments WHERE token = ?", (token,), fetchone=True)
+    try:
+        p = db_execute("SELECT target_username, results_json, query_type, created_at FROM payments WHERE token = ?", (token,), fetchone=True)
+    except sqlite3.OperationalError:
+        logger.exception("Falha de armazenamento ao carregar relatório web")
+        return "Relatório temporariamente indisponível. Tente novamente mais tarde.", 503
     if not p:
         return "Relatório não encontrado ou expirado.", 404
 
@@ -1450,7 +1454,11 @@ def ver_relatorio_web(token):
 
 @app.route("/download/pdf/<token>")
 def download_pdf(token):
-    p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ?", (token,), fetchone=True)
+    try:
+        p = db_execute("SELECT target_username, results_json, query_type FROM payments WHERE token = ?", (token,), fetchone=True)
+    except sqlite3.OperationalError:
+        logger.exception("Falha de armazenamento ao carregar relatório PDF")
+        return "Relatório temporariamente indisponível. Tente novamente mais tarde.", 503
     if not p:
         return "Relatório não encontrado.", 404
 

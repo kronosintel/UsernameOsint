@@ -1,4 +1,5 @@
 import unittest
+import sqlite3
 from unittest.mock import Mock, patch
 
 import usernamesearchosint as bot_module
@@ -135,6 +136,20 @@ class UsernameSearchTests(unittest.TestCase):
     def test_missing_report_returns_404(self):
         response = self.client.get("/relatorio/token-inexistente")
         self.assertEqual(response.status_code, 404)
+
+    def test_report_storage_error_returns_friendly_503(self):
+        with patch.object(bot_module, "db_execute", side_effect=sqlite3.OperationalError("disk I/O error")):
+            response = self.client.get("/relatorio/test-token")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Relatório temporariamente indisponível", response.get_data(as_text=True))
+        self.assertNotIn("disk I/O error", response.get_data(as_text=True))
+
+    def test_pdf_storage_error_returns_friendly_503(self):
+        with patch.object(bot_module, "db_execute", side_effect=sqlite3.OperationalError("disk I/O error")):
+            response = self.client.get("/download/pdf/test-token")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Relatório temporariamente indisponível", response.get_data(as_text=True))
+        self.assertNotIn("disk I/O error", response.get_data(as_text=True))
 
     def test_missing_pdf_returns_404(self):
         response = self.client.get("/download/pdf/token-inexistente")
