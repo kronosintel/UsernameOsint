@@ -714,30 +714,47 @@ def reivindicar_promocao_canal() -> bool:
     """Garante no SQLite que apenas um worker publique a promoção por ciclo."""
     agora = datetime.now(TIMEZONE_BR)
     limite = agora.timestamp() - CFG.CANAL_PROMO_INTERVAL_SECONDS
-    with sqlite_write_lock():
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        row = cur.execute(
-            "SELECT last_run_at FROM automation_state WHERE state_key = ?",
-            ("channel_promo",),
-        ).fetchone()
-        if row and row[0]:
+    etapa = "adquirir lock SQLite"
+    try:
+        with sqlite_write_lock(timeout_seconds=2.0):
+            etapa = "abrir conexão SQLite"
+            conn = sqlite3.connect(CFG.DB_FILE, timeout=2.0)
             try:
-                if datetime.fromisoformat(row[0]).timestamp() > limite:
+                cur = conn.cursor()
+                etapa = "iniciar transação"
+                cur.execute("BEGIN IMMEDIATE")
+                etapa = "ler estado da promoção"
+                row = cur.execute(
+                    "SELECT last_run_at FROM automation_state WHERE state_key = ?",
+                    ("channel_promo",),
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        if datetime.fromisoformat(row[0]).timestamp() > limite:
+                            conn.rollback()
+                            return False
+                    except ValueError:
+                        pass
+                etapa = "gravar estado da promoção"
+                cur.execute(
+                    "INSERT INTO automation_state(state_key, last_run_at) VALUES (?, ?) "
+                    "ON CONFLICT(state_key) DO UPDATE SET last_run_at = excluded.last_run_at",
+                    ("channel_promo", agora.isoformat()),
+                )
+                etapa = "confirmar transação"
+                conn.commit()
+                return True
+            except Exception:
+                try:
                     conn.rollback()
-                    conn.close()
-                    return False
-            except ValueError:
-                pass
-        cur.execute(
-            "INSERT INTO automation_state(state_key, last_run_at) VALUES (?, ?) "
-            "ON CONFLICT(state_key) DO UPDATE SET last_run_at = excluded.last_run_at",
-            ("channel_promo", agora.isoformat()),
-        )
-        conn.commit()
-        conn.close()
-        return True
+                except sqlite3.Error:
+                    logger.exception("Falha ao reverter transação da promoção do canal")
+                raise
+            finally:
+                conn.close()
+    except Exception as exc:
+        logger.warning("Falha na reserva da promoção do canal na etapa '%s': %s", etapa, exc)
+        raise
 
 
 def loop_promocao_canal() -> None:

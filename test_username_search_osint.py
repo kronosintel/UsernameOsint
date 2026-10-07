@@ -189,6 +189,35 @@ class UsernameSearchTests(unittest.TestCase):
             lock.release()
         self.assertIn("owner_caller=stuck_function", "\n".join(captured.output))
 
+    def test_channel_promotion_claim_releases_lock_after_success_repeat_and_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = f"{directory}/promotion.db"
+            conn = bot_module.sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE automation_state (state_key TEXT PRIMARY KEY, last_run_at TEXT)")
+            conn.commit()
+            conn.close()
+
+            with (
+                patch.object(bot_module.CFG, "DB_FILE", db_path),
+                patch.object(bot_module.CFG, "CANAL_PROMO_INTERVAL_SECONDS", 259200),
+            ):
+                self.assertTrue(bot_module.reivindicar_promocao_canal())
+                self.assertTrue(bot_module.db_lock.acquire(blocking=False))
+                bot_module.db_lock.release()
+
+                self.assertFalse(bot_module.reivindicar_promocao_canal())
+                self.assertTrue(bot_module.db_lock.acquire(blocking=False))
+                bot_module.db_lock.release()
+
+            broken_db = f"{directory}/missing-schema.db"
+            with patch.object(bot_module.CFG, "DB_FILE", broken_db):
+                with self.assertLogs(bot_module.logger, level="WARNING") as captured:
+                    with self.assertRaises(bot_module.sqlite3.OperationalError):
+                        bot_module.reivindicar_promocao_canal()
+            self.assertTrue(bot_module.db_lock.acquire(blocking=False))
+            bot_module.db_lock.release()
+            self.assertIn("ler estado da promoção", "\n".join(captured.output))
+
     def test_sherlock_results_are_labeled_and_returned(self):
         fake_result = Mock(
             encontrados=[{"site": "GitHub", "url": "https://github.com/alice", "status": "found"}],
