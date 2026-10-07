@@ -1,5 +1,6 @@
 import unittest
 import sqlite3
+import tempfile
 from unittest.mock import MagicMock, Mock, patch
 
 import usernamesearchosint as bot_module
@@ -152,9 +153,25 @@ class UsernameSearchTests(unittest.TestCase):
             patch.object(bot_module.sqlite3, "connect", return_value=fake_conn),
         ):
             bot_module.db_execute("INSERT INTO test_table VALUES (?)", (1,), commit=True)
-        fake_lock.__enter__.assert_called_once()
+        fake_lock.acquire.assert_called_once_with(timeout=10.0)
+        fake_lock.release.assert_called_once()
         fake_conn.commit.assert_called_once()
         fake_conn.close.assert_called_once()
+
+    def test_sqlite_write_lock_times_out_when_another_process_holds_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = f"{directory}/test.db"
+            lock_path = f"{db_path}.write-lock"
+            blocker = open(lock_path, "a")
+            bot_module.fcntl.flock(blocker.fileno(), bot_module.fcntl.LOCK_EX | bot_module.fcntl.LOCK_NB)
+            try:
+                with patch.object(bot_module.CFG, "DB_FILE", db_path):
+                    with self.assertRaises(TimeoutError):
+                        with bot_module.sqlite_write_lock(timeout_seconds=0.05):
+                            self.fail("O lock deveria ter expirado antes de entrar")
+            finally:
+                bot_module.fcntl.flock(blocker.fileno(), bot_module.fcntl.LOCK_UN)
+                blocker.close()
 
     def test_fast_username_fallback_contains_links(self):
         results = resultados_username_rapidos("alice")

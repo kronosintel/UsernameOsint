@@ -111,16 +111,38 @@ metrics = {
 }
 
 @contextmanager
-def sqlite_write_lock():
-    """Coordena transações SQLite entre threads e processos Gunicorn."""
-    with db_lock:
-        lock_path = f"{CFG.DB_FILE}.write-lock"
-        with open(lock_path, "a") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+def sqlite_write_lock(timeout_seconds: float = 10.0):
+    """Coordena transações SQLite entre workers sem espera ilimitada."""
+    deadline = time.monotonic() + timeout_seconds
+    if not db_lock.acquire(timeout=timeout_seconds):
+        logger.warning("Timeout aguardando lock SQLite local: pid=%s", os.getpid())
+        raise TimeoutError("Tempo esgotado aguardando a gravação no banco de dados.")
+
+    lock_file = None
+    file_locked = False
+    try:
+        lock_file = open(f"{CFG.DB_FILE}.write-lock", "a")
+        while True:
             try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                file_locked = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    logger.warning("Timeout aguardando lock SQLite entre processos: pid=%s", os.getpid())
+                    raise TimeoutError("Tempo esgotado aguardando a gravação no banco de dados.")
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if lock_file is not None:
+                try:
+                    if file_locked:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    lock_file.close()
+        finally:
+            db_lock.release()
 
 
 class ConsultaGratisRestaurada(Exception):
@@ -429,18 +451,25 @@ init_db()
 
 def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
     conn = None
-    # Uma única instância Gunicorn usa este lock para serializar escritores
-    # SQLite entre threads; leituras continuam independentes em modo WAL.
+    # Escritas são serializadas entre workers; leituras simples continuam livres.
     lock = sqlite_write_lock() if commit else nullcontext()
     with lock:
         try:
+            operation_started = time.monotonic()
+            if commit:
+                logger.info("Lock de escrita SQLite obtido: pid=%s", os.getpid())
             conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
             cursor = conn.cursor()
             cursor.execute(query, params)
             res = cursor.fetchone() if fetchone else None
             if commit:
                 conn.commit()
+                logger.info("Commit SQLite concluído: pid=%s duracao_s=%.2f", os.getpid(), time.monotonic() - operation_started)
             return res
+        except Exception:
+            if commit:
+                logger.exception("Falha na gravação SQLite após adquirir o lock: pid=%s", os.getpid())
+            raise
         finally:
             if conn is not None:
                 conn.close()
