@@ -216,6 +216,44 @@ class UsernameSearchTests(unittest.TestCase):
             bot_module.db_lock.release()
             self.assertIn("ler estado da promoção", "\n".join(captured.output))
 
+    def test_payment_reminders_do_not_hold_global_sqlite_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = f"{directory}/reminders.db"
+            now = bot_module.datetime.now(bot_module.TIMEZONE_BR)
+            due = now.isoformat()
+            expires = (now + bot_module.timedelta(days=1)).isoformat()
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE payments (payment_id TEXT PRIMARY KEY, user_id INTEGER, "
+                "target_username TEXT, query_type TEXT, amount REAL, checkout_url TEXT, "
+                "status TEXT, reminder_at TEXT, reminder_sent INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO payments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("p1", 7, "alice", "username", 6.9, "https://checkout.invalid", "pending", due, 0),
+            )
+            conn.execute(
+                "CREATE TABLE users (user_id INTEGER PRIMARY KEY, access_until TEXT, pass_reminder_for TEXT)"
+            )
+            conn.execute("INSERT INTO users VALUES (?, ?, NULL)", (7, expires))
+            conn.commit()
+            conn.close()
+
+            with (
+                patch.object(bot_module.CFG, "DB_FILE", db_path),
+                patch.object(bot_module, "sqlite_write_lock", side_effect=AssertionError("rotina de lembrete não deve adquirir o lock global")),
+            ):
+                payments = bot_module.buscar_e_marcar_lembretes()
+                expirations = bot_module.buscar_e_marcar_expiracoes()
+
+            self.assertEqual(len(payments), 1)
+            self.assertEqual(payments[0][0], "p1")
+            self.assertEqual(expirations, [(7, expires)])
+            check = sqlite3.connect(db_path)
+            self.assertEqual(check.execute("SELECT reminder_sent FROM payments WHERE payment_id = 'p1'").fetchone(), (1,))
+            self.assertEqual(check.execute("SELECT pass_reminder_for FROM users WHERE user_id = 7").fetchone(), (expires,))
+            check.close()
+
     def test_fast_username_fallback_contains_links(self):
         results = resultados_username_rapidos("alice")
         self.assertIn("GitHub", results)

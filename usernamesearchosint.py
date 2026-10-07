@@ -623,8 +623,10 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
 
 def buscar_e_marcar_lembretes() -> list[tuple]:
     agora = datetime.now(TIMEZONE_BR).isoformat()
-    with sqlite_write_lock():
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+    # Esta rotina periódica não deve segurar o lock global de gravação do bot.
+    # O SQLite serializa a transação; se houver contenção, a tentativa expira rápido.
+    conn = sqlite3.connect(CFG.DB_FILE, timeout=2.0)
+    try:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
         rows = cur.execute(
@@ -632,18 +634,22 @@ def buscar_e_marcar_lembretes() -> list[tuple]:
             "FROM payments WHERE status = 'pending' AND reminder_at <= ? AND reminder_sent = 0",
             (agora,),
         ).fetchall()
-        for row in rows:
-            cur.execute("UPDATE payments SET reminder_sent = 1 WHERE payment_id = ?", (row[0],))
+        cur.executemany("UPDATE payments SET reminder_sent = 1 WHERE payment_id = ?", ((row[0],) for row in rows))
         conn.commit()
+        return rows
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-    return rows
 
 def buscar_e_marcar_expiracoes() -> list[tuple[int, str]]:
     limite = datetime.now(TIMEZONE_BR) + timedelta(days=3)
     agora = datetime.now(TIMEZONE_BR)
     avisos = []
-    with sqlite_write_lock():
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+    # Mesmo critério para a rotina de expiração: transação curta e sem lock global.
+    conn = sqlite3.connect(CFG.DB_FILE, timeout=2.0)
+    try:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
         rows = cur.execute("SELECT user_id, access_until, pass_reminder_for FROM users WHERE access_until IS NOT NULL").fetchall()
@@ -656,8 +662,12 @@ def buscar_e_marcar_expiracoes() -> list[tuple[int, str]]:
                 cur.execute("UPDATE users SET pass_reminder_for = ? WHERE user_id = ?", (access_until, user_id))
                 avisos.append((user_id, access_until))
         conn.commit()
+        return avisos
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-    return avisos
 
 def loop_lembretes() -> None:
     """Worker leve: verifica apenas o lembrete persistido no SQLite."""
