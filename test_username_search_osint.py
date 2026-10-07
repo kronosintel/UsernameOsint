@@ -18,9 +18,10 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertEqual(response.json["status"], "healthy")
         self.assertIn("telegram_configured", response.json)
         self.assertIn("mercadopago_configured", response.json)
-        self.assertIn("maigret_enabled", response.json)
-        self.assertIn("maigret_timeout_seconds", response.json)
-        self.assertEqual(response.json["maigret_timeout_seconds"], bot_module.timeout_maigret_efetivo())
+        self.assertIn("sherlock_enabled", response.json)
+        self.assertIn("sherlock_timeout_seconds", response.json)
+        self.assertEqual(response.json["sherlock_timeout_seconds"], bot_module.timeout_sherlock_efetivo())
+        self.assertIn("sherlock_site_timeout_seconds", response.json)
         self.assertIn("consulta_timeout_seconds", response.json)
         self.assertIn("consulta_price_brl", response.json)
         self.assertEqual(response.json["billing_mode"], "monthly_pass")
@@ -28,14 +29,14 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("result_cache_seconds", response.json)
         self.assertIn("query_cooldown_seconds", response.json)
         self.assertIn("metrics", response.json)
-        self.assertIn("maigret_fallbacks", response.json["metrics"])
+        self.assertIn("sherlock_fallbacks", response.json["metrics"])
 
-    def test_effective_maigret_timeout_is_capped_for_speed(self):
+    def test_effective_sherlock_timeout_is_capped_for_report_reserve(self):
         with (
-            patch.object(bot_module.CFG, "MAIGRET_TIMEOUT", 25),
+            patch.object(bot_module.CFG, "SHERLOCK_TIMEOUT", 25),
             patch.object(bot_module.CFG, "CONSULTA_TIMEOUT", 35),
         ):
-            self.assertEqual(bot_module.timeout_maigret_efetivo(), 10)
+            self.assertEqual(bot_module.timeout_sherlock_efetivo(), 15)
 
     def test_root_endpoint(self):
         response = self.client.get("/")
@@ -172,6 +173,35 @@ class UsernameSearchTests(unittest.TestCase):
             finally:
                 bot_module.fcntl.flock(blocker.fileno(), bot_module.fcntl.LOCK_UN)
                 blocker.close()
+
+    def test_sqlite_lock_timeout_logs_current_owner(self):
+        lock = bot_module.db_lock
+        self.assertTrue(lock.acquire(blocking=False))
+        previous_owner = bot_module.db_lock_owner
+        bot_module.db_lock_owner = ("stuck-thread", 123, "stuck_function", bot_module.time.monotonic() - 2)
+        try:
+            with self.assertLogs(bot_module.logger, level="WARNING") as captured:
+                with self.assertRaises(TimeoutError):
+                    with bot_module.sqlite_write_lock(timeout_seconds=0.01):
+                        self.fail("A operação não deveria entrar enquanto o lock está ocupado")
+        finally:
+            bot_module.db_lock_owner = previous_owner
+            lock.release()
+        self.assertIn("owner_caller=stuck_function", "\n".join(captured.output))
+
+    def test_sherlock_results_are_labeled_and_returned(self):
+        fake_result = Mock(
+            encontrados=[{"site": "GitHub", "url": "https://github.com/alice", "status": "found"}],
+            erro=None,
+        )
+        with (
+            patch.object(bot_module, "cache_get", return_value=None),
+            patch.object(bot_module, "consultar_username", return_value=fake_result) as lookup,
+        ):
+            results = bot_module.executar_varredura("alice")
+        self.assertEqual(results["GitHub"]["source"], "Sherlock")
+        self.assertEqual(results["GitHub"]["url"], "https://github.com/alice")
+        lookup.assert_called_once_with("alice", timeout=bot_module.timeout_sherlock_efetivo(), site_timeout=2)
 
     def test_fast_username_fallback_contains_links(self):
         results = resultados_username_rapidos("alice")

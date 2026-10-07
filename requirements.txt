@@ -6,6 +6,5 @@ werkzeug
 mercadopago
 gunicorn
 reportlab
-
-maigret
+sherlock-project @ git+https://github.com/sherlock-project/sherlock.git@e40a45ec2a074b90703b3b4b842c8a3adbd6ada3
 qrcode[pil]

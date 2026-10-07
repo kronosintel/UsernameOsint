@@ -16,11 +16,11 @@ services:
         value: "8"
       - key: CONSULTA_TIMEOUT
         value: "40"
-      - key: MAIGRET_ALL_SITES
-        value: "0"
-      - key: MAIGRET_TIMEOUT
-        value: "25"
-      - key: MAIGRET_ENABLED
+      - key: SHERLOCK_TIMEOUT_SECONDS
+        value: "15"
+      - key: SHERLOCK_SITE_TIMEOUT_SECONDS
+        value: "2"
+      - key: SHERLOCK_ENABLED
         value: "1"
       - key: CANAL_PROMO_ENABLED
         value: "1"

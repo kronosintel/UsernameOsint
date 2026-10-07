@@ -89,13 +89,13 @@ Mesmo um resultado encontrado pode ser um perfil homônimo. Faça validação in
 
 O catálogo inclui, entre outras, GitHub, GitLab, Bitbucket, Codeberg, npm, PyPI, Docker Hub, Hugging Face, Kaggle, Instagram, X, Reddit, TikTok, Pinterest, Mastodon, Bluesky, Threads, Telegram, Medium, Substack, Tumblr, Linktree, Patreon, Dribbble, Behance, Twitch, Steam, Spotify, SoundCloud, Vimeo, YouTube, Goodreads, Letterboxd, Chess.com e Lichess. Plataformas podem mudar URLs, exigir login, aplicar rate limits ou renderizar páginas dinamicamente; nesses casos o resultado aparece como inconclusivo.
 
-Integração Maigret
+Integração Sherlock
 
-O comando `/user nome_do_usuario` também tenta consultar o Maigret por meio da função reutilizável `consultar_username`, definida em `maigret_lookup.py`. Por padrão, a consulta usa os sites padrão do Maigret. Para consultar todos os sites disponíveis, defina `MAIGRET_ALL_SITES=1` no ambiente. Se o Maigret não estiver disponível, exceder o timeout ou não retornar dados estruturados, o bot usa automaticamente o catálogo interno anterior.
+O comando `/user nome_do_usuario` consulta o [Sherlock Project](https://github.com/sherlock-project/sherlock) por meio do adaptador `sherlock_lookup.py` e da API Python oficial, usando a lista de sites empacotada no pacote. O pacote é fixado a um commit do repositório para tornar os deploys reproduzíveis. A consulta corre em processo isolado; seu limite total é `SHERLOCK_TIMEOUT_SECONDS` (15 s no Render) e o limite por site é `SHERLOCK_SITE_TIMEOUT_SECONDS` (2 s). Se Sherlock exceder o prazo, o bot preserva achados parciais confirmados; se não houver achados ou a ferramenta falhar, usa o catálogo interno como fallback.
 
-Para manter o bot rápido e estável, `MAIGRET_ENABLED=0` deixa o Maigret desligado por padrão e usa o catálogo rápido integrado. Depois de confirmar que o serviço está estável, o administrador pode ativar `MAIGRET_ENABLED=1`; nesse caso, o limite é controlado por `MAIGRET_TIMEOUT`.
+O Sherlock está ativo por padrão (`SHERLOCK_ENABLED=1`). Desative-o com `SHERLOCK_ENABLED=0` para usar somente o catálogo integrado. O endpoint `/healthz` informa se Sherlock está ativado e os limites de tempo configurados.
 
-O endpoint `/healthz` também informa, sem revelar segredos, se Telegram, Mercado Pago, canal, QR code e Maigret estão configurados. A suíte local pode ser executada com `python3 -m unittest discover -v`; ela valida a rota de saúde, a raiz, o fallback rápido de username e o comportamento de tokens inexistentes.
+Os resultados do Sherlock são indícios de perfis públicos associados a um username, não confirmação de identidade; podem incluir homônimos, bloqueios ou falsos positivos e devem ser verificados manualmente. A suíte local pode ser executada com `python3 -m unittest discover -v`; ela valida a rota de saúde, a raiz, o fallback rápido de username e o comportamento de tokens inexistentes.
 
 Comandos iniciados por `/` que não pertencem ao escopo do bot agora retornam uma mensagem de **comando inválido**, com a lista resumida dos comandos válidos. Todas as consultas também passam por `CONSULTA_TIMEOUT` (35 segundos no Render); quando um provedor demora além desse limite, o usuário recebe uma falha explícita em vez de ficar indefinidamente na mensagem de carregamento.
 
@@ -103,7 +103,7 @@ Os relatórios agora exibem todas as fontes com status, observações e links, i
 
 Por segurança, o bot não coleta nem exibe senhas, tokens, dumps ou conteúdo bruto de vazamentos. APIs de terceiros como HIBP, IntelX e DeHashed devem ser usadas apenas com credenciais próprias, autorização e respeito aos termos do provedor.
 
-Para telefone, o relatório inclui o [Dono do Zap](https://donodozap.com/q/pesquisar-dono-whatsapp) como referência manual, além do link do WhatsApp e do Truecaller. Essa fonte não é tratada como prova de identidade do proprietário. Para CNPJ, o relatório inclui o [CNPJá](https://cnpja.com/) como referência complementar e a [consulta oficial da Receita Federal](https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp). A função existente `maigret_lookup.consultar_username` foi ativada no Render com limite de 25 segundos e fallback rápido; Pinterest também foi incluído na lista de username.
+Para telefone, o relatório inclui o [Dono do Zap](https://donodozap.com/q/pesquisar-dono-whatsapp) como referência manual, além do link do WhatsApp e do Truecaller. Essa fonte não é tratada como prova de identidade do proprietário. Para CNPJ, o relatório inclui o [CNPJá](https://cnpja.com/) como referência complementar e a [consulta oficial da Receita Federal](https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/cnpjreva_solicitacao.asp). Para username, o Sherlock consulta perfis públicos e o bot preserva o catálogo rápido como fallback; Pinterest também consta nas referências diretas.
 
 Novos módulos de consulta
 
@@ -121,11 +121,11 @@ As fontes podem impor login, limites de requisição ou alterar suas URLs. Os st
 
 Passo a passo para atualizar no Render
 
-1. No GitHub, abra o repositório e confirme que os arquivos `email_tools.py`, `plate_tools.py`, `domain_tools.py`, `name_tools.py`, `cnpj_tools.py`, `maigret_lookup.py`, `usernamesearchosint.py`, `requirements.txt` e `render.yaml` estão no branch implantado.
+1. No GitHub, abra o repositório e confirme que os arquivos `email_tools.py`, `plate_tools.py`, `domain_tools.py`, `name_tools.py`, `cnpj_tools.py`, `sherlock_lookup.py`, `sherlock_worker.py`, `usernamesearchosint.py`, `requirements.txt` e `render.yaml` estão no branch implantado.
 2. No painel do Render, abra o serviço `username-search-osint` e acesse **Settings → Environment**.
 3. Adicione os segredos somente como variáveis protegidas: `HIBP_API_KEY` para o Have I Been Pwned e `VT_API_KEY` para o VirusTotal. Nunca coloque essas chaves no código, no README ou em commits.
 4. Para uma API veicular contratada e autorizada, adicione `PLACA_API_URL` contendo `{placa}` no lugar do parâmetro, por exemplo `https://provedor.example/vehicles/{placa}`, e adicione `PLACA_API_KEY` se o provedor exigir Bearer token. Sem essas variáveis, o módulo de placa fica deliberadamente limitado a referências oficiais e não coleta dados pessoais.
-5. Mantenha `MAIGRET_ALL_SITES=0` para a consulta padrão. Use `1` somente se aceitar o maior tempo e volume de requisições da varredura completa.
+5. Ajuste `SHERLOCK_ENABLED`, `SHERLOCK_TIMEOUT_SECONDS` e `SHERLOCK_SITE_TIMEOUT_SECONDS` se quiser desativar ou limitar as consultas Sherlock. A lista padrão do projeto é usada, respeitando exclusões oficiais.
 6. Salve as variáveis e acione **Manual Deploy → Deploy latest commit**. O Render executará `pip install -r requirements.txt` e iniciará o Gunicorn conforme `render.yaml`.
 7. Aguarde o status **Live** e teste `/health`. Depois, envie no Telegram consultas de teste com dados que você tem autorização para consultar: `/email`, `/placa`, `/dominio`, `/nome` e `/cnpj`.
 8. Consulte os logs do Render se houver `api_key_required`, `rate_limited` ou `inconclusive`. Esses estados são tratados pelo código e não devem ser convertidos em um falso “encontrado”.
@@ -138,7 +138,7 @@ O painel `/admin` e todos os comandos abaixo exigem que o ID do usuário do Tele
 
 ```text
 /admin                         resumo de usuários, relatórios e últimos acessos
-/admin_user nome_do_usuario    consulta Maigret/username
+/admin_user nome_do_usuario    consulta Sherlock/username
 /admin_email email@dominio     consulta de exposição do e-mail
 /admin_nome Nome Completo      pesquisa pública de processos e publicações
 /admin_fone 11999998888        consulta de telefone
