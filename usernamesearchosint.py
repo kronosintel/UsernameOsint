@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
@@ -24,6 +24,7 @@ import sqlite3
 import time
 from typing import Any, Dict
 import urllib.parse
+import fcntl
 from zoneinfo import ZoneInfo
 from threading import Event, Lock, Thread
 from io import BytesIO
@@ -108,6 +109,22 @@ metrics = {
     "cache_hits": 0,
     "reports_delivered": 0,
 }
+
+@contextmanager
+def sqlite_write_lock():
+    """Coordena transações SQLite entre threads e processos Gunicorn."""
+    with db_lock:
+        lock_path = f"{CFG.DB_FILE}.write-lock"
+        with open(lock_path, "a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+class ConsultaGratisRestaurada(Exception):
+    """Falha de consulta após devolver com sucesso o crédito gratuito."""
 
 bot = telebot.TeleBot(CFG.TELEGRAM_TOKEN, threaded=False) if CFG.TELEGRAM_TOKEN else None
 
@@ -275,7 +292,7 @@ def usuario_esta_no_canal(user_id: int) -> bool:
 
 def reivindicar_consulta_gratis(user_id: int) -> bool:
     """Consome uma única consulta grátis de forma atômica."""
-    with db_lock:
+    with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cur = conn.cursor()
         cur.execute("UPDATE users SET free_used = 1 WHERE user_id = ? AND COALESCE(free_used, 0) = 0", (user_id,))
@@ -344,7 +361,7 @@ def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: 
     )
 
 def init_db():
-    with db_lock:
+    with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute("PRAGMA journal_mode = WAL")
@@ -414,7 +431,7 @@ def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
     conn = None
     # Uma única instância Gunicorn usa este lock para serializar escritores
     # SQLite entre threads; leituras continuam independentes em modo WAL.
-    lock = db_lock if commit else nullcontext()
+    lock = sqlite_write_lock() if commit else nullcontext()
     with lock:
         try:
             conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
@@ -503,7 +520,7 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
         db_execute("UPDATE payments SET status = 'expired', provider_payment_id = ? WHERE external_reference = ?", (provider_payment_id, reference), commit=True)
         return False
 
-    with db_lock:
+    with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cur = conn.cursor()
         cur.execute(
@@ -519,7 +536,7 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
 
     try:
         agora = datetime.now(TIMEZONE_BR)
-        with db_lock:
+        with sqlite_write_lock():
             conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
             cur = conn.cursor()
             cur.execute("BEGIN IMMEDIATE")
@@ -557,7 +574,7 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
 
 def buscar_e_marcar_lembretes() -> list[tuple]:
     agora = datetime.now(TIMEZONE_BR).isoformat()
-    with db_lock:
+    with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
@@ -576,7 +593,7 @@ def buscar_e_marcar_expiracoes() -> list[tuple[int, str]]:
     limite = datetime.now(TIMEZONE_BR) + timedelta(days=3)
     agora = datetime.now(TIMEZONE_BR)
     avisos = []
-    with db_lock:
+    with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
@@ -647,7 +664,7 @@ def reivindicar_promocao_canal() -> bool:
     """Garante no SQLite que apenas um worker publique a promoção por ciclo."""
     agora = datetime.now(TIMEZONE_BR)
     limite = agora.timestamp() - CFG.CANAL_PROMO_INTERVAL_SECONDS
-    with db_lock:
+    with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
@@ -1077,24 +1094,31 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
     logger.info("Iniciando varredura: tipo=%s alvo=%s usuario=%s", qtype, target, user_id)
     try:
         resultados = executar_varredura_com_timeout(target, qtype)
-    except Exception:
+    except Exception as exc:
         if consulta_gratis:
             devolver_consulta_gratis(user_id)
             logger.info("Consulta grátis devolvida após falha: user_id=%s alvo=%s", user_id, target)
+            raise ConsultaGratisRestaurada("A consulta grátis foi devolvida.") from exc
         raise
     logger.info("Varredura concluída: tipo=%s alvo=%s usuario=%s itens=%s", qtype, target, user_id, len(resultados))
-    atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
-    logger.info("Etapa de 80%%: iniciando persistência e entrega do relatório para user_id=%s", user_id)
-
-    if admin_bypass or consulta_gratis:
-        cabecalho = (
-            "👑 MODO ADMINISTRADOR - CONSULTA LIBERADA"
-            if admin_bypass
-            else "🎁 CONSULTA GRÁTIS PARA MEMBRO DO CANAL"
-        )
-        enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados, cabecalho)
-    else:
-        enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados)
+    try:
+        atualizar_progresso(message, progress_id, "⚙️ *Organizando resultados*\n\n`[████████░░]` 80%\nGerando relatório...")
+        logger.info("Etapa de 80%%: iniciando persistência e entrega do relatório para user_id=%s", user_id)
+        if admin_bypass or consulta_gratis:
+            cabecalho = (
+                "👑 MODO ADMINISTRADOR - CONSULTA LIBERADA"
+                if admin_bypass
+                else "🎁 CONSULTA GRÁTIS PARA MEMBRO DO CANAL"
+            )
+            enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados, cabecalho)
+        else:
+            enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados)
+    except Exception as exc:
+        if consulta_gratis:
+            devolver_consulta_gratis(user_id)
+            logger.info("Consulta grátis devolvida após falha ao salvar ou entregar relatório: user_id=%s alvo=%s", user_id, target)
+            raise ConsultaGratisRestaurada("A consulta grátis foi devolvida.") from exc
+        raise
     logger.info("Etapa de 80%%: relatório entregue para user_id=%s", user_id)
     atualizar_progresso(message, progress_id, "✅ *Relatório pronto*\n\n`[██████████]` 100%\nO link foi enviado acima.")
     logger.info("Etapa de 100%%: consulta encerrada para user_id=%s", user_id)
@@ -1104,6 +1128,16 @@ def processar_busca(message, raw_target: str, qtype: str = "username", progress_
     logger.info("Worker de consulta iniciado: tipo=%s usuario=%s", qtype, message.from_user.id)
     try:
         _processar_busca(message, raw_target, qtype, progress_id)
+    except ConsultaGratisRestaurada:
+        logger.exception("Consulta gratuita falhou; crédito restaurado")
+        texto_progresso = "⚠️ *O resultado não foi entregue.*\n\nSua consulta grátis foi devolvida. Envie novamente o mesmo username quando quiser."
+        texto_chat = "⚠️ O resultado não foi entregue. Sua consulta grátis foi devolvida; você pode enviar novamente o mesmo username."
+        atualizar_progresso(message, progress_id, texto_progresso)
+        if bot:
+            try:
+                bot.send_message(message.chat.id, texto_chat)
+            except Exception:
+                logger.exception("Falha ao avisar sobre a devolução da consulta grátis")
     except Exception as exc:
         logger.exception("Falha ao gerar relatório (%s): %s", qtype, exc)
         if isinstance(exc, TimeoutError):
@@ -1136,7 +1170,7 @@ def iniciar_busca(message, raw_target: str, qtype: str = "username") -> None:
 
 def gerar_resumo_admin() -> str:
     """Monta um resumo administrativo sem expor resultados no chat."""
-    with db_lock:
+    with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cur = conn.cursor()
         usuarios = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -1230,7 +1264,7 @@ if bot:
                 "Ainda não consegui confirmar sua entrada no canal. Entre pelo botão e toque em verificar novamente.",
             )
             return
-        with db_lock:
+        with sqlite_write_lock():
             conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
             usado = conn.execute("SELECT COALESCE(free_used, 0), access_until FROM users WHERE user_id = ?", (user_id,)).fetchone()
             conn.close()

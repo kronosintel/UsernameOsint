@@ -93,6 +93,43 @@ class UsernameSearchTests(unittest.TestCase):
         check_subscription.assert_not_called()
         check_channel.assert_not_called()
 
+    def test_failed_free_report_restores_free_query(self):
+        message = Mock()
+        message.from_user.id = 123
+        message.chat.id = 123
+        with (
+            patch.object(bot_module.CFG, "ADMIN_ID", 999),
+            patch.object(bot_module.CFG, "ADMIN_BYPASS_PAYMENT", False),
+            patch.object(bot_module, "bot", Mock()),
+            patch.object(bot_module, "db_execute"),
+            patch.object(bot_module, "consulta_em_cooldown", return_value=False),
+            patch.object(bot_module, "acesso_mensal_ativo", return_value=(False, None)),
+            patch.object(bot_module, "usuario_esta_no_canal", return_value=True),
+            patch.object(bot_module, "reivindicar_consulta_gratis", return_value=True),
+            patch.object(bot_module, "devolver_consulta_gratis") as devolver,
+            patch.object(bot_module, "Thread"),
+            patch.object(bot_module, "atualizar_progresso"),
+            patch.object(bot_module, "executar_varredura_com_timeout", return_value={"GitHub": {"url": "https://github.com/alice"}}),
+            patch.object(bot_module, "enviar_resultado_telegram", side_effect=sqlite3.OperationalError("database is locked")),
+        ):
+            with self.assertRaises(bot_module.ConsultaGratisRestaurada):
+                bot_module._processar_busca(message, "alice")
+        devolver.assert_called_once_with(123)
+
+    def test_restored_free_query_message_allows_retry(self):
+        message = Mock()
+        message.from_user.id = 123
+        message.chat.id = 123
+        fake_bot = Mock()
+        with (
+            patch.object(bot_module, "_processar_busca", side_effect=bot_module.ConsultaGratisRestaurada()),
+            patch.object(bot_module, "bot", fake_bot),
+            patch.object(bot_module, "atualizar_progresso"),
+        ):
+            bot_module.processar_busca(message, "alice")
+        self.assertIn("consulta grátis foi devolvida", fake_bot.send_message.call_args.args[1])
+        self.assertIn("enviar novamente", fake_bot.send_message.call_args.args[1])
+
     def test_db_execute_read_does_not_wait_on_python_lock(self):
         fake_lock = Mock()
         fake_conn = Mock()
