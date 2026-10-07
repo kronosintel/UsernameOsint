@@ -21,12 +21,13 @@ import queue
 import re
 import secrets
 import sqlite3
+import sys
 import time
 from typing import Any, Dict
 import urllib.parse
 import fcntl
 from zoneinfo import ZoneInfo
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, current_thread
 from io import BytesIO
 
 import httpx
@@ -97,6 +98,7 @@ app.config['SECRET_KEY'] = secrets.token_hex(16)
 
 TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 db_lock = Lock()
+db_lock_owner = None
 cache_lock = Lock()
 metrics_lock = Lock()
 result_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -113,11 +115,28 @@ metrics = {
 @contextmanager
 def sqlite_write_lock(timeout_seconds: float = 10.0):
     """Coordena transações SQLite entre workers sem espera ilimitada."""
+    global db_lock_owner
+    caller_frame = sys._getframe(1)
+    while caller_frame and caller_frame.f_globals.get("__name__") == "contextlib":
+        caller_frame = caller_frame.f_back
+    caller = caller_frame.f_code.co_name if caller_frame else "desconhecido"
     deadline = time.monotonic() + timeout_seconds
     if not db_lock.acquire(timeout=timeout_seconds):
-        logger.warning("Timeout aguardando lock SQLite local: pid=%s", os.getpid())
+        owner = db_lock_owner
+        if owner:
+            owner_name, owner_ident, owner_caller, owner_started = owner
+            logger.warning(
+                "Timeout aguardando lock SQLite local: pid=%s owner_thread=%s owner_ident=%s "
+                "owner_caller=%s owner_held_s=%.2f requester=%s",
+                os.getpid(), owner_name, owner_ident, owner_caller,
+                time.monotonic() - owner_started, caller,
+            )
+        else:
+            logger.warning("Timeout aguardando lock SQLite local: pid=%s requester=%s", os.getpid(), caller)
         raise TimeoutError("Tempo esgotado aguardando a gravação no banco de dados.")
 
+    owner_thread = current_thread()
+    db_lock_owner = (owner_thread.name, owner_thread.ident, caller, time.monotonic())
     lock_file = None
     file_locked = False
     try:
@@ -142,6 +161,7 @@ def sqlite_write_lock(timeout_seconds: float = 10.0):
                 finally:
                     lock_file.close()
         finally:
+            db_lock_owner = None
             db_lock.release()
 
 
