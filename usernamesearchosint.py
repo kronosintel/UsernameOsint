@@ -1742,7 +1742,10 @@ if CFG.PAYMENT_REMINDERS_ENABLED:
     Thread(target=loop_lembretes, daemon=True, name="payment-reminders").start()
 else:
     logger.info("Worker de lembretes de pagamento desativado para proteger a disponibilidade do bot")
-Thread(target=loop_promocao_canal, daemon=True, name="channel-promotion").start()
+if CFG.CANAL_PROMO_ENABLED:
+    Thread(target=loop_promocao_canal, daemon=True, name="channel-promotion").start()
+else:
+    logger.info("Worker de promoção do canal desativado para proteger a disponibilidade do bot")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=CFG.PORT)
