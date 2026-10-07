@@ -1,6 +1,6 @@
 import unittest
 import sqlite3
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import usernamesearchosint as bot_module
 from usernamesearchosint import app, categoria_fonte, executar_varredura_com_timeout, resultados_username_rapidos, username_valido
@@ -93,7 +93,7 @@ class UsernameSearchTests(unittest.TestCase):
         check_subscription.assert_not_called()
         check_channel.assert_not_called()
 
-    def test_db_execute_uses_own_connection_without_waiting_on_python_lock(self):
+    def test_db_execute_read_does_not_wait_on_python_lock(self):
         fake_lock = Mock()
         fake_conn = Mock()
         fake_cursor = fake_conn.cursor.return_value
@@ -104,7 +104,19 @@ class UsernameSearchTests(unittest.TestCase):
         ):
             self.assertEqual(bot_module.db_execute("SELECT 1", fetchone=True), (1,))
         fake_lock.acquire.assert_not_called()
-        connect.assert_called_once_with(bot_module.CFG.DB_FILE, timeout=5.0)
+        connect.assert_called_once_with(bot_module.CFG.DB_FILE, timeout=30.0)
+        fake_conn.close.assert_called_once()
+
+    def test_db_execute_serializes_committing_writes(self):
+        fake_lock = MagicMock()
+        fake_conn = Mock()
+        with (
+            patch.object(bot_module, "db_lock", fake_lock),
+            patch.object(bot_module.sqlite3, "connect", return_value=fake_conn),
+        ):
+            bot_module.db_execute("INSERT INTO test_table VALUES (?)", (1,), commit=True)
+        fake_lock.__enter__.assert_called_once()
+        fake_conn.commit.assert_called_once()
         fake_conn.close.assert_called_once()
 
     def test_fast_username_fallback_contains_links(self):

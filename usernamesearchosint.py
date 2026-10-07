@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
@@ -411,20 +412,21 @@ init_db()
 
 def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
     conn = None
-    try:
-        # Cada chamada usa sua própria conexão. O SQLite/WAL coordena os
-        # escritores; não bloquear numa trava Python compartilhada por tarefas
-        # independentes, que pode atrasar o salvamento do relatório.
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=5.0)
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        res = cursor.fetchone() if fetchone else None
-        if commit:
-            conn.commit()
-        return res
-    finally:
-        if conn is not None:
-            conn.close()
+    # Uma única instância Gunicorn usa este lock para serializar escritores
+    # SQLite entre threads; leituras continuam independentes em modo WAL.
+    lock = db_lock if commit else nullcontext()
+    with lock:
+        try:
+            conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            res = cursor.fetchone() if fetchone else None
+            if commit:
+                conn.commit()
+            return res
+        finally:
+            if conn is not None:
+                conn.close()
 
 def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, str] | None:
     """Cria um checkout único do Mercado Pago para um passe mensal pré-pago."""
