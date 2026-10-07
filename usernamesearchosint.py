@@ -87,6 +87,7 @@ class Config:
     PORT: int = _env_int("PORT", 5000)
     TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "")
     CANAL_PROMO_ENABLED: bool = os.getenv("CANAL_PROMO_ENABLED", "1").lower() in {"1", "true", "yes"}
+    PAYMENT_REMINDERS_ENABLED: bool = os.getenv("PAYMENT_REMINDERS_ENABLED", "0").lower() in {"1", "true", "yes"}
     CANAL_PROMO_INTERVAL_SECONDS: int = _env_int("CANAL_PROMO_INTERVAL_SECONDS", 259200)
     RESULT_CACHE_SECONDS: int = _env_int("RESULT_CACHE_SECONDS", 900)
     QUERY_COOLDOWN_SECONDS: int = _env_int("QUERY_COOLDOWN_SECONDS", 8)
@@ -1737,7 +1738,10 @@ def configurar_comandos_telegram() -> None:
 
 configurar_webhook_telegram()
 configurar_comandos_telegram()
-Thread(target=loop_lembretes, daemon=True, name="payment-reminders").start()
+if CFG.PAYMENT_REMINDERS_ENABLED:
+    Thread(target=loop_lembretes, daemon=True, name="payment-reminders").start()
+else:
+    logger.info("Worker de lembretes de pagamento desativado para proteger a disponibilidade do bot")
 Thread(target=loop_promocao_canal, daemon=True, name="channel-promotion").start()
 
 if __name__ == "__main__":

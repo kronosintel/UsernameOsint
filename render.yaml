@@ -26,6 +26,8 @@ services:
         value: "1"
       - key: CANAL_PROMO_INTERVAL_SECONDS
         value: "259200"
+      - key: PAYMENT_REMINDERS_ENABLED
+        value: "0"
       - key: CANAL_PRINCIPAL_ID
         sync: false
       - key: ADMIN_ID
