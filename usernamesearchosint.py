@@ -623,51 +623,50 @@ def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str)
 
 def buscar_e_marcar_lembretes() -> list[tuple]:
     agora = datetime.now(TIMEZONE_BR).isoformat()
-    # Esta rotina periódica não deve segurar o lock global de gravação do bot.
-    # O SQLite serializa a transação; se houver contenção, a tentativa expira rápido.
-    conn = sqlite3.connect(CFG.DB_FILE, timeout=2.0)
-    try:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        rows = cur.execute(
-            "SELECT payment_id, user_id, target_username, query_type, amount, checkout_url "
-            "FROM payments WHERE status = 'pending' AND reminder_at <= ? AND reminder_sent = 0",
-            (agora,),
-        ).fetchall()
-        cur.executemany("UPDATE payments SET reminder_sent = 1 WHERE payment_id = ?", ((row[0],) for row in rows))
-        conn.commit()
-        return rows
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    with sqlite_write_lock(timeout_seconds=2.0):
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=2.0)
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            rows = cur.execute(
+                "SELECT payment_id, user_id, target_username, query_type, amount, checkout_url "
+                "FROM payments WHERE status = 'pending' AND reminder_at <= ? AND reminder_sent = 0",
+                (agora,),
+            ).fetchall()
+            cur.executemany("UPDATE payments SET reminder_sent = 1 WHERE payment_id = ?", ((row[0],) for row in rows))
+            conn.commit()
+            return rows
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 def buscar_e_marcar_expiracoes() -> list[tuple[int, str]]:
     limite = datetime.now(TIMEZONE_BR) + timedelta(days=3)
     agora = datetime.now(TIMEZONE_BR)
     avisos = []
-    # Mesmo critério para a rotina de expiração: transação curta e sem lock global.
-    conn = sqlite3.connect(CFG.DB_FILE, timeout=2.0)
-    try:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        rows = cur.execute("SELECT user_id, access_until, pass_reminder_for FROM users WHERE access_until IS NOT NULL").fetchall()
-        for user_id, access_until, reminder_for in rows:
-            try:
-                expira = datetime.fromisoformat(access_until)
-            except (TypeError, ValueError):
-                continue
-            if agora < expira <= limite and reminder_for != access_until:
-                cur.execute("UPDATE users SET pass_reminder_for = ? WHERE user_id = ?", (access_until, user_id))
-                avisos.append((user_id, access_until))
-        conn.commit()
-        return avisos
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    with sqlite_write_lock(timeout_seconds=2.0):
+        conn = sqlite3.connect(CFG.DB_FILE, timeout=2.0)
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            rows = cur.execute("SELECT user_id, access_until, pass_reminder_for FROM users WHERE access_until IS NOT NULL").fetchall()
+            for user_id, access_until, reminder_for in rows:
+                try:
+                    expira = datetime.fromisoformat(access_until)
+                except (TypeError, ValueError):
+                    continue
+                if agora < expira <= limite and reminder_for != access_until:
+                    cur.execute("UPDATE users SET pass_reminder_for = ? WHERE user_id = ?", (access_until, user_id))
+                    avisos.append((user_id, access_until))
+            conn.commit()
+            return avisos
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 def loop_lembretes() -> None:
     """Worker leve: verifica apenas o lembrete persistido no SQLite."""
@@ -724,46 +723,43 @@ def reivindicar_promocao_canal() -> bool:
     agora = datetime.now(TIMEZONE_BR)
     limite = agora.timestamp() - CFG.CANAL_PROMO_INTERVAL_SECONDS
     etapa = "adquirir lock SQLite"
-    conn = None
     try:
-        etapa = "abrir conexão SQLite"
-        conn = sqlite3.connect(CFG.DB_FILE, timeout=1.5)
-        conn.execute("PRAGMA busy_timeout = 1500")
-        cur = conn.cursor()
-        etapa = "iniciar transação"
-        cur.execute("BEGIN IMMEDIATE")
-        etapa = "ler estado da promoção"
-        row = cur.execute(
-            "SELECT last_run_at FROM automation_state WHERE state_key = ?",
-            ("channel_promo",),
-        ).fetchone()
-        if row and row[0]:
+        with sqlite_write_lock(timeout_seconds=2.0):
+            etapa = "abrir conexão SQLite"
+            conn = sqlite3.connect(CFG.DB_FILE, timeout=1.5)
             try:
-                if datetime.fromisoformat(row[0]).timestamp() > limite:
-                    conn.rollback()
-                    return False
-            except ValueError:
-                pass
-        etapa = "gravar estado da promoção"
-        cur.execute(
-            "INSERT INTO automation_state(state_key, last_run_at) VALUES (?, ?) "
-            "ON CONFLICT(state_key) DO UPDATE SET last_run_at = excluded.last_run_at",
-            ("channel_promo", agora.isoformat()),
-        )
-        etapa = "confirmar transação"
-        conn.commit()
-        return True
+                cur = conn.cursor()
+                etapa = "iniciar transação"
+                cur.execute("BEGIN IMMEDIATE")
+                etapa = "ler estado da promoção"
+                row = cur.execute(
+                    "SELECT last_run_at FROM automation_state WHERE state_key = ?",
+                    ("channel_promo",),
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        if datetime.fromisoformat(row[0]).timestamp() > limite:
+                            conn.rollback()
+                            return False
+                    except ValueError:
+                        pass
+                etapa = "gravar estado da promoção"
+                cur.execute(
+                    "INSERT INTO automation_state(state_key, last_run_at) VALUES (?, ?) "
+                    "ON CONFLICT(state_key) DO UPDATE SET last_run_at = excluded.last_run_at",
+                    ("channel_promo", agora.isoformat()),
+                )
+                etapa = "confirmar transação"
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
     except Exception as exc:
         logger.warning("Falha na reserva da promoção do canal na etapa '%s': %s", etapa, exc)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                logger.exception("Falha ao reverter transação da promoção do canal")
         raise
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def loop_promocao_canal() -> None:

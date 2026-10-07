@@ -216,7 +216,7 @@ class UsernameSearchTests(unittest.TestCase):
             bot_module.db_lock.release()
             self.assertIn("ler estado da promoção", "\n".join(captured.output))
 
-    def test_payment_reminders_do_not_hold_global_sqlite_lock(self):
+    def test_payment_reminders_use_short_global_sqlite_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = f"{directory}/reminders.db"
             now = bot_module.datetime.now(bot_module.TIMEZONE_BR)
@@ -239,10 +239,7 @@ class UsernameSearchTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
-            with (
-                patch.object(bot_module.CFG, "DB_FILE", db_path),
-                patch.object(bot_module, "sqlite_write_lock", side_effect=AssertionError("rotina de lembrete não deve adquirir o lock global")),
-            ):
+            with patch.object(bot_module.CFG, "DB_FILE", db_path):
                 payments = bot_module.buscar_e_marcar_lembretes()
                 expirations = bot_module.buscar_e_marcar_expiracoes()
 
