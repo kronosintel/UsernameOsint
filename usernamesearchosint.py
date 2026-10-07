@@ -21,13 +21,12 @@ import queue
 import re
 import secrets
 import sqlite3
-import sys
 import time
 from typing import Any, Dict
 import urllib.parse
 import fcntl
 from zoneinfo import ZoneInfo
-from threading import Event, Lock, Thread, current_thread
+from threading import Event, Lock, Thread
 from io import BytesIO
 
 import httpx
@@ -40,7 +39,7 @@ except ImportError:
     qrcode = None
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from flask import Flask, jsonify, request, render_template_string, send_file
-from sherlock_lookup import consultar_username
+from maigret_lookup import consultar_username
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -78,9 +77,8 @@ class Config:
     MERCADOPAGO_ACCESS_TOKEN: str = os.getenv("MERCADOPAGO_ACCESS_TOKEN", os.getenv("MERCADOPAGO_TOKEN", "")).strip()
     PAGAMENTO_EXPIRACAO_MINUTOS: int = _env_int("PAGAMENTO_EXPIRACAO_MINUTOS", 30)
     ADMIN_BYPASS_PAYMENT: bool = os.getenv("ADMIN_BYPASS_PAYMENT", "1").lower() in {"1", "true", "yes"}
-    SHERLOCK_TIMEOUT: int = _env_int("SHERLOCK_TIMEOUT_SECONDS", 15)
-    SHERLOCK_SITE_TIMEOUT: int = _env_int("SHERLOCK_SITE_TIMEOUT_SECONDS", 2)
-    SHERLOCK_ENABLED: bool = os.getenv("SHERLOCK_ENABLED", "1").lower() in {"1", "true", "yes"}
+    MAIGRET_TIMEOUT: int = _env_int("MAIGRET_TIMEOUT", 18)
+    MAIGRET_ENABLED: bool = os.getenv("MAIGRET_ENABLED", "0").lower() in {"1", "true", "yes"}
     CONSULTA_TIMEOUT: int = _env_int("CONSULTA_TIMEOUT", 35)
     SUPORTE_USERNAME: str = os.getenv("SUPORTE_USERNAME", "kronosintel")
     WEB_BASE_URL: str = os.getenv("WEB_BASE_URL", "https://usernameosint-1-vcj4.onrender.com").rstrip('/')
@@ -99,16 +97,15 @@ app.config['SECRET_KEY'] = secrets.token_hex(16)
 
 TIMEZONE_BR = ZoneInfo("America/Sao_Paulo")
 db_lock = Lock()
-db_lock_owner = None
 cache_lock = Lock()
 metrics_lock = Lock()
 result_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 last_query_by_user: dict[int, float] = {}
 metrics = {
-    "sherlock_attempts": 0,
-    "sherlock_successes": 0,
-    "sherlock_fallbacks": 0,
-    "sherlock_timeouts": 0,
+    "maigret_attempts": 0,
+    "maigret_successes": 0,
+    "maigret_fallbacks": 0,
+    "maigret_timeouts": 0,
     "cache_hits": 0,
     "reports_delivered": 0,
 }
@@ -116,28 +113,11 @@ metrics = {
 @contextmanager
 def sqlite_write_lock(timeout_seconds: float = 10.0):
     """Coordena transações SQLite entre workers sem espera ilimitada."""
-    global db_lock_owner
-    caller_frame = sys._getframe(1)
-    while caller_frame and caller_frame.f_globals.get("__name__") == "contextlib":
-        caller_frame = caller_frame.f_back
-    caller = caller_frame.f_code.co_name if caller_frame else "desconhecido"
     deadline = time.monotonic() + timeout_seconds
     if not db_lock.acquire(timeout=timeout_seconds):
-        owner = db_lock_owner
-        if owner:
-            owner_name, owner_ident, owner_caller, owner_started = owner
-            logger.warning(
-                "Timeout aguardando lock SQLite local: pid=%s owner_thread=%s owner_ident=%s "
-                "owner_caller=%s owner_held_s=%.2f requester=%s",
-                os.getpid(), owner_name, owner_ident, owner_caller,
-                time.monotonic() - owner_started, caller,
-            )
-        else:
-            logger.warning("Timeout aguardando lock SQLite local: pid=%s requester=%s", os.getpid(), caller)
+        logger.warning("Timeout aguardando lock SQLite local: pid=%s", os.getpid())
         raise TimeoutError("Tempo esgotado aguardando a gravação no banco de dados.")
 
-    owner_thread = current_thread()
-    db_lock_owner = (owner_thread.name, owner_thread.ident, caller, time.monotonic())
     lock_file = None
     file_locked = False
     try:
@@ -162,7 +142,6 @@ def sqlite_write_lock(timeout_seconds: float = 10.0):
                 finally:
                     lock_file.close()
         finally:
-            db_lock_owner = None
             db_lock.release()
 
 
@@ -877,9 +856,9 @@ def resultados_username_rapidos(username: str) -> dict[str, dict[str, Any]]:
         "DuckDuckGo — presença do username": {"exists": None, "status": "reference_only", "url": f"https://duckduckgo.com/?q=%22{encoded}%22", "category": "Busca e referências"},
     }
 
-def timeout_sherlock_efetivo() -> int:
-    """Retorna o limite total de Sherlock, reservando tempo para fallback/relatório."""
-    return max(1, min(CFG.SHERLOCK_TIMEOUT, CFG.CONSULTA_TIMEOUT - 15, 15))
+def timeout_maigret_efetivo() -> int:
+    """Retorna o teto efetivo do Maigret antes do fallback rápido."""
+    return max(5, min(CFG.MAIGRET_TIMEOUT, CFG.CONSULTA_TIMEOUT - 10, 10))
 
 
 def executar_varredura(target: str, query_type: str = "username") -> dict[str, Any]:
@@ -891,7 +870,7 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
     if cached is not None:
         logger.info("Resultado servido do cache: tipo=%s alvo=%s", query_type, target_limpo)
         return cached
-    if not CFG.SHERLOCK_ENABLED:
+    if not CFG.MAIGRET_ENABLED:
         try:
             resultado = asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
             cache_put(target_limpo, query_type, resultado)
@@ -899,47 +878,51 @@ def executar_varredura(target: str, query_type: str = "username") -> dict[str, A
         except Exception as exc:
             logger.warning("Catálogo online demorou ou falhou; usando relatório rápido: %s", exc)
             return resultados_username_rapidos(target_limpo)
-    # Sherlock consulta sua lista de sites suportados em um processo isolado;
-    # o limite total encerra o processo e preserva resultados parciais.
+    # Maigret amplia a busca para milhares de sites. A opção de todos os
+    # sites pode ser ativada no ambiente sem alterar o código do bot.
     try:
-        metric_inc("sherlock_attempts")
-        timeout_sherlock = timeout_sherlock_efetivo()
-        resultado_sherlock = consultar_username(
+        metric_inc("maigret_attempts")
+        todos_os_sites = os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"}
+        # O Maigret não vinha concluindo antes de 25 s; limitar essa espera
+        # para o catálogo interno poder responder rapidamente como fallback.
+        timeout_maigret = timeout_maigret_efetivo()
+        resultado_maigret = consultar_username(
             target_limpo,
-            timeout=timeout_sherlock,
-            site_timeout=max(1, min(CFG.SHERLOCK_SITE_TIMEOUT, 5)),
+            todos_os_sites=todos_os_sites,
+            timeout=timeout_maigret,
         )
-        resultados_sherlock = {}
-        for item in resultado_sherlock.encontrados:
-            nome = item.get("site") or item.get("name") or "Sherlock"
-            url = item.get("url") or item.get("profile_url") or ""
-            resultados_sherlock[str(nome)] = {
+        resultados_maigret = {}
+        for item in resultado_maigret.encontrados:
+            nome = item.get("site") or item.get("name") or item.get("title") or "Maigret"
+            url = item.get("url") or item.get("link") or item.get("profile_url") or ""
+            resultados_maigret[str(nome)] = {
                 "exists": True,
                 "status": item.get("status", "found"),
                 "url": url,
-                "source": "Sherlock",
+                "source": "Maigret",
                 "category": categoria_fonte(str(nome), url, item.get("status", "found")),
             }
-        if resultados_sherlock:
-            metric_inc("sherlock_successes")
-            cache_put(target_limpo, query_type, resultados_sherlock)
-            return resultados_sherlock
-        if resultado_sherlock.erro:
-            logger.warning("Sherlock retornou apenas resultado parcial vazio: %s", resultado_sherlock.erro)
+        if resultados_maigret:
+            metric_inc("maigret_successes")
+            cache_put(target_limpo, query_type, resultados_maigret)
+            return resultados_maigret
+        if resultado_maigret.erro:
+            logger.warning("Maigret sem resultados estruturados: %s", resultado_maigret.erro)
     except TimeoutError as exc:
-        metric_inc("sherlock_timeouts")
-        logger.warning("Sherlock indisponível; usando catálogo interno: %s", exc)
+        metric_inc("maigret_timeouts")
+        logger.warning("Maigret indisponível; usando catálogo interno: %s", exc)
     except (RuntimeError, ValueError) as exc:
-        logger.warning("Sherlock indisponível; usando catálogo interno: %s", exc)
+        logger.warning("Maigret indisponível; usando catálogo interno: %s", exc)
 
-    # Mantém o comportamento anterior quando Sherlock falha ou não acha perfis.
-    metric_inc("sherlock_fallbacks")
+    # Mantém o comportamento anterior quando a dependência não está
+    # disponível, há timeout ou a versão instalada não retorna NDJSON.
+    metric_inc("maigret_fallbacks")
     try:
         resultado = asyncio.run(asyncio.wait_for(consultar_alvo_async(target_limpo), timeout=8))
         cache_put(target_limpo, query_type, resultado)
         return resultado
     except Exception as exc:
-        metric_inc("sherlock_fallbacks")
+        metric_inc("maigret_fallbacks")
         logger.warning("Fallback online demorou ou falhou; usando relatório rápido: %s", exc)
         resultado = resultados_username_rapidos(target_limpo)
         cache_put(target_limpo, query_type, resultado)
@@ -1667,9 +1650,9 @@ def healthz():
         "telegram_configured": bool(CFG.TELEGRAM_TOKEN),
         "mercadopago_configured": bool(CFG.MERCADOPAGO_ACCESS_TOKEN),
         "channel_configured": bool(CFG.CANAL_PRINCIPAL_ID),
-        "sherlock_enabled": CFG.SHERLOCK_ENABLED,
-        "sherlock_timeout_seconds": timeout_sherlock_efetivo(),
-        "sherlock_site_timeout_seconds": max(1, min(CFG.SHERLOCK_SITE_TIMEOUT, 5)),
+        "maigret_enabled": CFG.MAIGRET_ENABLED,
+        "maigret_all_sites": os.getenv("MAIGRET_ALL_SITES", "0").lower() in {"1", "true", "yes"},
+        "maigret_timeout_seconds": timeout_maigret_efetivo(),
         "consulta_timeout_seconds": CFG.CONSULTA_TIMEOUT,
         "consulta_price_brl": round(CFG.CONSULTA_PRECO, 2),
         "billing_mode": "monthly_pass",
