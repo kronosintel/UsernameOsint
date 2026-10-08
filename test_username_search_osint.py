@@ -25,6 +25,8 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("consulta_price_brl", response.json)
         self.assertEqual(response.json["billing_mode"], "monthly_pass")
         self.assertEqual(response.json["monthly_pass_days"], 30)
+        self.assertEqual(response.json["free_daily_limit"], bot_module.CFG.FREE_DAILY_LIMIT)
+        self.assertFalse(response.json["free_access_requires_channel"])
         self.assertIn("result_cache_seconds", response.json)
         self.assertIn("query_cooldown_seconds", response.json)
         self.assertIn("metrics", response.json)

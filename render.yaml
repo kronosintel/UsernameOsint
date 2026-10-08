@@ -42,6 +42,8 @@ services:
         value: "900"
       - key: QUERY_COOLDOWN_SECONDS
         value: "8"
+      - key: FREE_DAILY_LIMIT
+        value: "5"
       - key: MERCADOPAGO_ACCESS_TOKEN
         sync: false
       - key: PAGAMENTO_EXPIRACAO_MINUTOS

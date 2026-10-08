@@ -91,6 +91,7 @@ class Config:
     CANAL_PROMO_INTERVAL_SECONDS: int = _env_int("CANAL_PROMO_INTERVAL_SECONDS", 259200)
     RESULT_CACHE_SECONDS: int = _env_int("RESULT_CACHE_SECONDS", 900)
     QUERY_COOLDOWN_SECONDS: int = _env_int("QUERY_COOLDOWN_SECONDS", 8)
+    FREE_DAILY_LIMIT: int = _env_int("FREE_DAILY_LIMIT", 5)
 
 CFG = Config()
 
@@ -334,11 +335,18 @@ def usuario_esta_no_canal(user_id: int) -> bool:
         return False
 
 def reivindicar_consulta_gratis(user_id: int) -> bool:
-    """Consome uma única consulta grátis de forma atômica."""
+    """Consome uma consulta da cota diária, com reset por data em Brasília."""
+    hoje = datetime.now(TIMEZONE_BR).date().isoformat()
     with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
         cur = conn.cursor()
-        cur.execute("UPDATE users SET free_used = 1 WHERE user_id = ? AND COALESCE(free_used, 0) = 0", (user_id,))
+        cur.execute("""
+            UPDATE users
+            SET free_used_count = CASE WHEN COALESCE(free_reset_date, '') = ? THEN COALESCE(free_used_count, 0) + 1 ELSE 1 END,
+                free_reset_date = ?
+            WHERE user_id = ?
+              AND (COALESCE(free_reset_date, '') <> ? OR COALESCE(free_used_count, 0) < ?)
+        """, (hoje, hoje, user_id, hoje, max(1, CFG.FREE_DAILY_LIMIT)))
         consumida = cur.rowcount == 1
         conn.commit()
         conn.close()
@@ -346,12 +354,22 @@ def reivindicar_consulta_gratis(user_id: int) -> bool:
 
 
 def devolver_consulta_gratis(user_id: int) -> None:
-    """Devolve a consulta grátis quando a execução falha antes do relatório."""
+    """Devolve uma unidade da cota diária quando a execução falha."""
+    hoje = datetime.now(TIMEZONE_BR).date().isoformat()
     db_execute(
-        "UPDATE users SET free_used = 0 WHERE user_id = ? AND COALESCE(free_used, 0) = 1",
-        (user_id,),
+        "UPDATE users SET free_used_count = MAX(0, COALESCE(free_used_count, 0) - 1) "
+        "WHERE user_id = ? AND free_reset_date = ? AND COALESCE(free_used_count, 0) > 0",
+        (user_id, hoje),
         commit=True,
     )
+
+def consultas_gratis_restantes(user_id: int) -> int:
+    """Retorna quantas consultas gratuitas ainda estão disponíveis hoje."""
+    hoje = datetime.now(TIMEZONE_BR).date().isoformat()
+    row = db_execute("SELECT free_used_count, free_reset_date FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    if not row or row[1] != hoje:
+        return max(0, CFG.FREE_DAILY_LIMIT)
+    return max(0, CFG.FREE_DAILY_LIMIT - (row[0] or 0))
 
 def acesso_mensal_ativo(user_id: int) -> tuple[bool, datetime | None]:
     """Retorna se o usuário tem passe pago vigente e sua data de expiração."""
@@ -462,6 +480,16 @@ def init_db():
                 raise
         try:
             cursor.execute("ALTER TABLE users ADD COLUMN pass_reminder_for TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN free_used_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN free_reset_date TEXT")
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
@@ -1124,8 +1152,7 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
             return
         passe_ativo, access_until = acesso_mensal_ativo(user_id)
 
-    membro_canal = False if admin_bypass or passe_ativo else usuario_esta_no_canal(user_id)
-    consulta_gratis = not passe_ativo and membro_canal and reivindicar_consulta_gratis(user_id)
+    consulta_gratis = not admin_bypass and not passe_ativo and reivindicar_consulta_gratis(user_id)
     if not admin_bypass:
         Thread(
             target=enviar_notificacao_evento,
@@ -1157,7 +1184,8 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
 
     if consulta_gratis:
         atualizar_progresso(message, progress_id, "🎁 *Consulta gratuita liberada*\n\n`[██████░░░░]` 60%\nBuscando informações públicas...")
-        bot.send_message(message.chat.id, "🎁 Você está usando sua única consulta gratuita como membro do canal.")
+        restantes = consultas_gratis_restantes(user_id)
+        bot.send_message(message.chat.id, f"🎁 Consulta gratuita liberada. Você ainda tem <b>{restantes}</b> consulta(s) grátis hoje.", parse_mode="HTML")
     elif admin_bypass:
         atualizar_progresso(message, progress_id, "👑 *Acesso administrativo liberado*\n\n`[██████░░░░]` 60%\nBuscando informações públicas...")
     elif passe_ativo:
@@ -1181,7 +1209,7 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
             cabecalho = (
                 "👑 MODO ADMINISTRADOR - CONSULTA LIBERADA"
                 if admin_bypass
-                else "🎁 CONSULTA GRÁTIS PARA MEMBRO DO CANAL"
+                else "🎁 CONSULTA GRÁTIS — COTA DIÁRIA"
             )
             enviar_resultado_telegram(message.chat.id, user_id, target, qtype, resultados, cabecalho)
         else:
@@ -1287,22 +1315,18 @@ if bot:
 
             menu_boas_vindas = (
                 f"👋 Olá, {user_name}!\n\n"
-                f"🎁 Entre no canal oficial para ganhar 1 consulta gratuita.\n\n"
-                f"Depois da consulta gratuita, ative o passe mensal por {_preco_formatado()} e use o bot por {CFG.PASSE_MENSAL_DIAS} dias.\n\n"
+                f"🎁 Você recebe {CFG.FREE_DAILY_LIMIT} consultas gratuitas por dia.\n\n"
+                f"Depois da cota diária, ative o passe mensal por {_preco_formatado()} e use o bot por {CFG.PASSE_MENSAL_DIAS} dias.\n\n"
                 "Comandos disponíveis:\n"
                 "• /user username — fazer uma consulta\n"
                 "• /status — ver seu passe\n"
                 "• /assinar — ativar o passe mensal\n"
                 "• /ajuda — instruções completas\n\n"
-                f"Toque no botão abaixo para entrar e depois confirme sua participação."
+                "Digite /user seguido do username que deseja consultar."
             )
 
             markup = InlineKeyboardMarkup(row_width=1)
-            markup.add(
-                InlineKeyboardButton("📢 Entrar no Canal Oficial", url=f"https://t.me/{CFG.CANAL_TAG_PUBLICO.replace('@','')}"),
-                InlineKeyboardButton("✅ Verificar consulta grátis", callback_data="verificar_gratis"),
-                InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}")
-            )
+            markup.add(InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}"))
             try:
                 logger.info("Enviando menu de boas-vindas: user_id=%s", user_id)
                 bot.send_message(message.chat.id, menu_boas_vindas, reply_markup=markup)
@@ -1331,23 +1355,12 @@ if bot:
     def verificar_consulta_gratis(call):
         user_id = call.from_user.id
         bot.answer_callback_query(call.id)
-        if not usuario_esta_no_canal(user_id):
-            bot.send_message(
-                call.message.chat.id,
-                "Ainda não consegui confirmar sua entrada no canal. Entre pelo botão e toque em verificar novamente.",
-            )
-            return
-        with sqlite_write_lock():
-            conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
-            usado = conn.execute("SELECT COALESCE(free_used, 0), access_until FROM users WHERE user_id = ?", (user_id,)).fetchone()
-            conn.close()
         passe_ativo, access_until = acesso_mensal_ativo(user_id)
         if passe_ativo:
             bot.send_message(call.message.chat.id, f"✅ Seu passe mensal está ativo até {access_until.strftime('%d/%m/%Y %H:%M')}.")
-        elif usado and usado[0]:
-            bot.send_message(call.message.chat.id, f"Sua consulta gratuita já foi usada. O passe mensal custa {_preco_formatado()} e libera consultas por {CFG.PASSE_MENSAL_DIAS} dias.")
         else:
-            bot.send_message(call.message.chat.id, "✅ Entrada confirmada. Sua próxima consulta será gratuita. Use, por exemplo: /user nome_de_usuario")
+            restantes = consultas_gratis_restantes(user_id)
+            bot.send_message(call.message.chat.id, f"🎁 Você tem <b>{restantes}</b> consulta(s) gratuita(s) disponível(is) hoje. Use: /user nome_de_usuario", parse_mode="HTML")
 
     @bot.callback_query_handler(func=lambda call: call.data == "assinar_mensal")
     def callback_assinar_mensal(call):
@@ -1684,6 +1697,8 @@ def healthz():
         "consulta_price_brl": round(CFG.CONSULTA_PRECO, 2),
         "billing_mode": "monthly_pass",
         "monthly_pass_days": CFG.PASSE_MENSAL_DIAS,
+        "free_daily_limit": CFG.FREE_DAILY_LIMIT,
+        "free_access_requires_channel": False,
         "result_cache_seconds": CFG.RESULT_CACHE_SECONDS,
         "query_cooldown_seconds": CFG.QUERY_COOLDOWN_SECONDS,
         "metrics": metricas,
