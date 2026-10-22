@@ -32,6 +32,125 @@ class UsernameSearchTests(unittest.TestCase):
         self.assertIn("metrics", response.json)
         self.assertIn("maigret_fallbacks", response.json["metrics"])
 
+    def test_free_quota_claim_obeys_limit_and_allows_group_bonus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = f"{directory}/quota.db"
+            with patch.object(bot_module.CFG, "DB_FILE", db_path):
+                bot_module.init_db()
+                bot_module.db_execute(
+                    "INSERT INTO users (user_id, created_at) VALUES (?, ?)",
+                    (123, bot_module.datetime.now(bot_module.TIMEZONE_BR).isoformat()),
+                    commit=True,
+                )
+                self.assertTrue(bot_module.reivindicar_consulta_gratis(123, 2))
+                self.assertTrue(bot_module.reivindicar_consulta_gratis(123, 2))
+                self.assertFalse(bot_module.reivindicar_consulta_gratis(123, 2))
+                self.assertTrue(bot_module.reivindicar_consulta_gratis(123, 3))
+                self.assertFalse(bot_module.reivindicar_consulta_gratis(123, 3))
+
+    def test_group_member_receives_one_extra_free_query_after_two_base_queries(self):
+        message = Mock()
+        message.from_user.id = 123
+        message.chat.id = 123
+        with (
+            patch.object(bot_module.CFG, "ADMIN_ID", 999),
+            patch.object(bot_module.CFG, "ADMIN_BYPASS_PAYMENT", False),
+            patch.object(bot_module.CFG, "BILLING_MODE", "per_query"),
+            patch.object(bot_module.CFG, "FREE_DAILY_LIMIT", 2),
+            patch.object(bot_module.CFG, "FREE_GROUP_BONUS", 1),
+            patch.object(bot_module, "bot", Mock()),
+            patch.object(bot_module, "db_execute"),
+            patch.object(bot_module, "consulta_em_cooldown", return_value=False),
+            patch.object(bot_module, "acesso_mensal_ativo", return_value=(False, None)),
+            patch.object(bot_module, "usuario_esta_no_canal", return_value=True) as check_group,
+            patch.object(bot_module, "reivindicar_consulta_gratis", side_effect=[False, True]) as claim,
+            patch.object(bot_module, "Thread"),
+            patch.object(bot_module, "atualizar_progresso"),
+            patch.object(bot_module, "executar_varredura_com_timeout", return_value={}),
+            patch.object(bot_module, "enviar_resultado_telegram"),
+        ):
+            bot_module._processar_busca(message, "alice")
+        self.assertEqual(claim.call_args_list[0].args, (123, 2))
+        self.assertEqual(claim.call_args_list[1].args, (123, 3))
+        self.assertEqual(check_group.call_count, 2)
+        self.assertTrue(all(call.args == (123,) for call in check_group.call_args_list))
+
+    def test_membership_verification_failure_never_creates_paid_checkout(self):
+        message = Mock()
+        message.from_user.id = 123
+        message.chat.id = 123
+        with (
+            patch.object(bot_module.CFG, "ADMIN_ID", 999),
+            patch.object(bot_module.CFG, "ADMIN_BYPASS_PAYMENT", False),
+            patch.object(bot_module.CFG, "BILLING_MODE", "per_query"),
+            patch.object(bot_module, "bot", Mock()),
+            patch.object(bot_module, "db_execute"),
+            patch.object(bot_module, "consulta_em_cooldown", return_value=False),
+            patch.object(bot_module, "acesso_mensal_ativo", return_value=(False, None)),
+            patch.object(bot_module, "reivindicar_consulta_gratis", return_value=False),
+            patch.object(bot_module, "usuario_esta_no_canal", return_value=None),
+            patch.object(bot_module, "criar_preferencia_pagamento") as create_checkout,
+        ):
+            bot_module._processar_busca(message, "alice")
+        create_checkout.assert_not_called()
+
+    def test_paid_query_checkout_is_one_brl_consultation(self):
+        message = Mock()
+        message.from_user.id = 123
+        response = Mock()
+        response.json.return_value = {"init_point": "https://checkout.example/one-query"}
+        with (
+            patch.object(bot_module.CFG, "BILLING_MODE", "per_query"),
+            patch.object(bot_module.CFG, "CONSULTA_PRECO", 1.0),
+            patch.object(bot_module.CFG, "MERCADOPAGO_ACCESS_TOKEN", "test-token"),
+            patch.object(bot_module, "db_execute") as db_execute,
+            patch.object(bot_module.requests, "post", return_value=response) as post,
+        ):
+            checkout = bot_module.criar_preferencia_pagamento(message, "alice", "username")
+        self.assertEqual(checkout[1], "https://checkout.example/one-query")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["items"][0]["unit_price"], 1.0)
+        self.assertEqual(payload["items"][0]["quantity"], 1)
+        self.assertIn("Uma consulta", payload["items"][0]["description"])
+        self.assertEqual(db_execute.call_args_list[0].args[1][-1], "paid_query")
+
+    def test_paid_query_payment_is_idempotent_and_does_not_grant_monthly_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = f"{directory}/paid-query.db"
+            with patch.object(bot_module.CFG, "DB_FILE", db_path):
+                bot_module.init_db()
+                bot_module.db_execute(
+                    "INSERT INTO users (user_id, created_at) VALUES (?, ?)",
+                    (123, bot_module.datetime.now(bot_module.TIMEZONE_BR).isoformat()),
+                    commit=True,
+                )
+                bot_module.db_execute(
+                    "INSERT INTO payments (payment_id, user_id, target_username, amount, status, query_type, created_at, external_reference, expires_at, product_type) "
+                    "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+                    ("mp_ref", 123, "alice", 1.0, "username", bot_module.datetime.now(bot_module.TIMEZONE_BR).isoformat(), "ref", (bot_module.datetime.now(bot_module.TIMEZONE_BR) + bot_module.timedelta(minutes=30)).isoformat(), "paid_query"),
+                    commit=True,
+                )
+                with patch.object(bot_module, "bot", Mock()), patch.object(bot_module, "Thread") as thread:
+                    self.assertTrue(bot_module.liberar_consulta_paga("ref", "provider-1", "approved", 1.0, "BRL"))
+                    self.assertFalse(bot_module.liberar_consulta_paga("ref", "provider-1", "approved", 1.0, "BRL"))
+                self.assertEqual(thread.call_count, 1)
+                self.assertEqual(bot_module.db_execute("SELECT access_until FROM users WHERE user_id = ?", (123,), fetchone=True), (None,))
+                self.assertEqual(bot_module.db_execute("SELECT status FROM payments WHERE external_reference = ?", ("ref",), fetchone=True), ("approved",))
+
+    def test_paid_query_rejects_amount_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = f"{directory}/mismatch.db"
+            with patch.object(bot_module.CFG, "DB_FILE", db_path):
+                bot_module.init_db()
+                bot_module.db_execute(
+                    "INSERT INTO payments (payment_id, user_id, target_username, amount, status, query_type, created_at, external_reference, product_type) "
+                    "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                    ("mp_ref", 123, "alice", 1.0, "username", bot_module.datetime.now(bot_module.TIMEZONE_BR).isoformat(), "ref", "paid_query"),
+                    commit=True,
+                )
+                self.assertFalse(bot_module.liberar_consulta_paga("ref", "provider-1", "approved", 6.9, "BRL"))
+                self.assertEqual(bot_module.db_execute("SELECT status FROM payments WHERE external_reference = ?", ("ref",), fetchone=True), ("amount_mismatch",))
+
     def test_effective_maigret_timeout_is_capped_for_speed(self):
         with (
             patch.object(bot_module.CFG, "MAIGRET_TIMEOUT", 25),

@@ -239,3 +239,12 @@ As plataformas podem alterar HTML, redirecionamentos e políticas anti-automaç�
 Licença
 
 Consulte LICENSE.
+
+
+## Cotas grátis e cobrança por consulta
+
+O modo comercial é controlado por `BILLING_MODE`. Em `per_query`, a pessoa recebe `FREE_DAILY_LIMIT` consultas grátis por dia e `FREE_GROUP_BONUS` adicional enquanto o bot consegue confirmar que ela é membro de `CANAL_PRINCIPAL_ID`; após isso, cada consulta iniciada pelo comando `/user username` gera um checkout individual do Mercado Pago por `CONSULTA_PRECO` BRL. O bônus de grupo é diário, não acumulável, e é verificado no momento da consulta. O bot precisa conseguir consultar a associação no Telegram; se a consulta ao Telegram falhar, não cobra e pede para tentar novamente. Para verificação confiável, o bot deve estar no grupo e ter permissões suficientes para consultar membros.
+
+Cada pagamento individual fica vinculado ao username enviado e só libera uma consulta após o webhook confirmar status aprovado, moeda BRL e valor idêntico ao pedido. Notificações repetidas do Mercado Pago não duplicam a execução. Se o pagamento for aprovado mas a consulta falhar, o bot avisa a pessoa para não pagar novamente e entrar em contato com o suporte. Passes mensais comprados antes da mudança continuam válidos até o vencimento; novos pagamentos mensais não são oferecidos no modo `per_query`.
+
+Variáveis relevantes: `BILLING_MODE=per_query`, `FREE_DAILY_LIMIT=2`, `FREE_GROUP_BONUS=1` e `CONSULTA_PRECO=1.00`. `/status` mostra a cota gratuita disponível; `/assinar` não cria uma cobrança sem username e orienta a usar `/user`. O grupo pode ser definido em `FREE_BONUS_CHAT_ID`; se a variável estiver ausente ou vazia, o bot usa o `CANAL_PRINCIPAL_ID` já configurado. O ID deve ser de um grupo/canal ao qual o bot tenha acesso e permissão suficiente para consultar membros.

@@ -72,9 +72,11 @@ class Config:
     ADMIN_ID: int = _env_int("ADMIN_ID", 0)
     CANAL_TAG_PUBLICO: str = os.getenv("CANAL_TAG_PUBLICO", "@kronosinteloficial")
     CANAL_PRINCIPAL_ID: str = os.getenv("CANAL_PRINCIPAL_ID", "").strip()
+    FREE_BONUS_CHAT_ID: str = os.getenv("FREE_BONUS_CHAT_ID", "").strip() or os.getenv("CANAL_PRINCIPAL_ID", "").strip()
     GRUPO_LOGS_ID: str = os.getenv("GRUPO_LOGS_ID", "").strip()
-    CONSULTA_PRECO: float = _env_float("CONSULTA_PRECO", 5.90)
+    CONSULTA_PRECO: float = _env_float("CONSULTA_PRECO", 6.90)
     PASSE_MENSAL_DIAS: int = _env_int("PASSE_MENSAL_DIAS", 30)
+    BILLING_MODE: str = os.getenv("BILLING_MODE", "monthly_pass").strip().lower()
     MERCADOPAGO_ACCESS_TOKEN: str = os.getenv("MERCADOPAGO_ACCESS_TOKEN", os.getenv("MERCADOPAGO_TOKEN", "")).strip()
     PAGAMENTO_EXPIRACAO_MINUTOS: int = _env_int("PAGAMENTO_EXPIRACAO_MINUTOS", 30)
     ADMIN_BYPASS_PAYMENT: bool = os.getenv("ADMIN_BYPASS_PAYMENT", "1").lower() in {"1", "true", "yes"}
@@ -92,6 +94,7 @@ class Config:
     RESULT_CACHE_SECONDS: int = _env_int("RESULT_CACHE_SECONDS", 900)
     QUERY_COOLDOWN_SECONDS: int = _env_int("QUERY_COOLDOWN_SECONDS", 8)
     FREE_DAILY_LIMIT: int = _env_int("FREE_DAILY_LIMIT", 5)
+    FREE_GROUP_BONUS: int = _env_int("FREE_GROUP_BONUS", 1)
 
 CFG = Config()
 
@@ -324,33 +327,43 @@ def enviar_notificacao_evento(evento: str, message, consulta: str = "-", alvo: s
         except Exception as exc:
             logger.warning("Falha ao enviar log para %s: %s", destino, exc)
 
-def usuario_esta_no_canal(user_id: int) -> bool:
-    if not bot or not CFG.CANAL_PRINCIPAL_ID:
+def usuario_esta_no_canal(user_id: int) -> bool | None:
+    """Retorna True/False; None indica que não foi possível verificar no Telegram."""
+    if not bot or not CFG.FREE_BONUS_CHAT_ID:
         return False
     try:
-        membro = bot.get_chat_member(CFG.CANAL_PRINCIPAL_ID, user_id)
-        return membro.status in {"member", "administrator", "creator"}
-    except Exception as exc:
-        logger.warning("Não foi possível validar entrada no canal: %s", exc)
+        membro = bot.get_chat_member(CFG.FREE_BONUS_CHAT_ID, user_id)
+        if membro.status in {"member", "administrator", "creator"}:
+            return True
+        if membro.status == "restricted":
+            return bool(getattr(membro, "is_member", False))
         return False
+    except Exception as exc:
+        logger.warning("Não foi possível validar participação no grupo principal: %s", type(exc).__name__)
+        return None
 
-def reivindicar_consulta_gratis(user_id: int) -> bool:
-    """Consome uma consulta da cota diária, com reset por data em Brasília."""
+
+
+def reivindicar_consulta_gratis(user_id: int, limite_diario: int | None = None) -> bool:
+    """Consome uma consulta grátis no limite indicado, reiniciado em Brasília."""
     hoje = datetime.now(TIMEZONE_BR).date().isoformat()
+    limite = max(0, CFG.FREE_DAILY_LIMIT if limite_diario is None else int(limite_diario))
     with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE users
-            SET free_used_count = CASE WHEN COALESCE(free_reset_date, '') = ? THEN COALESCE(free_used_count, 0) + 1 ELSE 1 END,
-                free_reset_date = ?
-            WHERE user_id = ?
-              AND (COALESCE(free_reset_date, '') <> ? OR COALESCE(free_used_count, 0) < ?)
-        """, (hoje, hoje, user_id, hoje, max(1, CFG.FREE_DAILY_LIMIT)))
-        consumida = cur.rowcount == 1
-        conn.commit()
-        conn.close()
-        return consumida
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE users
+                SET free_used_count = CASE WHEN COALESCE(free_reset_date, '') = ? THEN COALESCE(free_used_count, 0) + 1 ELSE 1 END,
+                    free_reset_date = ?
+                WHERE user_id = ?
+                  AND (COALESCE(free_reset_date, '') <> ? OR COALESCE(free_used_count, 0) < ?)
+            """, (hoje, hoje, user_id, hoje, limite))
+            consumida = cur.rowcount == 1
+            conn.commit()
+            return consumida
+        finally:
+            conn.close()
 
 
 def devolver_consulta_gratis(user_id: int) -> None:
@@ -364,12 +377,15 @@ def devolver_consulta_gratis(user_id: int) -> None:
     )
 
 def consultas_gratis_restantes(user_id: int) -> int:
-    """Retorna quantas consultas gratuitas ainda estão disponíveis hoje."""
+    """Retorna a cota restante: base diária e bônus se a pessoa estiver no grupo."""
     hoje = datetime.now(TIMEZONE_BR).date().isoformat()
     row = db_execute("SELECT free_used_count, free_reset_date FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if not row or row[1] != hoje:
-        return max(0, CFG.FREE_DAILY_LIMIT)
-    return max(0, CFG.FREE_DAILY_LIMIT - (row[0] or 0))
+    usadas = (row[0] or 0) if row and row[1] == hoje else 0
+    limite = max(0, CFG.FREE_DAILY_LIMIT)
+    membro = usuario_esta_no_canal(user_id) if CFG.BILLING_MODE == "per_query" else False
+    if membro is True:
+        limite += max(0, CFG.FREE_GROUP_BONUS)
+    return max(0, limite - usadas)
 
 def acesso_mensal_ativo(user_id: int) -> tuple[bool, datetime | None]:
     """Retorna se o usuário tem passe pago vigente e sua data de expiração."""
@@ -384,14 +400,16 @@ def acesso_mensal_ativo(user_id: int) -> tuple[bool, datetime | None]:
     return expira > datetime.now(TIMEZONE_BR), expira
 
 def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: str) -> None:
-    """Envia QR do link de checkout e o botão de pagamento."""
+    """Envia QR do link de checkout de consulta avulsa ou passe legado."""
+    produto = "Consulta avulsa" if CFG.BILLING_MODE == "per_query" else "Passe mensal"
+    descricao_acesso = "Uma consulta de username" if CFG.BILLING_MODE == "per_query" else f"Acesso por {CFG.PASSE_MENSAL_DIAS} dias"
     if qrcode is None:
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("💳 Abrir pagamento Mercado Pago", url=checkout_url))
         bot.send_message(
             chat_id,
-            f"🧾 Passe mensal criado\n"
-            f"Acesso por {CFG.PASSE_MENSAL_DIAS} dias\n"
+            f"🧾 {produto} criada\n"
+            f"{descricao_acesso}\n"
             f"Valor: <b>{escaping_html(_preco_formatado())}</b>\n"
             f"Link para copiar: <code>{escaping_html(checkout_url)}</code>",
             reply_markup=markup,
@@ -410,8 +428,8 @@ def enviar_checkout_com_qr(chat_id: int, checkout_url: str, target: str, qtype: 
         chat_id,
         buffer,
         caption=(
-            f"🧾 Passe mensal Kronos Intel\n"
-            f"Acesso a consultas de username por {CFG.PASSE_MENSAL_DIAS} dias\n"
+            f"🧾 {produto} Kronos Intel\n"
+            f"{descricao_acesso}\n"
             f"Valor: <b>{escaping_html(_preco_formatado())}</b>\n\n"
             "Escaneie o QR ou abra o botão abaixo.\n"
             f"Link para copiar manualmente: <code>{escaping_html(checkout_url)}</code>\n"
@@ -524,9 +542,13 @@ def db_execute(query: str, params: tuple = (), fetchone=False, commit=False):
                 conn.close()
 
 def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, str] | None:
-    """Cria um checkout único do Mercado Pago para um passe mensal pré-pago."""
+    """Cria um checkout avulso por consulta ou mantém o passe legado em modo compatível."""
     if not CFG.MERCADOPAGO_ACCESS_TOKEN:
         logger.error("MERCADOPAGO_ACCESS_TOKEN não configurado")
+        return None
+    product_type = "paid_query" if CFG.BILLING_MODE == "per_query" else "monthly_pass"
+    if product_type == "paid_query" and not target:
+        logger.warning("Checkout avulso recusado sem username vinculado")
         return None
 
     reference = secrets.token_urlsafe(18)
@@ -536,16 +558,19 @@ def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, 
     payment_id = f"mp_{reference}"
     db_execute(
         "INSERT INTO payments (payment_id, user_id, target_username, amount, status, token, results_json, query_type, created_at, external_reference, expires_at, reminder_at, reminder_sent, product_type) "
-        "VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?, ?, 0, 'monthly_pass')",
-        (payment_id, message.from_user.id, target, CFG.CONSULTA_PRECO, qtype, agora.isoformat(), reference, expires_at, datetime.fromtimestamp(agora.timestamp() + 600, TIMEZONE_BR).isoformat()),
+        "VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?, ?, 0, ?)",
+        (payment_id, message.from_user.id, target, CFG.CONSULTA_PRECO, qtype, agora.isoformat(), reference, expires_at, datetime.fromtimestamp(agora.timestamp() + 600, TIMEZONE_BR).isoformat(), product_type),
         commit=True,
     )
 
     amount = round(CFG.CONSULTA_PRECO, 2)
+    is_query = product_type == "paid_query"
+    title = "Consulta avulsa Kronos Intel" if is_query else f"Passe mensal Kronos Intel — {CFG.PASSE_MENSAL_DIAS} dias"
+    description = "Uma consulta de username solicitada pelo bot." if is_query else f"Acesso a consultas de username durante {CFG.PASSE_MENSAL_DIAS} dias."
     payload = {
         "items": [{
-            "title": f"Passe mensal Kronos Intel — {CFG.PASSE_MENSAL_DIAS} dias",
-            "description": "Acesso a consultas de username durante 30 dias após a aprovação.",
+            "title": title,
+            "description": description,
             "quantity": 1,
             "currency_id": "BRL",
             "unit_price": amount,
@@ -581,69 +606,103 @@ def criar_preferencia_pagamento(message, target: str, qtype: str) -> tuple[str, 
         db_execute("UPDATE payments SET status = 'creation_error' WHERE external_reference = ?", (reference,), commit=True)
         return None
 
-def liberar_consulta_paga(reference: str, provider_payment_id: str, status: str) -> bool:
-    """Confirma o pagamento e ativa o passe mensal do usuário de forma idempotente."""
+def liberar_consulta_paga(
+    reference: str,
+    provider_payment_id: str,
+    status: str,
+    transaction_amount: float | None = None,
+    currency_id: str | None = None,
+) -> bool:
+    """Confirma cobrança, valida valor/moeda e entrega consulta ou passe legado uma única vez."""
     row = db_execute(
-        "SELECT user_id, target_username, query_type, status, expires_at FROM payments WHERE external_reference = ?",
+        "SELECT user_id, target_username, query_type, status, expires_at, amount, product_type "
+        "FROM payments WHERE external_reference = ?",
         (reference,), fetchone=True,
     )
-    if not row or row[3] in {"approved", "processing"}:
+    if not row or row[3] in {"approved", "processing", "query_processing", "completed", "query_error"}:
         return False
     if status != "approved":
-        db_execute("UPDATE payments SET status = ?, provider_payment_id = ? WHERE external_reference = ?", (status, provider_payment_id, reference), commit=True)
+        terminal_statuses = {"rejected", "cancelled", "refunded", "charged_back"}
+        stored_status = status if status in terminal_statuses else "pending"
+        db_execute("UPDATE payments SET status = ?, provider_payment_id = ? WHERE external_reference = ?", (stored_status, provider_payment_id, reference), commit=True)
         return False
 
-    user_id, target, qtype, _, expires_at = row
+    user_id, target, qtype, _, expires_at, expected_amount, product_type = row
+    product_type = product_type or "monthly_pass"
+    if currency_id != "BRL" or transaction_amount is None or round(float(transaction_amount), 2) != round(float(expected_amount), 2):
+        logger.error("Pagamento Mercado Pago não corresponde ao pedido: reference=%s currency=%s", reference, currency_id)
+        db_execute(
+            "UPDATE payments SET status = 'amount_mismatch', provider_payment_id = ? WHERE external_reference = ? AND status = 'pending'",
+            (provider_payment_id, reference), commit=True,
+        )
+        return False
+    if product_type == "paid_query" and not target:
+        logger.error("Pagamento avulso sem username vinculado: reference=%s", reference)
+        db_execute("UPDATE payments SET status = 'fulfillment_error', provider_payment_id = ? WHERE external_reference = ?", (provider_payment_id, reference), commit=True)
+        return False
     if expires_at and datetime.fromisoformat(expires_at) < datetime.now(TIMEZONE_BR):
         db_execute("UPDATE payments SET status = 'expired', provider_payment_id = ? WHERE external_reference = ?", (provider_payment_id, reference), commit=True)
         return False
 
     with sqlite_write_lock():
         conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE payments SET status = 'processing', provider_payment_id = ? "
-            "WHERE external_reference = ? AND status = 'pending'",
-            (provider_payment_id, reference),
-        )
-        claimed = cur.rowcount == 1
-        conn.commit()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE payments SET status = 'processing', provider_payment_id = ? "
+                "WHERE external_reference = ? AND status = 'pending'",
+                (provider_payment_id, reference),
+            )
+            claimed = cur.rowcount == 1
+            conn.commit()
+        finally:
+            conn.close()
     if not claimed:
         return False
+
+    if product_type == "paid_query":
+        db_execute("UPDATE payments SET status = 'approved' WHERE external_reference = ? AND status = 'processing'", (reference,), commit=True)
+        if bot:
+            try:
+                bot.send_message(user_id, f"✅ Pagamento de {_preco_formatado()} confirmado. Vou executar a consulta solicitada agora.")
+            except Exception as exc:
+                logger.warning("Falha ao enviar confirmação de consulta paga: %s", type(exc).__name__)
+            Thread(target=executar_e_entregar_pos_pagamento, args=(user_id, target, qtype, reference), daemon=True).start()
+        return True
 
     try:
         agora = datetime.now(TIMEZONE_BR)
         with sqlite_write_lock():
             conn = sqlite3.connect(CFG.DB_FILE, timeout=30.0)
-            cur = conn.cursor()
-            cur.execute("BEGIN IMMEDIATE")
-            access_row = cur.execute("SELECT access_until FROM users WHERE user_id = ?", (user_id,)).fetchone()
-            base = agora
-            if access_row and access_row[0]:
-                try:
-                    base = max(agora, datetime.fromisoformat(access_row[0]))
-                except (TypeError, ValueError):
-                    logger.warning("Ignorando access_until inválido para user_id=%s", user_id)
-            access_until = base + timedelta(days=CFG.PASSE_MENSAL_DIAS)
-            cur.execute("UPDATE users SET access_until = ? WHERE user_id = ?", (access_until.isoformat(), user_id))
-            cur.execute(
-                "UPDATE payments SET status = 'approved', provider_payment_id = ? WHERE external_reference = ? AND status = 'processing'",
-                (provider_payment_id, reference),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                access_row = cur.execute("SELECT access_until FROM users WHERE user_id = ?", (user_id,)).fetchone()
+                base = agora
+                if access_row and access_row[0]:
+                    try:
+                        base = max(agora, datetime.fromisoformat(access_row[0]))
+                    except (TypeError, ValueError):
+                        logger.warning("Ignorando access_until inválido para user_id=%s", user_id)
+                access_until = base + timedelta(days=CFG.PASSE_MENSAL_DIAS)
+                cur.execute("UPDATE users SET access_until = ? WHERE user_id = ?", (access_until.isoformat(), user_id))
+                cur.execute(
+                    "UPDATE payments SET status = 'approved', provider_payment_id = ? WHERE external_reference = ? AND status = 'processing'",
+                    (provider_payment_id, reference),
+                )
+                conn.commit()
+            finally:
+                conn.close()
     except Exception as exc:
-        logger.exception("Falha ao ativar passe mensal %s: %s", reference, exc)
+        logger.exception("Falha ao ativar passe legado %s: %s", reference, exc)
         db_execute("UPDATE payments SET status = 'activation_error' WHERE external_reference = ? AND status = 'processing'", (reference,), commit=True)
         return False
     if bot:
         bot.send_message(
             user_id,
-            f"✅ <b>Passe mensal ativado!</b>\n\n"
-            f"Você pode fazer consultas de username por {CFG.PASSE_MENSAL_DIAS} dias.\n"
-            f"Acesso válido até: <b>{access_until.strftime('%d/%m/%Y %H:%M')}</b>\n\n"
-            "Envie agora o username que deseja consultar.",
+            f"✅ Passe mensal comprado anteriormente ativado!\n\n"
+            f"Acesso válido até: <b>{access_until.strftime('%d/%m/%Y %H:%M')}</b>.\n"
+            "Novos pagamentos são por consulta avulsa.",
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -1088,20 +1147,37 @@ def enviar_resultado_telegram(chat_id: int, user_id: int, target: str, qtype: st
     metric_inc("reports_delivered")
     return link_web
 
-def executar_e_entregar_pos_pagamento(user_id: int, target: str, qtype: str) -> None:
-    """Executa automaticamente a consulta que originou o checkout aprovado."""
+def executar_e_entregar_pos_pagamento(
+    user_id: int,
+    target: str,
+    qtype: str,
+    payment_reference: str | None = None,
+) -> None:
+    """Executa consulta paga uma vez ou entrega consulta incluída em passe legado."""
     if not bot or not target:
         return
     try:
-        bot.send_message(user_id, "🔎 Pagamento aprovado. Vou concluir agora a consulta que você solicitou...")
+        if payment_reference:
+            db_execute("UPDATE payments SET status = 'query_processing' WHERE external_reference = ? AND status = 'approved'", (payment_reference,), commit=True)
+            bot.send_message(user_id, "🔎 Pagamento confirmado. Estou executando sua consulta de username...")
+            header = f"✅ CONSULTA AVULSA PAGA — {_preco_formatado()}"
+        else:
+            bot.send_message(user_id, "🔎 Passe aprovado. Vou concluir agora a consulta solicitada...")
+            header = "✅ Passe mensal ativado"
         resultados = executar_varredura_com_timeout(target, qtype)
-        enviar_resultado_telegram(user_id, user_id, target, qtype, resultados, "✅ Passe mensal ativado")
+        enviar_resultado_telegram(user_id, user_id, target, qtype, resultados, header)
+        if payment_reference:
+            db_execute("UPDATE payments SET status = 'completed' WHERE external_reference = ? AND status = 'query_processing'", (payment_reference,), commit=True)
     except Exception as exc:
-        logger.exception("Falha ao retomar consulta após pagamento: %s", exc)
+        logger.exception("Falha ao executar consulta vinculada a pagamento: %s", exc)
         try:
-            bot.send_message(user_id, "⚠️ O passe foi ativado, mas a consulta automática não terminou. Envie o username novamente para tentar outra vez.")
+            if payment_reference:
+                db_execute("UPDATE payments SET status = 'query_error' WHERE external_reference = ? AND status IN ('approved', 'query_processing')", (payment_reference,), commit=True)
+                bot.send_message(user_id, "⚠️ O pagamento foi aprovado, mas não consegui concluir a consulta. Não pague novamente por esta mesma solicitação; fale com o suporte para receber a consulta incluída no pagamento.")
+            else:
+                bot.send_message(user_id, "⚠️ Seu passe foi ativado, mas a consulta automática não terminou. Fale com o suporte para concluir esta solicitação.")
         except Exception:
-            logger.exception("Falha ao avisar usuário sobre erro pós-pagamento")
+            logger.exception("Falha ao registrar ou avisar sobre erro pós-pagamento")
 
 def atualizar_progresso(message, progress_id: int | None, texto: str) -> None:
     if not bot or not progress_id:
@@ -1152,7 +1228,17 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
             return
         passe_ativo, access_until = acesso_mensal_ativo(user_id)
 
-    consulta_gratis = not admin_bypass and not passe_ativo and reivindicar_consulta_gratis(user_id)
+    consulta_gratis = False
+    if not admin_bypass and not passe_ativo:
+        consulta_gratis = reivindicar_consulta_gratis(user_id, CFG.FREE_DAILY_LIMIT)
+        if not consulta_gratis and CFG.BILLING_MODE == "per_query":
+            membro = usuario_esta_no_canal(user_id)
+            if membro is None:
+                bot.send_message(message.chat.id, "⚠️ Não consegui verificar sua participação no grupo principal agora. Não foi cobrada nenhuma consulta; tente novamente em instantes.")
+                return
+            if membro and CFG.FREE_GROUP_BONUS > 0:
+                limite_com_bonus = CFG.FREE_DAILY_LIMIT + CFG.FREE_GROUP_BONUS
+                consulta_gratis = reivindicar_consulta_gratis(user_id, limite_com_bonus)
     if not admin_bypass:
         Thread(
             target=enviar_notificacao_evento,
@@ -1165,8 +1251,8 @@ def _processar_busca(message, raw_target: str, qtype: str = "username", progress
         atualizar_progresso(message, progress_id, f"💳 *Gerando cobrança*\n\n`[████░░░░░░]` 40%\nValor: *{_preco_formatado()}*")
         bot.send_message(
             message.chat.id,
-            f"⏳ Consulta `{qtype.upper()}` recebida.\n"
-            f"💳 O passe mensal custa *{_preco_formatado()}* e libera consultas por {CFG.PASSE_MENSAL_DIAS} dias. Gerando pagamento...",
+            f"⏳ Consulta `{qtype.upper()}` recebida.\n" +
+            (f"💳 Esta consulta custa *{_preco_formatado()}*. Gerando pagamento..." if CFG.BILLING_MODE == "per_query" else f"💳 O passe mensal custa *{_preco_formatado()}* e libera consultas por {CFG.PASSE_MENSAL_DIAS} dias. Gerando pagamento..."),
             parse_mode="Markdown",
         )
         checkout = criar_preferencia_pagamento(message, target, qtype)
@@ -1313,17 +1399,30 @@ if bot:
 
             logger.info("/start iniciado: user_id=%s", user_id)
 
-            menu_boas_vindas = (
-                f"👋 Olá, {user_name}!\n\n"
-                f"🎁 Você recebe {CFG.FREE_DAILY_LIMIT} consultas gratuitas por dia.\n\n"
-                f"Depois da cota diária, ative o passe mensal por {_preco_formatado()} e use o bot por {CFG.PASSE_MENSAL_DIAS} dias.\n\n"
-                "Comandos disponíveis:\n"
-                "• /user username — fazer uma consulta\n"
-                "• /status — ver seu passe\n"
-                "• /assinar — ativar o passe mensal\n"
-                "• /ajuda — instruções completas\n\n"
-                "Digite /user seguido do username que deseja consultar."
-            )
+            if CFG.BILLING_MODE == "per_query":
+                menu_boas_vindas = (
+                    f"👋 Olá, {user_name}!\n\n"
+                    f"🎁 Você tem {CFG.FREE_DAILY_LIMIT} consultas grátis por dia.\n"
+                    f"👥 Se for membro do grupo principal, ganha mais {CFG.FREE_GROUP_BONUS} consulta(s) grátis por dia.\n"
+                    f"Depois disso, cada consulta custa {_preco_formatado()}.\n\n"
+                    "Comandos disponíveis:\n"
+                    "• /user username — consultar username\n"
+                    "• /status — ver consultas grátis restantes\n"
+                    "• /ajuda — instruções\n\n"
+                    "Digite /user seguido do username que deseja consultar."
+                )
+            else:
+                menu_boas_vindas = (
+                    f"👋 Olá, {user_name}!\n\n"
+                    f"🎁 Você recebe {CFG.FREE_DAILY_LIMIT} consultas gratuitas por dia.\n\n"
+                    f"Depois da cota diária, ative o passe mensal por {_preco_formatado()} e use o bot por {CFG.PASSE_MENSAL_DIAS} dias.\n\n"
+                    "Comandos disponíveis:\n"
+                    "• /user username — fazer uma consulta\n"
+                    "• /status — ver seu passe\n"
+                    "• /assinar — ativar o passe mensal\n"
+                    "• /ajuda — instruções completas\n\n"
+                    "Digite /user seguido do username que deseja consultar."
+                )
 
             markup = InlineKeyboardMarkup(row_width=1)
             markup.add(InlineKeyboardButton("💬 Suporte", url=f"https://t.me/{CFG.SUPORTE_USERNAME}"))
@@ -1357,14 +1456,20 @@ if bot:
         bot.answer_callback_query(call.id)
         passe_ativo, access_until = acesso_mensal_ativo(user_id)
         if passe_ativo:
-            bot.send_message(call.message.chat.id, f"✅ Seu passe mensal está ativo até {access_until.strftime('%d/%m/%Y %H:%M')}.")
+            bot.send_message(call.message.chat.id, f"✅ Seu passe mensal já comprado continua ativo até {access_until.strftime('%d/%m/%Y %H:%M')}.")
+        elif CFG.BILLING_MODE == "per_query":
+            restantes = consultas_gratis_restantes(user_id)
+            bot.send_message(call.message.chat.id, f"🎁 Você tem <b>{restantes}</b> consulta(s) grátis hoje. Membro do grupo principal recebe mais {CFG.FREE_GROUP_BONUS} por dia. Depois, cada consulta custa {_preco_formatado()}. Use /user nome_de_usuario.", parse_mode="HTML")
         else:
             restantes = consultas_gratis_restantes(user_id)
-            bot.send_message(call.message.chat.id, f"🎁 Você tem <b>{restantes}</b> consulta(s) gratuita(s) disponível(is) hoje. Use: /user nome_de_usuario", parse_mode="HTML")
+            bot.send_message(call.message.chat.id, f"🎁 Você tem <b>{restantes}</b> consulta(s) grátis hoje. Depois da cota, use /assinar para ativar o passe mensal.", parse_mode="HTML")
 
     @bot.callback_query_handler(func=lambda call: call.data == "assinar_mensal")
     def callback_assinar_mensal(call):
         bot.answer_callback_query(call.id)
+        if CFG.BILLING_MODE == "per_query":
+            bot.send_message(call.message.chat.id, f"As consultas são avulsas: use /user username. Depois das consultas grátis, cada consulta custa {_preco_formatado()}.")
+            return
         user_id = call.from_user.id
         ativo, expira = acesso_mensal_ativo(user_id)
         if ativo and expira:
@@ -1388,7 +1493,10 @@ if bot:
             ativo, expira = acesso_mensal_ativo(user_id)
             if ativo and expira:
                 restante = max(0, (expira - datetime.now(TIMEZONE_BR)).days)
-                bot.send_message(message.chat.id, f"✅ <b>Passe mensal ativo</b>\n\nVálido até: <b>{expira.strftime('%d/%m/%Y %H:%M')}</b>\nDias restantes: <b>{restante}</b>\n\nVocê pode consultar usernames sem nova cobrança.", parse_mode="HTML")
+                bot.send_message(message.chat.id, f"✅ <b>Passe mensal comprado anteriormente, ainda ativo</b>\n\nVálido até: <b>{expira.strftime('%d/%m/%Y %H:%M')}</b>\nDias restantes: <b>{restante}</b>", parse_mode="HTML")
+            elif CFG.BILLING_MODE == "per_query":
+                restantes = consultas_gratis_restantes(user_id)
+                bot.send_message(message.chat.id, f"🎁 <b>Consultas grátis restantes hoje: {restantes}</b>\nMembro do grupo principal: até {CFG.FREE_DAILY_LIMIT + CFG.FREE_GROUP_BONUS} grátis por dia.\nApós isso, cada consulta custa {_preco_formatado()}.\nUse /user username.", parse_mode="HTML")
             else:
                 markup = InlineKeyboardMarkup(row_width=1)
                 markup.add(InlineKeyboardButton(f"💳 Ativar passe por {_preco_formatado()}", callback_data="assinar_mensal"))
@@ -1397,6 +1505,9 @@ if bot:
 
         if cmd == "/assinar":
             user_id = message.from_user.id
+            if CFG.BILLING_MODE == "per_query":
+                bot.send_message(message.chat.id, f"Não há mais passe mensal novo. Use /user username; depois das consultas grátis, cada consulta custa {_preco_formatado()}.")
+                return
             ativo, expira = acesso_mensal_ativo(user_id)
             if ativo and expira:
                 bot.send_message(message.chat.id, f"✅ Seu passe já está ativo até <b>{expira.strftime('%d/%m/%Y %H:%M')}</b>.", parse_mode="HTML")
@@ -1622,19 +1733,26 @@ def webhook_mercadopago():
         status = payment.get("status")
         if not reference:
             return jsonify({"ok": True, "ignored": True}), 200
-        liberado = liberar_consulta_paga(str(reference), str(payment_id), str(status))
+        liberado = liberar_consulta_paga(
+            str(reference), str(payment_id), str(status),
+            transaction_amount=payment.get("transaction_amount"),
+            currency_id=payment.get("currency_id"),
+        )
         if liberado and bot:
             row = db_execute(
-                "SELECT user_id, target_username, query_type, amount FROM payments WHERE external_reference = ?",
+                "SELECT user_id, target_username, query_type, amount, product_type FROM payments WHERE external_reference = ?",
                 (reference,), fetchone=True,
             )
             if row:
                 destinos = [destino for destino in (CFG.CANAL_PRINCIPAL_ID, CFG.GRUPO_LOGS_ID) if destino]
                 valor = f"R$ {float(row[3]):.2f}".replace(".", ",")
+                is_query = row[4] == "paid_query"
+                titulo = "✅ <b>CONSULTA AVULSA PAGA</b>" if is_query else "✅ <b>PASSE MENSAL LEGADO ATIVADO</b>"
+                detalhe = "• Produto: <code>1 consulta</code>" if is_query else f"• Acesso: <code>{CFG.PASSE_MENSAL_DIAS} dias</code>"
                 aviso = (
-                    "✅ <b>PASSE MENSAL ATIVADO</b>\n"
+                    f"{titulo}\n"
                     f"• Usuário ID: <code>{row[0]}</code>\n"
-                    f"• Acesso: <code>{CFG.PASSE_MENSAL_DIAS} dias</code>\n"
+                    f"{detalhe}\n"
                     f"• Valor: <b>{escaping_html(valor)}</b>\n"
                     f"• Pagamento Mercado Pago: <code>{escaping_html(payment_id)}</code>"
                 )
@@ -1695,9 +1813,11 @@ def healthz():
         "maigret_timeout_seconds": timeout_maigret_efetivo(),
         "consulta_timeout_seconds": CFG.CONSULTA_TIMEOUT,
         "consulta_price_brl": round(CFG.CONSULTA_PRECO, 2),
-        "billing_mode": "monthly_pass",
+        "billing_mode": CFG.BILLING_MODE,
         "monthly_pass_days": CFG.PASSE_MENSAL_DIAS,
         "free_daily_limit": CFG.FREE_DAILY_LIMIT,
+        "free_group_bonus_daily": CFG.FREE_GROUP_BONUS,
+        "group_bonus_chat_configured": bool(CFG.FREE_BONUS_CHAT_ID),
         "free_access_requires_channel": False,
         "result_cache_seconds": CFG.RESULT_CACHE_SECONDS,
         "query_cooldown_seconds": CFG.QUERY_COOLDOWN_SECONDS,
@@ -1739,14 +1859,16 @@ def configurar_comandos_telegram() -> None:
     if not bot:
         return
     try:
-        bot.set_my_commands([
+        commands = [
             telebot.types.BotCommand("start", "Iniciar o bot"),
             telebot.types.BotCommand("user", "Consultar um username"),
-            telebot.types.BotCommand("status", "Ver status do passe"),
-            telebot.types.BotCommand("assinar", "Ativar passe mensal"),
+            telebot.types.BotCommand("status", "Ver consultas grátis restantes" if CFG.BILLING_MODE == "per_query" else "Ver status do passe"),
             telebot.types.BotCommand("help", "Ver ajuda"),
             telebot.types.BotCommand("suporte", "Falar com o suporte"),
-        ])
+        ]
+        if CFG.BILLING_MODE != "per_query":
+            commands.append(telebot.types.BotCommand("assinar", "Ativar passe mensal"))
+        bot.set_my_commands(commands)
         logger.info("Comandos do Telegram registrados")
     except Exception as exc:
         logger.warning("Não foi possível registrar os comandos do Telegram: %s", exc)
