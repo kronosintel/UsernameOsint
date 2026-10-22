@@ -34,8 +34,10 @@ services:
         sync: false
       - key: GRUPO_LOGS_ID
         sync: false
+      - key: BILLING_MODE
+        value: "per_query"
       - key: CONSULTA_PRECO
-        value: "6.90"
+        value: "1.00"
       - key: PASSE_MENSAL_DIAS
         value: "30"
       - key: RESULT_CACHE_SECONDS
@@ -43,7 +45,9 @@ services:
       - key: QUERY_COOLDOWN_SECONDS
         value: "8"
       - key: FREE_DAILY_LIMIT
-        value: "5"
+        value: "2"
+      - key: FREE_GROUP_BONUS
+        value: "1"
       - key: MERCADOPAGO_ACCESS_TOKEN
         sync: false
       - key: PAGAMENTO_EXPIRACAO_MINUTOS
